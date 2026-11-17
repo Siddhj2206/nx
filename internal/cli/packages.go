@@ -81,9 +81,11 @@ func (a *app) add(args []string) error {
 	if err != nil {
 		return err
 	}
-	if c := diff(before, after); runErr == nil || !c.empty() {
+	c := diff(before, after)
+	if runErr == nil || !c.empty() {
 		a.report(c, &res, "Nothing added")
 	}
+	a.warnShadowed(c.added, after)
 	if runErr != nil {
 		return runErr
 	}

@@ -36,7 +36,7 @@ leaves the rest to `nix`.
 
 | Command | Does | Runs nix? |
 |---|---|---|
-| `add <name>...` (`install`) | Installs from the pinned nixpkgs. Takes Homebrew spellings (`node@22`). Refuses unfree packages without `--unfree`. Typos get "did you mean" | `nix profile add` |
+| `add <name>...` (`install`) | Installs from the pinned nixpkgs. Takes Homebrew spellings (`node@22`). Refuses unfree packages without `--unfree`. Typos get "did you mean". Warns when an earlier PATH directory has a command of the same name, since that copy is the one that runs | `nix profile add` |
 | `remove <name>...` (`rm`, `uninstall`) | Removes. Space comes back with `clean` | `nix profile remove` |
 | `list` (`ls`) | Installed packages | no |
 | `search <term>...` | Searches the catalog: exact name, then prefix, then name contains, then description; top-level before package sets; 25 shown | no |
@@ -66,6 +66,12 @@ Nix's own messages are reworded or dropped:
 - A download retry, which Nix logs at error level with the URL, becomes
   `! retrying ripgrep · <reason>`.
 - "error (ignored)" messages are dropped, since Nix recovered by itself.
+- After `add`, any of the new package's commands that an earlier PATH
+  directory also provides is listed once per directory:
+  `! clang: addr2line, ar, as, c++, c++filt and 15 more · /usr/bin comes first on PATH, so its copy runs`.
+  The check is generic and names no package. A host that puts the system
+  before the profile (Neptuno does, so a Nix compiler can't replace
+  `/usr/bin/cc`) still lets the user install anything.
 - Lines that aren't JSON are passed through unchanged, so a format change in a
   newer Nix shows Nix's own words instead of nothing.
 
