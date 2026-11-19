@@ -258,6 +258,37 @@ impl Store {
         self.path(sha256).is_dir()
     }
 
+    /// The SHA-256 of every complete entry (staging directories start
+    /// with a dot).
+    pub fn entries(&self) -> Result<Vec<String>> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(Error::Read {
+                    path: self.dir.clone(),
+                    source,
+                });
+            }
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        names.sort_unstable();
+        Ok(names)
+    }
+
+    /// Removes an entry nothing references. Needs the state lock.
+    pub fn remove(&self, _lock: &Lock, sha256: &str) -> Result<()> {
+        let valid = sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit());
+        if !valid {
+            return Err(Error::Invalid(format!("not a SHA-256: {sha256:?}")));
+        }
+        remove_tree(&self.path(sha256))
+    }
+
     /// What the package's signed header said about its scriptlets and
     /// files outside `/usr`, recorded when it was unpacked. `None` for an
     /// entry unpacked before nx read them.

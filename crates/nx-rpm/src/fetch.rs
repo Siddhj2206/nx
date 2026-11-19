@@ -128,6 +128,9 @@ impl Synced {
 /// When to go to the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
+    /// Never: what is cached, however old, or an error. For work that must
+    /// not wait on the network (checking a generation at boot).
+    Never,
     /// Only for repos with nothing cached. What commands do: they never
     /// wait on a download the cache could have answered.
     IfMissing,
@@ -158,7 +161,7 @@ pub fn sync(
             synced.freshness = Freshness::Expired;
         }
         let use_cache = match refresh {
-            Refresh::IfMissing => true,
+            Refresh::Never | Refresh::IfMissing => true,
             Refresh::IfStale => !expired,
             Refresh::Always => false,
         };
@@ -167,6 +170,12 @@ pub fn sync(
         }
     }
 
+    if refresh == Refresh::Never {
+        return Err(Error::Invalid(format!(
+            "no cached metadata for {}, and not going to the network",
+            repo.id
+        )));
+    }
     on_fetch();
     let err = match fetch(repo, http, &dir, cached.as_ref()) {
         Ok(synced) => return Ok(synced),

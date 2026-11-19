@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nx_core::{DeploymentSource, Deployments, Generation, Manifest, OsRelease, RepoEntry, State};
+use nx_core::{
+    Deployment, DeploymentSource, Deployments, Generation, Manifest, OsRelease, RepoEntry, State,
+};
 use nx_rpm::repo::{Added, Repo};
 use nx_rpm::{Freshness, Options, Refresh, Universe, Ureq, Vars};
 
@@ -19,6 +21,9 @@ pub struct Machine {
     pub release: OsRelease,
     /// `None` off a bootc system.
     deployments: Option<Deployments>,
+    /// The image the host tier is resolved for: the booted one, or the one
+    /// a deployment [`targeting`](Machine::targeting) names.
+    digest: Option<String>,
     pub arch: String,
 }
 
@@ -37,19 +42,48 @@ impl Machine {
         } else {
             None
         };
+        let digest = deployments
+            .as_ref()
+            .and_then(|d| d.booted()?.image_digest.clone());
         Ok(Self {
             root: root.to_owned(),
             release,
             deployments,
+            digest,
             arch: std::env::consts::ARCH.to_owned(),
         })
     }
 
-    /// The booted image's digest; `None` off a bootc system. Outside one,
-    /// the installed set is read from the rpmdb each time instead of from a
+    /// This machine as `deployment`'s image will see it: its tree is the
+    /// root (repo files, rpmdb, os-release and keys come from it) and its
+    /// digest is the one generations are keyed by. For re-resolving the host
+    /// tier for a staged or rollback image before it boots.
+    pub fn targeting(&self, deployment: &Deployment) -> Result<Self> {
+        let root = deployment.root(&self.root.join("sysroot"));
+        if !root.join("usr").is_dir() {
+            bail!("can't read the deployment at {}", root.display());
+        }
+        let release = OsRelease::read(&root)
+            .with_context(|| format!("reading the os-release of {}", root.display()))?;
+        Ok(Self {
+            root,
+            release,
+            deployments: None,
+            digest: deployment.image_digest.clone(),
+            arch: self.arch.clone(),
+        })
+    }
+
+    /// The deployments on a bootc system.
+    pub fn deployments(&self) -> Option<&Deployments> {
+        self.deployments.as_ref()
+    }
+
+    /// The image's digest; `None` off a bootc system. Outside one, the
+    /// installed set is read from the rpmdb each time instead of from a
     /// cache.
     pub fn digest(&self) -> Option<String> {
-        self.deployments.as_ref()?.booted()?.image_digest.clone()
+        self.digest.clone()
     }
 
     /// The booted image's own root, for checking what the image ships: the

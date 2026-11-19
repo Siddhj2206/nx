@@ -1,0 +1,18 @@
+[Unit]
+Description=Select the nx generation built for the booted image
+Documentation=https://github.com/Siddhj2206/nx
+# The extension must name its generation before systemd-sysext merges it.
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-sysext.service sysinit.target
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/var/lib/nx/generations
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nx select
+UMask=0002
+# Boot never waits on this, or on the network: it reads local state only.
+
+[Install]
+WantedBy=sysinit.target

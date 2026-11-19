@@ -22,6 +22,8 @@ const PLACEMENT: &[(&str, &str)] = &[
     ("generations", "Maintenance"),
     ("rollback", "Maintenance"),
     ("repo", "Maintenance"),
+    ("sync", "Maintenance"),
+    ("gc", "Maintenance"),
     ("shell", "System"),
     ("status", "System"),
 ];
@@ -184,7 +186,10 @@ mod tests {
 
     #[test]
     fn every_command_is_in_a_listed_group() {
-        for c in Cli::command().get_subcommands() {
+        for c in Cli::command()
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+        {
             assert!(GROUPS.contains(&group(c.get_name())), "{}", c.get_name());
         }
     }

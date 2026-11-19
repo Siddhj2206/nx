@@ -159,16 +159,17 @@ impl<'m> Session<'m> {
         Ok(Resolved { all, new })
     }
 
-    /// Downloads, verifies and unpacks what the store lacks, builds the
-    /// next generation from `manifest` and `all`, and makes it live. A
-    /// generation nxd refuses stays on disk, not current.
-    pub fn install(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
-        let guard = self.guard.take().context("a dry run cannot install")?;
+    /// Downloads, verifies and unpacks what the store lacks and builds the
+    /// next generation from `manifest` and `all`. It stays on disk, not
+    /// current: making it live is [`Session::install`]'s job, or the
+    /// caller's for an image that isn't booted.
+    pub fn build(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
+        let guard = self.guard.take().context("a dry run cannot build")?;
         let mut files = self.fetch(ui, all)?;
         let host = self.unpack(&guard, all, &mut files)?;
         let lock = self.lock(host)?;
         let image_root = self.machine.image_root()?;
-        let built = generation::build(
+        generation::build(
             &self.state,
             &guard,
             &Spec {
@@ -179,13 +180,26 @@ impl<'m> Session<'m> {
                 image_has: &|name| self.universe.in_image(name),
             },
         )
-        .map_err(refusal_error)?;
+        .map_err(refusal_error)
+    }
+
+    /// [`Session::build`], then makes the generation live through nxd. A
+    /// generation nxd refuses stays on disk, not current. The staged and
+    /// rollback images get theirs too (design invariant 6), best effort:
+    /// the change is live either way.
+    pub fn install(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
+        let built = self.build(ui, manifest, all)?;
         crate::live::activate(
             ui,
             &self.state,
             built.generation.number,
             manifest.host.backend,
         )?;
+        if let Err(e) = crate::sync::deployed(ui, self.machine, Refresh::IfMissing) {
+            ui.warn(format_args!(
+                "the staged and rollback images were not updated: {e:#} (nx sync retries)"
+            ));
+        }
         Ok(built)
     }
 

@@ -188,6 +188,13 @@ pub fn date(secs: u64) -> String {
     )
 }
 
+/// `sha256:92409d3fcf8435…` → `sha256:92409d3fcf84`, as short as nx 0.x
+/// showed nixpkgs revisions, long enough to tell images apart.
+pub fn short_digest(digest: &str) -> &str {
+    let end = digest.find(':').map_or(12, |colon| colon + 13);
+    digest.get(..end).unwrap_or(digest)
+}
+
 /// A string's width on screen, ignoring colour codes. Every char counts as
 /// one column.
 pub fn visible_len(s: &str) -> usize {

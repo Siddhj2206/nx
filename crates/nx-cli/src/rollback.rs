@@ -21,21 +21,22 @@ pub fn run(ui: &mut Ui, machine: &Machine, target: Option<u32>, dry_run: bool) -
     let number = pick(&state, &current, target)?;
     let generation =
         Generation::read(&state, number).with_context(|| format!("reading generation {number}"))?;
-    // Merging a generation built for another image could shadow that
-    // image's files (design invariant 2); M5 adds the compatibility check
-    // that lets some of them through. On a bootc system a generation with
-    // no digest was built elsewhere, so it is refused too.
+    // A generation built for another image is merged only if it still fits
+    // the booted one (design invariant 2). On a bootc system one with no
+    // digest was built elsewhere, so it is checked too.
     if let Some(booted) = machine.digest()
         && generation.lock.image.as_ref() != Some(&booted)
     {
-        bail!(
-            "generation {number} was built for {}; only generations built for the booted image can be activated",
-            generation
-                .lock
-                .image
-                .as_deref()
-                .map_or_else(|| "no image".to_owned(), short)
-        );
+        crate::compat::check(machine, &generation).map_err(|why| {
+            anyhow::anyhow!(
+                "generation {number} was built for {} and doesn't fit the booted image: {why}",
+                generation
+                    .lock
+                    .image
+                    .as_deref()
+                    .map_or("no image", crate::ui::short_digest)
+            )
+        })?;
     }
     if dry_run {
         ui.out.line(ui.out.style.dim(&format!(
@@ -69,15 +70,6 @@ fn pick(state: &State, current: &Generation, target: Option<u32>) -> Result<u32>
             .or_else(|| all.into_iter().rev().find(|n| *n < number))
             .with_context(|| format!("generation {number} is the oldest; nothing to roll back to")),
     }
-}
-
-fn short(digest: &str) -> String {
-    digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest)
-        .chars()
-        .take(12)
-        .collect()
 }
 
 #[cfg(test)]
@@ -115,10 +107,5 @@ mod tests {
         assert!(pick(&state, &generation(7, None), Some(5)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
-    }
-
-    #[test]
-    fn shortens_digests() {
-        assert_eq!(short("sha256:0123456789abcdef0123"), "0123456789ab");
     }
 }

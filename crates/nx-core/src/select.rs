@@ -1,0 +1,206 @@
+//! Which generation belongs to which image, and which ones to keep.
+//!
+//! A generation is bound to the image digest it was resolved for (design
+//! invariant 2), and every deployed digest keeps one (invariant 5). The
+//! questions here need only the lockfiles, so they are cheap enough to ask
+//! at boot, with no network and no libsolv.
+
+use std::collections::{BTreeSet, HashSet};
+
+use crate::lockfile::Lock;
+use crate::state::{self, State};
+use crate::{Error, Result};
+
+/// Generations kept beyond the ones deployed images need, newest first, so
+/// `nx rollback` still has somewhere to go.
+pub const RETAIN: usize = 5;
+
+/// One generation's lockfile, for the questions that don't need the rest.
+pub fn read_lock(state: &State, number: u32) -> Result<Lock> {
+    let path = state
+        .generations_dir()
+        .join(number.to_string())
+        .join("lock.toml");
+    let text = std::fs::read_to_string(&path).map_err(|source| Error::Read {
+        path: path.clone(),
+        source,
+    })?;
+    Lock::parse(&text, &path)
+}
+
+/// Every generation this nx can read with its lockfile, oldest first. One a
+/// newer nx wrote is left out: it is not ours to select or delete.
+pub fn locks(state: &State) -> Result<Vec<(u32, Lock)>> {
+    let mut out = Vec::new();
+    for number in state.generations()? {
+        match read_lock(state, number) {
+            Ok(lock) => out.push((number, lock)),
+            Err(Error::Newer { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// The newest generation built for `digest`.
+pub fn newest_for(state: &State, digest: &str) -> Result<Option<u32>> {
+    Ok(locks(state)?
+        .into_iter()
+        .rev()
+        .find(|(_, lock)| lock.image.as_deref() == Some(digest))
+        .map(|(number, _)| number))
+}
+
+/// What `nx gc` would do.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GcPlan {
+    pub keep: Vec<u32>,
+    pub drop: Vec<u32>,
+}
+
+/// Generations to keep: the current one, the newest for each deployed
+/// digest (booted, staged and rollback), and the [`RETAIN`] newest. Those a
+/// newer nx wrote are never dropped.
+pub fn gc_plan(state: &State, deployed: &[String]) -> Result<GcPlan> {
+    let all = locks(state)?;
+    let mut keep: BTreeSet<u32> = state.generations()?.into_iter().collect();
+    let readable: HashSet<u32> = all.iter().map(|(n, _)| *n).collect();
+    keep.retain(|n| !readable.contains(n));
+    keep.extend(state.current_number()?);
+    for digest in deployed {
+        keep.extend(
+            all.iter()
+                .rev()
+                .find(|(_, lock)| lock.image.as_deref() == Some(digest))
+                .map(|(n, _)| *n),
+        );
+    }
+    keep.extend(all.iter().rev().take(RETAIN).map(|(n, _)| *n));
+    let drop = all
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| !keep.contains(n))
+        .collect();
+    Ok(GcPlan {
+        keep: keep.into_iter().collect(),
+        drop,
+    })
+}
+
+/// The store entries no kept generation names, with their sizes' directory
+/// names (SHA-256s).
+pub fn unreferenced(state: &State, keep: &[u32]) -> Result<Vec<String>> {
+    let mut used: HashSet<String> = HashSet::new();
+    for n in keep {
+        match read_lock(state, *n) {
+            Ok(lock) => used.extend(lock.host.into_iter().map(|p| p.sha256)),
+            // A generation a newer nx wrote may need anything: keep it all.
+            Err(Error::Newer { .. }) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(state
+        .store()
+        .entries()?
+        .into_iter()
+        .filter(|sha| !used.contains(sha))
+        .collect())
+}
+
+/// Removes generation `number`'s directory. Needs the state lock.
+pub fn remove_generation(state: &State, _lock: &state::Lock, number: u32) -> Result<()> {
+    if state.current_number()? == Some(number) {
+        return Err(Error::Invalid(format!(
+            "generation {number} is current and cannot be removed"
+        )));
+    }
+    state::remove_tree(&state.generations_dir().join(number.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::tests::TempDir;
+
+    fn generation(state: &State, n: u32, image: Option<&str>, packages: &[&str]) {
+        let mut lock = Lock::new(image.map(str::to_owned), "45", "x86_64");
+        for sha in packages {
+            lock.host.push(crate::LockedPackage {
+                name: (*sha).to_owned(),
+                nevra: format!("{sha}-1-1.x86_64"),
+                repo: "fedora".into(),
+                sha256: (*sha).to_owned(),
+                requested: vec![],
+            });
+        }
+        let dir = state.generations_dir().join(n.to_string());
+        std::fs::create_dir_all(&dir).unwrap_or_default();
+        std::fs::write(dir.join("lock.toml"), lock.to_toml().unwrap_or_default())
+            .unwrap_or_default();
+    }
+
+    #[test]
+    fn finds_the_newest_generation_for_a_digest() -> Result<()> {
+        let tmp = TempDir::new("select-newest");
+        let state = State::new(&tmp.0);
+        generation(&state, 1, Some("sha256:a"), &[]);
+        generation(&state, 2, Some("sha256:b"), &[]);
+        generation(&state, 3, Some("sha256:a"), &[]);
+        assert_eq!(newest_for(&state, "sha256:a")?, Some(3));
+        assert_eq!(newest_for(&state, "sha256:b")?, Some(2));
+        assert_eq!(newest_for(&state, "sha256:c")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn gc_keeps_what_deployed_images_and_rollback_need() -> Result<()> {
+        let tmp = TempDir::new("select-gc");
+        let state = State::new(&tmp.0);
+        // Generation 1 is the only one for the rollback image; 2..=9 are for
+        // the booted one.
+        generation(&state, 1, Some("sha256:old"), &[]);
+        for n in 2..=9 {
+            generation(&state, n, Some("sha256:new"), &[]);
+        }
+        state.set_current(9)?;
+        let plan = gc_plan(&state, &["sha256:new".into(), "sha256:old".into()])?;
+        assert_eq!(plan.keep, vec![1, 5, 6, 7, 8, 9]);
+        assert_eq!(plan.drop, vec![2, 3, 4]);
+        // With the old image no longer deployed, 1 goes too.
+        let plan = gc_plan(&state, &["sha256:new".into()])?;
+        assert_eq!(plan.drop, vec![1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn gc_never_drops_current() -> Result<()> {
+        let tmp = TempDir::new("select-current");
+        let state = State::new(&tmp.0);
+        for n in 1..=8 {
+            generation(&state, n, Some("sha256:x"), &[]);
+        }
+        state.set_current(1)?;
+        let plan = gc_plan(&state, &[])?;
+        assert!(plan.keep.contains(&1));
+        assert!(!plan.drop.contains(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn the_store_keeps_what_kept_generations_use() -> Result<()> {
+        let tmp = TempDir::new("select-store");
+        let state = State::new(&tmp.0);
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        generation(&state, 1, Some("sha256:x"), &[&a, &b]);
+        generation(&state, 2, Some("sha256:x"), &[&b, &c]);
+        for sha in [&a, &b, &c] {
+            std::fs::create_dir_all(state.store().path(sha)).map_err(|source| Error::Write {
+                path: tmp.0.clone(),
+                source,
+            })?;
+        }
+        assert_eq!(unreferenced(&state, &[2])?, vec![a.clone()]);
+        assert!(unreferenced(&state, &[1, 2])?.is_empty());
+        Ok(())
+    }
+}

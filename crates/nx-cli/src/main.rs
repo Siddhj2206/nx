@@ -6,6 +6,9 @@
 
 mod add;
 mod apply;
+mod boot;
+mod compat;
+mod gc;
 mod generations;
 mod help;
 mod host;
@@ -18,6 +21,7 @@ mod rollback;
 mod search;
 mod shell;
 mod status;
+mod sync;
 mod ui;
 mod why;
 
@@ -119,6 +123,20 @@ enum Command {
     },
     /// the image nx resolves against: booted, staged and rollback
     Status,
+    /// give every deployed image a host tier that matches the manifest
+    Sync {
+        #[command(flatten)]
+        metadata: Metadata,
+    },
+    /// remove generations and packages nothing needs
+    Gc {
+        /// list what would be removed; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// at boot: make the generation built for the booted image current
+    #[command(hide = true)]
+    Select,
 }
 
 #[derive(Subcommand)]
@@ -237,6 +255,11 @@ fn main() -> ExitCode {
         Command::Info { package, metadata } => metadata
             .load(&mut ui)
             .and_then(|u| info::run(&mut ui, &u, &package)),
+        Command::Sync { metadata } => {
+            machine().and_then(|m| sync::run(&mut ui, &m, metadata.refresh()))
+        }
+        Command::Gc { dry_run } => machine().and_then(|m| gc::run(&mut ui, &m, dry_run)),
+        Command::Select => boot::run(&mut ui),
         Command::Status => status::run(
             &mut ui,
             &RpmOstree,

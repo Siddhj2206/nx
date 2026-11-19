@@ -57,6 +57,9 @@ pub fn run(
                 if d.pinned {
                     value.push_str(&format!("  {}", st.dim("pinned")));
                 }
+                if let Some(note) = host_tier_for(state, d, st) {
+                    value.push_str(&format!("  {note}"));
+                }
                 value
             }
         };
@@ -66,6 +69,20 @@ pub fn run(
     s.row("Tool tier", &st.dim("not built yet (M6)"));
     s.blank();
     Ok(())
+}
+
+/// Whether an image that isn't booted has its host tier ready. Nothing is
+/// said until nx has built a generation at all.
+fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<String> {
+    let digest = d.image_digest.as_deref()?;
+    if state.generations().ok()?.is_empty() {
+        return None;
+    }
+    Some(match nx_core::select::newest_for(state, digest) {
+        Ok(Some(n)) => st.dim(&format!("host tier: generation {n}")),
+        Ok(None) => st.yellow("no host tier yet (nx sync)"),
+        Err(e) => st.yellow(&format!("host tier unreadable: {e}")),
+    })
 }
 
 /// The current generation and the backend that made it live.
@@ -78,14 +95,10 @@ fn host_tier(state: &State, st: crate::ui::Style) -> String {
     }
 }
 
-/// `sha256:92409d3fcf8435…` → `sha256:92409d3fcf84`, as short as nx 0.x
-/// showed nixpkgs revisions, long enough to tell images apart.
 fn short_digest(d: &Deployment) -> &str {
-    let Some(digest) = d.image_digest.as_deref() else {
-        return "no digest";
-    };
-    let end = digest.find(':').map_or(12, |colon| colon + 13);
-    digest.get(..end).unwrap_or(digest)
+    d.image_digest
+        .as_deref()
+        .map_or("no digest", crate::ui::short_digest)
 }
 
 #[cfg(test)]
