@@ -26,9 +26,27 @@ from the "bx" draft), then the other ADRs.
 - Never run a spike or an activation on the daily driver; use a bootc VM
   built from the Neptuno image (design doc, *Milestones*).
 
+## Output
+
+nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
+
+- clap parses, nx draws. Never let clap print: help and errors go through
+  `help.rs` and `ui.rs` (`Cli::try_parse`, then render). A command's line in
+  `nx help` is its doc comment; its group is in `help::PLACEMENT`.
+- Every line is indented two spaces and starts with its kind's symbol
+  (`› ↑ + - ↓ ⚙ ✓ ! ✗`). Results on stdout, steps, warnings and errors on
+  stderr. Detail views follow `info`: bold head, dim version, then rows with
+  dim keys padded to 11 (`Stream::row`).
+- Colour comes from anstream's decision (TTY, `NO_COLOR`, `TERM=dumb`,
+  `CLICOLOR_FORCE`); never write escape codes by hand outside `Style`.
+- Exit codes: 0 success, 1 failure, 2 misuse, 130 interrupted.
+- Test output as plain text through `Ui::plain` and compare whole blocks.
+
 ## Layout
 
-- `crates/nx-cli`: the `nx` binary; one function per command.
+- `crates/nx-cli`: the `nx` binary. `main.rs` holds the clap definitions and
+  exit codes, one module per command (`status.rs`), `help.rs` draws help and
+  rewords clap's errors, `ui.rs` is the output kit ported from nx 0.x.
 - `crates/nx-core`: the system as nx sees it: deployments and image digests
   (`deployment.rs`), os-release (`os_release.rs`). Store, generations,
   manifest and lockfile land here in M2.

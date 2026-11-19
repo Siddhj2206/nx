@@ -1,0 +1,244 @@
+//! nx's output, ported from nx 0.x: colour that turns itself off for pipes,
+//! the symbols every command shares, and padding that ignores colour codes.
+//!
+//! Results go to stdout and progress to stderr, so `nx list | grep` sees only
+//! results. Every line has a two-space indent and one symbol for its kind:
+//!
+//! ```text
+//! › step   ↑ upgraded   + added   - removed   ↓ fetched
+//! ⚙ building   ✓ done   ! warning   ✗ error
+//! ```
+//!
+//! Symbols and helpers land here as commands need them (the live region and
+//! progress bars come with downloads in M2).
+
+use std::fmt::Display;
+use std::io::{self, IsTerminal, Write};
+
+pub const SYM_STEP: &str = "›";
+pub const SYM_DONE: &str = "✓";
+#[expect(dead_code)] // first used by add (M3)
+pub const SYM_WARN: &str = "!";
+pub const SYM_ERROR: &str = "✗";
+
+/// Colours text for one stream, or leaves it plain.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Style {
+    on: bool,
+}
+
+impl Style {
+    fn wrap(self, code: &str, x: &str) -> String {
+        if !self.on || x.is_empty() {
+            return x.to_owned();
+        }
+        format!("\x1b[{code}m{x}\x1b[0m")
+    }
+
+    pub fn bold(self, x: &str) -> String {
+        self.wrap("1", x)
+    }
+    pub fn dim(self, x: &str) -> String {
+        self.wrap("2", x)
+    }
+    pub fn green(self, x: &str) -> String {
+        self.wrap("32", x)
+    }
+    pub fn cyan(self, x: &str) -> String {
+        self.wrap("36", x)
+    }
+    pub fn red(self, x: &str) -> String {
+        self.wrap("31", x)
+    }
+    pub fn yellow(self, x: &str) -> String {
+        self.wrap("33", x)
+    }
+}
+
+/// stdout or stderr, with its own colour decision.
+pub struct Stream {
+    w: Box<dyn Write>,
+    pub style: Style,
+}
+
+impl Stream {
+    /// Colour follows anstream's rules, the same ones clap uses: on for a
+    /// terminal, off for pipes, `NO_COLOR` and `TERM=dumb`, forced on by
+    /// `CLICOLOR_FORCE`.
+    fn terminal<W: Write + IsTerminal + anstream::stream::RawStream + 'static>(w: W) -> Self {
+        let colour = anstream::AutoStream::choice(&w) != anstream::ColorChoice::Never;
+        Self {
+            w: Box::new(w),
+            style: Style { on: colour },
+        }
+    }
+
+    /// Writes one indented line. A closed pipe (`nx status | head -1`) is not
+    /// an error worth reporting, so write failures are dropped.
+    pub fn line(&mut self, text: impl Display) {
+        let _ = writeln!(self.w, "  {text}");
+    }
+
+    pub fn blank(&mut self) {
+        let _ = writeln!(self.w);
+    }
+
+    /// A text block that already carries its own indentation (help).
+    pub fn raw(&mut self, text: impl Display) {
+        let _ = write!(self.w, "{text}");
+    }
+
+    /// An `info`-style row: the key dim and padded to 11 columns. Empty
+    /// values are skipped, as in nx 0.x.
+    pub fn row(&mut self, key: &str, value: &str) {
+        if !value.is_empty() {
+            let key = self.style.dim(&pad(key, 11));
+            self.line(format_args!("{key} {value}"));
+        }
+    }
+}
+
+/// Both streams.
+pub struct Ui {
+    /// Results.
+    pub out: Stream,
+    /// Progress, steps, warnings, errors.
+    pub err: Stream,
+}
+
+impl Ui {
+    /// The process's own stdout and stderr.
+    pub fn new() -> Self {
+        Self {
+            out: Stream::terminal(io::stdout()),
+            err: Stream::terminal(io::stderr()),
+        }
+    }
+
+    /// Uncoloured output into buffers, for tests.
+    #[cfg(test)]
+    pub fn plain(out: SharedBuf, err: SharedBuf) -> Self {
+        Self {
+            out: Stream {
+                w: Box::new(out),
+                style: Style::default(),
+            },
+            err: Stream {
+                w: Box::new(err),
+                style: Style::default(),
+            },
+        }
+    }
+
+    /// Announces something about to take a while.
+    #[expect(dead_code)] // first used by add/upgrade (M1)
+    pub fn step(&mut self, msg: impl Display) {
+        let sym = self.err.style.cyan(SYM_STEP);
+        self.err.line(format_args!("{sym} {msg}"));
+    }
+
+    /// Reports success, on stdout.
+    #[expect(dead_code)] // first used by add/remove (M3)
+    pub fn done(&mut self, msg: impl Display) {
+        let sym = self.out.style.green(SYM_DONE);
+        self.out.line(format_args!("{sym} {msg}"));
+    }
+
+    /// Reports something odd that didn't stop the work.
+    #[expect(dead_code)] // first used by add (M3)
+    pub fn warn(&mut self, msg: impl Display) {
+        let sym = self.err.style.yellow(SYM_WARN);
+        self.err.line(format_args!("{sym} {msg}"));
+    }
+
+    /// Reports a failure. Continuation lines get the same indent.
+    pub fn error(&mut self, msg: impl Display) {
+        let sym = self.err.style.red(SYM_ERROR);
+        let msg = msg.to_string().replace('\n', "\n    ");
+        self.err.line(format_args!("{sym} {msg}"));
+    }
+}
+
+/// A string's width on screen, ignoring colour codes. Every char counts as
+/// one column.
+pub fn visible_len(s: &str) -> usize {
+    let mut n = 0;
+    let mut esc = false;
+    for c in s.chars() {
+        if esc {
+            if ('@'..='~').contains(&c) && c != '[' {
+                esc = false;
+            }
+        } else if c == '\x1b' {
+            esc = true;
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Right-pads `s` with spaces to `w` visible columns.
+pub fn pad(s: &str, w: usize) -> String {
+    let n = visible_len(s);
+    if n >= w {
+        return s.to_owned();
+    }
+    format!("{s}{}", " ".repeat(w - n))
+}
+
+/// A cloneable in-memory writer for tests.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct SharedBuf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+#[cfg(test)]
+impl SharedBuf {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.borrow()).into_owned()
+    }
+}
+
+#[cfg(test)]
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_len_skips_colour() {
+        let s = Style { on: true };
+        assert_eq!(visible_len(&s.bold("nx")), 2);
+        assert_eq!(visible_len("› step"), 6);
+    }
+
+    #[test]
+    fn pad_counts_visible_columns() {
+        let s = Style { on: true };
+        assert_eq!(visible_len(&pad(&s.dim("Booted"), 11)), 11);
+        assert_eq!(pad("longer than this", 4), "longer than this");
+    }
+
+    #[test]
+    fn plain_style_adds_nothing() {
+        assert_eq!(Style::default().red("x"), "x");
+        assert_eq!(Style { on: true }.red(""), "");
+    }
+
+    #[test]
+    fn error_indents_continuation_lines() {
+        let err = SharedBuf::default();
+        let mut ui = Ui::plain(SharedBuf::default(), err.clone());
+        ui.error("first\nsecond");
+        assert_eq!(err.text(), "  ✗ first\n    second\n");
+    }
+}

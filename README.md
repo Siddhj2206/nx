@@ -21,13 +21,14 @@ Working today:
 
 ```
 $ nx status
-image     ghcr.io/siddhj2206/neptuno:latest
-release   fedora 45
-booted    sha256:92409d3fcf84 · 45.20261118 · fedora 45
-staged    none
-rollback  sha256:292ee1bfc6d4 · 45.20261117 · fedora 45
-host tier not built yet (M1)
-tool tier not built yet (M6)
+
+  ghcr.io/siddhj2206/neptuno:latest 45.20261118
+  Neptuno 45 · booted from sha256:92409d3fcf84
+
+  Staged      none
+  Rollback    45.20261117 from sha256:292ee1bfc6d4
+  Host tier   not built yet (M1)
+  Tool tier   not built yet (M6)
 ```
 
 The design, milestones and open questions are in
