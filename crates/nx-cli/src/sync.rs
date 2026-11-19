@@ -33,8 +33,8 @@ pub fn run(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<()> {
     let built = deployed(ui, machine, refresh)?;
     // Generations nothing deployed needs any more (an image that is gone,
     // older staged ones). Only after every image has its own: a failure
-    // above returned already.
-    let removed = crate::gc::collect(ui, machine)?;
+    // above returned already. The daily refresh collects the Nix store too.
+    let removed = crate::gc::collect(ui, machine, refresh != Refresh::IfMissing)?;
     if built == 0 && removed == 0 {
         ui.done("every deployed image has a host tier that matches the manifest");
     }

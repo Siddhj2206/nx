@@ -7,8 +7,11 @@
 #   phase migrate   a package in tester's Nix profile (and a registry pin)
 #                   moves into nx; the profile and the pin are gone
 #   phase notify    a recorded failure reaches the session once
-#   phase upgrade   nx-upgrade.service runs and leaves no failure behind
-#   phase hint      a package with kernel modules gets the image hint
+#   phase upgrade   nx-upgrade.service runs and leaves no failure behind;
+#                   nx-refresh.service collects the Nix store
+#   phase hint      a package with kernel modules gets the image hint, and
+#                   nothing it needs is downloaded first
+#   phase race      two nx add at once both end up in the manifest
 #   phase complete  the shell's completion asks nx for live values
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -100,6 +103,11 @@ upgrade)
 	systemctl start nx-upgrade.service || fail "nx-upgrade.service failed: $(journalctl -u nx-upgrade -n 20 --no-pager)"
 	[[ ! -e /var/lib/nx/upgrade-failure.json ]] || fail "a successful upgrade left a failure record"
 	[[ $(systemctl is-enabled nx-upgrade.timer) == enabled ]] || fail "the timer isn't enabled"
+	# What an upgrade leaves behind goes with the daily refresh.
+	since=$(date '+%Y-%m-%d %H:%M:%S')
+	systemctl start nx-refresh.service || fail "nx-refresh.service failed: $(journalctl -u nx-refresh -n 20 --no-pager)"
+	journalctl -u nx-refresh --since "$since" --no-pager | grep -q 'store paths deleted' ||
+		fail "the daily refresh didn't collect the Nix store"
 	echo "upgrade: ok"
 	;;
 hint)
@@ -113,7 +121,31 @@ hint)
 		fail "an SELinux policy module was added"
 	fi
 	grep -q 'SELinux policy module' /tmp/m7-hint2.txt || fail "no image hint: $(cat /tmp/m7-hint2.txt)"
+	# Refused before its dependencies (usbguard itself) are downloaded.
+	! grep '↓' /tmp/m7-hint.txt /tmp/m7-hint2.txt | grep -v -e ' metadata' -e 'kernel-modules-internal' -e 'usbguard-selinux' ||
+		fail "dependencies were downloaded before the hint"
 	echo "hint: ok"
+	;;
+race)
+	# Two changes at once: the second waits on the lock and must build on
+	# the first's generation, not on the one before it.
+	picked=()
+	for p in libyaml-devel jansson-devel lz4-devel libsodium-devel; do
+		rpm -q "$p" >/dev/null || grep -q "\"$p\"" /var/lib/nx/current/manifest.toml || picked+=("$p")
+	done
+	(( ${#picked[@]} >= 2 )) || fail "no two packages to add"
+	a=${picked[0]} b=${picked[1]}
+	as tester "nx add $a" >/tmp/m7-race-a.txt 2>&1 &
+	pa=$!
+	as tester "nx add $b" >/tmp/m7-race-b.txt 2>&1 &
+	pb=$!
+	wait "$pa" || fail "nx add $a failed: $(cat /tmp/m7-race-a.txt)"
+	wait "$pb" || fail "nx add $b failed: $(cat /tmp/m7-race-b.txt)"
+	for p in "$a" "$b"; do
+		grep -q "\"$p\"" /var/lib/nx/current/manifest.toml || fail "$p was lost from the manifest"
+	done
+	as tester "nx remove $a $b" >/dev/null
+	echo "race: ok"
 	;;
 complete)
 	installed=$(as tester "nx list" | awk 'NR>0 && /^  [^ ]/ {print $1; exit}')

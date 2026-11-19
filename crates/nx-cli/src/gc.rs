@@ -8,43 +8,51 @@
 //! boot, before the daemon ran) get theirs.
 
 use anyhow::{Context, Result};
-use nx_core::{Generation, select};
+use nx_core::{Generation, State, select};
 
 use crate::host::{self, Machine};
 use crate::tool;
 use crate::ui::{self, Stream, Ui};
 
 /// `nx sync`'s tail: removes what `nx gc` would, saying so only when
-/// something went. Returns how many generations were removed.
-pub fn collect(ui: &mut Ui, machine: &Machine) -> Result<usize> {
-    let removed = remove(machine, false)?;
-    if !removed.0.is_empty() || removed.1 > 0 {
-        render(&mut ui.out, &removed.0, removed.1, false);
+/// something went. With `nix` (the daily `nx sync --refresh`) the Nix
+/// store is collected too: old tool tiers (the weekly upgrade leaves one
+/// each time) would otherwise stay until someone runs `nx gc`. Returns how
+/// many generations were removed.
+pub fn collect(ui: &mut Ui, machine: &Machine, nix: bool) -> Result<usize> {
+    let (dropped, packages, keep) = remove(machine, false)?;
+    if !dropped.is_empty() || packages > 0 {
+        render(&mut ui.out, &dropped, packages, false);
     }
-    Ok(removed.0.len())
+    if nix && tool::available() {
+        // The host tier is done; a Nix failure is only a warning here.
+        if let Err(e) = collect_nix(ui, &nx_nix::System, &host::state(), &keep) {
+            ui.warn(format_args!("the Nix store was not collected: {e:#}"));
+        }
+    }
+    Ok(dropped.len())
 }
 
 pub fn run(ui: &mut Ui, machine: &Machine, dry_run: bool) -> Result<()> {
     let (dropped, packages, keep) = remove(machine, dry_run)?;
     render(&mut ui.out, &dropped, packages, dry_run);
     if !dry_run && tool::available() {
-        collect_nix(ui, &keep)?;
+        collect_nix(ui, &nx_nix::System, &host::state(), &keep)?;
     }
     Ok(())
 }
 
 /// Roots what kept generations hold, then lets Nix delete the rest.
-fn collect_nix(ui: &mut Ui, keep: &[u32]) -> Result<()> {
-    let state = host::state();
+fn collect_nix(ui: &mut Ui, nix: &dyn nx_nix::Nix, state: &State, keep: &[u32]) -> Result<()> {
     for n in keep {
-        let Ok(g) = Generation::read(&state, *n) else {
+        let Ok(g) = Generation::read(state, *n) else {
             continue;
         };
         let Some(t) = g.lock.tool.as_ref().filter(|t| !t.packages.is_empty()) else {
             continue;
         };
         if !tool::rooted(&g) {
-            tool::root(&nx_nix::System, &g, t).with_context(|| {
+            tool::root(nix, &g, t).with_context(|| {
                 format!(
                     "generation {n}'s Nix paths have no GC roots, so nix store gc would delete them"
                 )
@@ -52,7 +60,7 @@ fn collect_nix(ui: &mut Ui, keep: &[u32]) -> Result<()> {
             ui.step(format_args!("rooted generation {n}'s Nix paths"));
         }
     }
-    let freed = nx_nix::nix::collect_garbage(&nx_nix::System).context("running nix store gc")?;
+    let freed = nx_nix::nix::collect_garbage(nix).context("running nix store gc")?;
     let style = ui.out.style;
     ui.out.line(format_args!(
         "{} {}",
@@ -136,5 +144,68 @@ fn render(out: &mut Stream, dropped: &[u32], packages: usize, dry_run: bool) {
         ));
     } else {
         out.line(format_args!("{} removed {what}", style.green(ui::SYM_DONE)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::ui::SharedBuf;
+
+    /// Records each `nix` call; `store gc` answers with a summary.
+    #[derive(Default)]
+    struct Recording(RefCell<Vec<Vec<String>>>);
+
+    impl nx_nix::Nix for Recording {
+        fn run(&self, args: &[String], _: &mut dyn FnMut(&str)) -> nx_nix::Result<String> {
+            self.0.borrow_mut().push(args.to_vec());
+            Ok(if args.first().is_some_and(|a| a == "store") {
+                "2 store paths deleted, 1.0 MiB freed\n".into()
+            } else {
+                String::new()
+            })
+        }
+    }
+
+    #[test]
+    fn roots_kept_tool_tiers_before_collecting_the_nix_store() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-gc-nix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // An output that exists, so it counts as in the store.
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out)?;
+        let mut lock = nx_core::Lock::new(None, "45", "x86_64");
+        lock.tool = Some(nx_core::LockedTool {
+            packages: vec![nx_core::ToolPackage {
+                attr: "ripgrep".into(),
+                outputs: vec![nx_core::ToolOutput {
+                    name: "out".into(),
+                    path: out.display().to_string(),
+                }],
+                ..nx_core::ToolPackage::default()
+            }],
+            ..nx_core::LockedTool::default()
+        });
+        let gen_dir = dir.join("state/generations/3");
+        std::fs::create_dir_all(&gen_dir)?;
+        std::fs::write(gen_dir.join("lock.toml"), lock.to_toml()?)?;
+        std::fs::write(
+            gen_dir.join("manifest.toml"),
+            nx_core::Manifest::default().to_toml()?,
+        )?;
+        let state = State::new(dir.join("state"));
+        let nix = Recording::default();
+        let buf = SharedBuf::default();
+        let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
+        collect_nix(&mut ui, &nix, &state, &[3])?;
+        let calls = nix.0.borrow().clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0][..2], ["build", "--out-link"]);
+        assert_eq!(calls[1], ["store", "gc"]);
+        assert_eq!(buf.text(), "  ✓ 2 store paths deleted, 1.0 MiB freed\n");
+        Ok(())
     }
 }

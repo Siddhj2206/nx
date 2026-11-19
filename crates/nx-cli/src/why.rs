@@ -97,15 +97,9 @@ fn in_generation(state: &State, g: &Generation, what: &str) -> Result<Option<Own
     let Some(package) = found else {
         return Ok(None);
     };
-    let mut added = g.number;
-    for n in (1..g.number).rev() {
-        let had = Generation::read(state, n)
-            .is_ok_and(|older| older.lock.host.iter().any(|p| p.nevra == package.nevra));
-        if !had {
-            break;
-        }
-        added = n;
-    }
+    let added = added_in(g, &|n| Generation::read(state, n).ok(), &|older| {
+        older.lock.host.iter().any(|p| p.nevra == package.nevra)
+    });
     let route = g.lock.routes.get(&package.name).cloned();
     Ok(Some(Owner::Host {
         package,
@@ -130,21 +124,14 @@ fn in_tool_tier(state: &State, g: &Generation, what: &str) -> Option<Owner> {
             .any(|o| what == o || what.starts_with(&format!("{o}/")))
             .then_some((p, None))
     })?;
-    let mut added = g.number;
-    for n in (1..g.number).rev() {
-        let had = Generation::read(state, n).is_ok_and(|older| {
-            older
-                .lock
-                .tool
-                .as_ref()
-                .and_then(|t| t.package(&package.attr))
-                .is_some_and(|p| p.outputs == package.outputs)
-        });
-        if !had {
-            break;
-        }
-        added = n;
-    }
+    let added = added_in(g, &|n| Generation::read(state, n).ok(), &|older| {
+        older
+            .lock
+            .tool
+            .as_ref()
+            .and_then(|t| t.package(&package.attr))
+            .is_some_and(|p| p.outputs == package.outputs)
+    });
     Some(Owner::Tool {
         package: package.clone(),
         command,
@@ -153,6 +140,30 @@ fn in_tool_tier(state: &State, g: &Generation, what: &str) -> Option<Owner> {
         added,
         route: g.lock.routes.get(&package.attr).cloned(),
     })
+}
+
+/// The earliest generation in `g`'s line (its `parent`, that one's, …)
+/// from which on each one `had` it. Not the numbering: generations for
+/// other images and ones a rollback left sit between the numbers. `read`
+/// loads a generation by number.
+fn added_in(
+    g: &Generation,
+    read: &dyn Fn(u32) -> Option<Generation>,
+    had: &dyn Fn(&Generation) -> bool,
+) -> u32 {
+    let mut added = g.number;
+    let mut parent = g.lock.parent;
+    // A parent is always built before its child, so the numbers fall.
+    while let Some(n) = parent.filter(|n| *n < added) {
+        match read(n) {
+            Some(older) if had(&older) => {
+                added = n;
+                parent = older.lock.parent;
+            }
+            _ => break,
+        }
+    }
+    added
 }
 
 fn owner_of_path(state: &State, g: &Generation, path: &str) -> Option<LockedPackage> {
@@ -377,6 +388,42 @@ mod tests {
                  \n"
             )
         );
+    }
+
+    #[test]
+    fn added_follows_the_parents_not_the_numbers() {
+        // 7 was built from 4; 5 (another image's) and 6 (rolled back from)
+        // lack the package, 4 and 2 have it, 1 doesn't.
+        let generation = |number: u32, parent: Option<u32>, has: bool| {
+            let mut lock = nx_core::Lock::new(None, "45", "x86_64");
+            lock.parent = parent;
+            if has {
+                lock.host.push(LockedPackage {
+                    nevra: "x-1-1.x86_64".into(),
+                    ..LockedPackage::default()
+                });
+            }
+            Generation {
+                number,
+                dir: PathBuf::new(),
+                manifest: nx_core::Manifest::default(),
+                lock,
+                activation: Default::default(),
+            }
+        };
+        let all = [
+            generation(1, None, false),
+            generation(2, Some(1), true),
+            generation(4, Some(2), true),
+            generation(5, Some(4), false),
+            generation(6, Some(4), false),
+        ];
+        let read = |n: u32| all.iter().find(|g| g.number == n).cloned();
+        let had = |g: &Generation| !g.lock.host.is_empty();
+        assert_eq!(added_in(&generation(7, Some(4), true), &read, &had), 2);
+        assert_eq!(added_in(&generation(8, None, true), &read, &had), 8);
+        // A parent numbered after its child (a broken lock) stops the walk.
+        assert_eq!(added_in(&generation(3, Some(4), true), &read, &had), 3);
     }
 
     #[test]

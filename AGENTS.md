@@ -141,7 +141,11 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   (nxd serves only `/var/lib/nx`): `current` moves, nothing merges.
 - `nx add`, `remove` and `repo` build a generation and nxd activates it
   (`Session::install`); `generation::build` never touches `current`. nxd
-  doesn't take the state lock the CLI holds while it asks.
+  doesn't take the state lock the CLI holds while it asks. The session
+  holds the lock until `current` has moved (released earlier, a waiting
+  command builds on the old generation and drops the change), then lets
+  go before `sync::deployed`, which takes it per image: a second `flock`
+  from the same process on another descriptor would wait forever.
 - The nxd unit must not use `ProtectSystem=`, `PrivateTmp=` or any
   mount-namespace option: the merge would happen in the unit's own
   namespace and nothing else would see it.

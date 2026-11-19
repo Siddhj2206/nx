@@ -271,10 +271,20 @@ impl<'m> Session<'m> {
     /// caller's for an image that isn't booted. The tool tier's outputs
     /// become GC roots once the generation has its final name.
     pub fn build(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
+        // Held until the session ends, so `install` activates under it too.
         let guard = self.guard.take().context("a dry run cannot build")?;
-        let mut files = self.fetch(ui, all)?;
-        let host = self.unpack(&guard, all, &mut files)?;
-        let store = self.state.store();
+        let built = self.build_locked(ui, &guard, manifest, all);
+        self.guard = Some(guard);
+        built
+    }
+
+    fn build_locked(
+        &mut self,
+        ui: &mut Ui,
+        guard: &state::Lock,
+        manifest: &Manifest,
+        all: &[Planned],
+    ) -> Result<Built> {
         let asked = |name: &str| {
             manifest
                 .host
@@ -282,10 +292,26 @@ impl<'m> Session<'m> {
                 .iter()
                 .any(|s| s.split('@').next() == Some(name))
         };
+        // What the manifest names first: an image-only package is refused
+        // before its dependencies are downloaded.
+        let (first, rest): (Vec<Planned>, Vec<Planned>) =
+            all.iter().cloned().partition(|p| asked(&p.package.name));
+        let mut files = self.fetch(ui, &first)?;
+        let mut host = self.unpack(guard, &first, &mut files)?;
+        let store = self.state.store();
         let image_only = image_only(&host, &asked, &|sha| store.path(sha));
         if !image_only.is_empty() {
             return Err(image_hint(&image_only));
         }
+        let mut files = self.fetch(ui, &rest)?;
+        host.extend(self.unpack(guard, &rest, &mut files)?);
+        // In the plan's order, as before the split.
+        let mut by_nevra: HashMap<String, LockedPackage> =
+            host.into_iter().map(|p| (p.nevra.clone(), p)).collect();
+        let host: Vec<LockedPackage> = all
+            .iter()
+            .filter_map(|p| by_nevra.remove(&p.package.nevra()))
+            .collect();
         let image_root = self.machine.image_root()?;
         let tool = self.expose(ui, manifest, &host, &image_root)?;
         let mut lock = self.lock(host)?;
@@ -307,7 +333,7 @@ impl<'m> Session<'m> {
         };
         let built = generation::build(
             &self.state,
-            &guard,
+            guard,
             &Spec {
                 manifest,
                 lock: &lock,
@@ -379,7 +405,9 @@ impl<'m> Session<'m> {
     }
 
     /// [`Session::build`], then makes the generation live through nxd. A
-    /// generation nxd refuses stays on disk, not current. The staged and
+    /// generation nxd refuses stays on disk, not current. The state lock is
+    /// held until `current` has moved: a command that waited on it must
+    /// build on this generation, or this change is lost. The staged and
     /// rollback images get theirs too (design invariant 6), best effort:
     /// the change is live either way.
     pub fn install(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
@@ -390,6 +418,8 @@ impl<'m> Session<'m> {
             built.generation.number,
             manifest.host.backend,
         )?;
+        // The sync below takes the lock itself, once per image.
+        self.guard = None;
         if let Err(e) = crate::sync::deployed(ui, self.machine, Refresh::IfMissing) {
             ui.warn(format_args!(
                 "the staged and rollback images were not updated: {e:#} (nx sync retries)"
