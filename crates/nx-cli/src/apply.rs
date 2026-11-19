@@ -42,6 +42,20 @@ pub struct Session<'m> {
     skipped: Vec<String>,
 }
 
+/// The solver found no way to install what was asked: a problem with the
+/// request, unlike a network or cache error. `nx sync` leaves such a
+/// package out; anything else fails it.
+#[derive(Debug)]
+pub struct Unresolvable(pub String);
+
+impl std::fmt::Display for Unresolvable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unresolvable {}
+
 /// What a resolve found.
 pub struct Resolved {
     /// Every package of the new host tier.
@@ -155,7 +169,12 @@ impl<'m> Session<'m> {
         let all = match plan {
             Plan::Install(p) => p,
             Plan::Problems(problems) => {
-                bail!("can't resolve {}\n{}", specs.join(" "), problems.join("\n"))
+                return Err(Unresolvable(format!(
+                    "can't resolve {}\n{}",
+                    specs.join(" "),
+                    problems.join("\n")
+                ))
+                .into());
             }
         };
         let have: HashSet<&str> = self.locked().iter().map(|p| p.nevra.as_str()).collect();
@@ -390,7 +409,7 @@ fn refusal_error(e: nx_core::Error) -> anyhow::Error {
             format!(
                 "--allow-scriptlets {}={}",
                 r.name,
-                &r.digest[..nx_core::manifest::DIGEST_PREFIX]
+                &r.digest[..nx_core::manifest::ALLOW_DIGEST_LEN]
             )
         })
         .collect();

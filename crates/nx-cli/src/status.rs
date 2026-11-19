@@ -78,24 +78,17 @@ fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<
     if state.generations().ok()?.is_empty() {
         return None;
     }
+    // What the last sync said about this image wins over an empty
+    // placeholder from boot.
+    if let Some(why) = nx_core::select::failures(state).get(digest) {
+        return Some(st.yellow(&format!("no host tier yet: {why}")));
+    }
     Some(match nx_core::select::newest_for(state, digest) {
         Ok(Some(n)) => {
-            let left_out = nx_core::select::read_lock(state, n)
-                .map(|l| l.skipped)
-                .unwrap_or_default();
-            if left_out.is_empty() {
-                st.dim(&format!("host tier: generation {n}"))
-            } else {
-                st.yellow(&format!(
-                    "host tier: generation {n}, without {}",
-                    left_out.join(", ")
-                ))
-            }
+            let left_out = left_out(state, n, st);
+            st.dim(&format!("host tier: generation {n}")) + &left_out
         }
-        Ok(None) => match nx_core::select::failures(state).get(digest) {
-            Some(why) => st.yellow(&format!("no host tier yet: {why}")),
-            None => st.yellow("no host tier yet (nx sync)"),
-        },
+        Ok(None) => st.yellow("no host tier yet (nx sync)"),
         Err(e) => st.yellow(&format!("host tier unreadable: {e}")),
     })
 }

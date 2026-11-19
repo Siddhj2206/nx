@@ -2,7 +2,7 @@
 //!
 //! A generation is bound to the image digest it was resolved for (design
 //! invariant 2), and every deployed digest keeps one (invariant 5). The
-//! questions here need only the lockfiles, so they are cheap enough to ask
+//! questions here need only the lockfiles (and the record of why a sync failed), so they are cheap enough to ask
 //! at boot, with no network and no libsolv.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -64,16 +64,31 @@ pub fn failures(state: &State) -> BTreeMap<String, String> {
 /// Replaces the failure record. Best effort: whoever cannot write the state
 /// directory cannot have run a sync that matters.
 pub fn record_failures(state: &State, failures: &BTreeMap<String, String>) {
+    use std::io::Write;
     let path = state.root().join("sync-failures.json");
     if failures.is_empty() {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    let tmp = state.root().join(".sync-failures.json.tmp");
-    if let Ok(text) = serde_json::to_string(failures)
-        && std::fs::write(&tmp, text).is_ok()
-    {
+    // A fresh name each time (`create_new` never follows a planted link),
+    // flushed before it gets its final one.
+    let tmp = state
+        .root()
+        .join(format!(".sync-failures.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let written = serde_json::to_string(failures).ok().and_then(|text| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .ok()?;
+        f.write_all(text.as_bytes()).ok()?;
+        f.sync_all().ok()
+    });
+    if written.is_some() {
         let _ = std::fs::rename(&tmp, &path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 

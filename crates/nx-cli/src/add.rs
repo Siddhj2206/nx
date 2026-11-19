@@ -27,7 +27,7 @@ pub fn run(
             ScriptletAllow::parse(a).with_context(|| {
                 format!(
                     "--allow-scriptlets wants package=digest ({} or more hex digits), not {a}",
-                    nx_core::manifest::DIGEST_PREFIX
+                    nx_core::manifest::ALLOW_DIGEST_LEN
                 )
             })
         })

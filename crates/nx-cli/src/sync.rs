@@ -7,12 +7,14 @@
 //! is made live. The others are built from the image's own tree under
 //! `/sysroot`, which is readable without root.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use nx_core::select;
 use nx_core::{Deployment, Generation};
 use nx_rpm::Refresh;
 
-use crate::apply::Session;
+use crate::apply::{Session, Unresolvable};
 use crate::host::{self, Machine};
 use crate::ui::Ui;
 
@@ -94,7 +96,7 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
         Err(e) => return Err(anyhow::Error::new(e).context("reading the current generation")),
     };
     let (mut built, mut first_error) = (0, None);
-    let mut failures = std::collections::BTreeMap::new();
+    let mut failures = BTreeMap::new();
     for (role, d) in wanted(machine) {
         let Some(digest) = d.image_digest.as_deref() else {
             continue;
@@ -110,7 +112,7 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
                     "no host tier for the {role} image ({}): {e:#}",
                     crate::ui::short_digest(digest)
                 ));
-                failures.insert(digest.to_owned(), format!("{e:#}"));
+                failures.insert(digest.to_owned(), first_line(&e));
                 first_error.get_or_insert(e);
             }
         }
@@ -139,7 +141,9 @@ fn matches(
     // The empty generation `nx select` made at boot is a placeholder, not a
     // host tier.
     let lock = select::read_lock(state, n)?;
-    if lock.pending || (!lock.skipped.is_empty() && refresh != Refresh::IfMissing) {
+    if lock.pending
+        || (!lock.skipped.is_empty() && matches!(refresh, Refresh::IfStale | Refresh::Always))
+    {
         return Ok(false);
     }
     if n == current.number {
@@ -178,7 +182,8 @@ fn build(
         // A repeat of the last attempt (the daily refresh, with the same
         // repos still lacking them) would only add a generation like it.
         if let Some(n) = select::newest_for(&session.state, digest)?
-            && same_as(&session.state, n, &resolved.all, &skipped)?
+            && same_as(&session.state, n, &manifest, &resolved.all, &skipped)?
+            && (!booted || session.state.current_number()? == Some(n))
         {
             ui.step(format_args!(
                 "still nothing for {}; generation {n} stays",
@@ -229,13 +234,16 @@ fn resolve_what_fits(
     for spec in specs {
         match session.resolve(ui, std::slice::from_ref(spec)) {
             Ok(_) => kept.push(spec.clone()),
+            // Only a problem with the package itself: not the network's.
+            Err(e) if e.downcast_ref::<Unresolvable>().is_none() => return Err(e),
             Err(e) => {
                 ui.warn(format_args!("leaving out {spec}: {}", first_line(&e)));
                 skipped.push(spec.clone());
             }
         }
     }
-    if skipped.is_empty() {
+    // Nothing fits: not a host tier, and no one package to blame.
+    if skipped.is_empty() || kept.is_empty() {
         return Err(whole);
     }
     let resolved = session
@@ -252,11 +260,12 @@ fn first_line(e: &anyhow::Error) -> String {
         .to_owned()
 }
 
-/// Whether generation `n` has exactly these packages and leaves out the
-/// same ones.
+/// Whether generation `n` is what building now would make: the same
+/// manifest, packages and left-out ones.
 fn same_as(
     state: &nx_core::State,
     n: u32,
+    manifest: &nx_core::Manifest,
     all: &[nx_rpm::Planned],
     skipped: &[String],
 ) -> Result<bool> {
@@ -264,9 +273,12 @@ fn same_as(
     let have: std::collections::BTreeSet<&str> =
         lock.host.iter().map(|p| p.nevra.as_str()).collect();
     let want: std::collections::BTreeSet<String> = all.iter().map(|p| p.package.nevra()).collect();
-    Ok(lock.skipped == skipped
+    // A manifest change that resolves to the same packages (a repo, a
+    // scriptlet allowance) still makes a generation.
+    Ok(Generation::read(state, n)?.manifest == *manifest
+        && lock.skipped == skipped
         && have.len() == want.len()
-        && want.iter().all(|n| have.contains(n.as_str())))
+        && want.iter().all(|nevra| have.contains(nevra.as_str())))
 }
 
 #[cfg(test)]
