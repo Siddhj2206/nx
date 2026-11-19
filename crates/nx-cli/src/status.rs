@@ -58,7 +58,7 @@ pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, root: &Path, sysroot: &Pa
     }
     s.row(
         "Host tier",
-        &st.dim("resolves (nx add --dry-run); installs from M3"),
+        &st.dim("builds generations (nx add); activates from M3"),
     );
     s.row("Tool tier", &st.dim("not built yet (M6)"));
     s.blank();
@@ -123,7 +123,7 @@ mod tests {
 
   Staged      none
   Rollback    45.20261117 from sha256:292ee1bfc6d4
-  Host tier   resolves (nx add --dry-run); installs from M3
+  Host tier   builds generations (nx add); activates from M3
   Tool tier   not built yet (M6)
 
 "

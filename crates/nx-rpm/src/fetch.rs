@@ -15,7 +15,8 @@ use crate::repomd::{Checksum, DataFile, Metalink, Repomd, parse_metalink, parse_
 use crate::{Error, Result};
 
 /// Something that can GET a URL. [`Ureq`] is the real one; tests use a map.
-pub trait Http {
+/// Shared across download threads.
+pub trait Http: Sync {
     fn get(&self, url: &str) -> Result<Vec<u8>>;
 }
 
@@ -197,7 +198,7 @@ fn fetch(repo: &Repo, http: &dyn Http, dir: &Path, cached: Option<&Synced>) -> R
 
 /// Base URLs to try, and the `repomd.xml` checksums a metalink vouches for
 /// (empty for plain `baseurl` repos).
-fn mirrors(repo: &Repo, http: &dyn Http) -> Result<(Vec<String>, Vec<Checksum>)> {
+pub(crate) fn mirrors(repo: &Repo, http: &dyn Http) -> Result<(Vec<String>, Vec<Checksum>)> {
     if let Some(url) = &repo.metalink {
         let body = http.get(url)?;
         let metalink: Metalink = parse_metalink(&String::from_utf8_lossy(&body))?;
@@ -350,25 +351,7 @@ fn remove_others(dir: &Path, keep: &Path) {
 mod tests {
     use super::*;
     use crate::repo::{Vars, parse};
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-
-    /// Serves canned bodies and counts requests.
-    #[derive(Default)]
-    struct FakeHttp {
-        bodies: HashMap<String, Vec<u8>>,
-        hits: RefCell<Vec<String>>,
-    }
-
-    impl Http for FakeHttp {
-        fn get(&self, url: &str) -> Result<Vec<u8>> {
-            self.hits.borrow_mut().push(url.to_owned());
-            self.bodies.get(url).cloned().ok_or_else(|| Error::Fetch {
-                url: url.to_owned(),
-                reason: "404".into(),
-            })
-        }
-    }
+    use crate::testing::FakeHttp;
 
     const PRIMARY: &[u8] = b"<metadata packages=\"0\"/>";
 
@@ -427,10 +410,10 @@ mod tests {
         assert_eq!(first.base, "https://good/");
         assert_eq!(std::fs::read(&first.primary).ok().as_deref(), Some(PRIMARY));
 
-        http.hits.borrow_mut().clear();
+        http.clear();
         let second = sync(&repo, &http, &cache, Refresh::IfStale, &mut || {})?;
         assert_eq!(second.freshness, Freshness::Cached);
-        assert!(http.hits.borrow().is_empty(), "fresh cache must not fetch");
+        assert!(http.hits().is_empty(), "fresh cache must not fetch");
         let _ = std::fs::remove_dir_all(&cache);
         Ok(())
     }
@@ -460,10 +443,10 @@ mod tests {
 
         // Expired, yet IfMissing still answers from the cache.
         repo.metadata_expire = Some(std::time::Duration::ZERO);
-        http.hits.borrow_mut().clear();
+        http.clear();
         let second = sync(&repo, &http, &cache, Refresh::IfMissing, &mut || {})?;
         assert_eq!(second.freshness, Freshness::Expired);
-        assert!(http.hits.borrow().is_empty(), "IfMissing must not fetch");
+        assert!(http.hits().is_empty(), "IfMissing must not fetch");
         let _ = std::fs::remove_dir_all(&cache);
         Ok(())
     }

@@ -75,7 +75,7 @@ fn image() -> Vec<String> {
 fn names(solution: &Solution) -> Vec<String> {
     match solution {
         Solution::Install(p) => p.iter().map(Package::nevra).collect(),
-        Solution::Problems(p) => p.clone(),
+        Solution::Problems(p) => p.messages.clone(),
     }
 }
 
@@ -93,7 +93,7 @@ fn installs_only_what_the_image_lacks() -> Result<()> {
         pkg("pkgconf", "2.4", "1.fc45", ""),
     ];
     let mut f = fixture("only", &image(), &fedora)?;
-    let s = f.pool.install(&["libxkbcommon-devel"], &[])?;
+    let s = f.pool.install(&["libxkbcommon-devel"], &[], &[])?;
     assert_eq!(
         names(&s),
         vec![
@@ -118,7 +118,7 @@ fn never_upgrades_the_image() -> Result<()> {
         ),
     ];
     let mut f = fixture("upgrade", &image(), &fedora)?;
-    let s = f.pool.install(&["libxkbcommon-devel"], &[])?;
+    let s = f.pool.install(&["libxkbcommon-devel"], &[], &[])?;
     assert!(matches!(s, Solution::Problems(_)), "{s:?}");
     Ok(())
 }
@@ -128,18 +128,40 @@ fn hidden_packages_are_ignored() -> Result<()> {
     let fedora = vec![pkg("ripgrep", "14.1", "1.fc45", "")];
     let mut f = fixture("hidden", &image(), &fedora)?;
     let rg = f.pool.select("ripgrep")?;
-    let s = f.pool.install(&["ripgrep"], &rg)?;
+    let s = f.pool.install(&["ripgrep"], &rg, &[])?;
     assert!(matches!(s, Solution::Problems(_)), "{s:?}");
     // And visible again on the next solve.
-    let s = f.pool.install(&["ripgrep"], &[])?;
+    let s = f.pool.install(&["ripgrep"], &[], &[])?;
     assert_eq!(names(&s), vec!["ripgrep-14.1-1.fc45.x86_64"]);
+    Ok(())
+}
+
+#[test]
+fn problems_name_the_hidden_builds_in_the_way() -> Result<()> {
+    // The image has libxkbcommon 1.11.0; the repo only has a newer -devel
+    // that needs exactly the newer library.
+    let fedora = vec![
+        pkg("libxkbcommon", "1.12.0", "1.fc45", ""),
+        pkg(
+            "libxkbcommon-devel",
+            "1.12.0",
+            "1.fc45",
+            r#"<rpm:requires><rpm:entry name="libxkbcommon" flags="EQ" epoch="0" ver="1.12.0" rel="1.fc45"/></rpm:requires>"#,
+        ),
+    ];
+    let mut f = fixture("involved", &image(), &fedora)?;
+    let hidden = f.pool.select("libxkbcommon-devel")?;
+    let Solution::Problems(p) = f.pool.install(&["libxkbcommon-devel"], &hidden, &[])? else {
+        panic!("a hidden-only package can't install");
+    };
+    assert!(hidden.iter().all(|id| p.involved.contains(id)), "{p:?}");
     Ok(())
 }
 
 #[test]
 fn unknown_names_are_a_problem_not_an_error() -> Result<()> {
     let mut f = fixture("unknown", &image(), &[])?;
-    let s = f.pool.install(&["nope"], &[])?;
+    let s = f.pool.install(&["nope"], &[], &[])?;
     assert_eq!(names(&s), vec!["no package matches nope"]);
     Ok(())
 }
@@ -180,5 +202,92 @@ fn evr_order() -> Result<()> {
         pool.evr_cmp("1:1.0-1", "2.0-1"),
         std::cmp::Ordering::Greater
     );
+    Ok(())
+}
+
+/// A real Fedora package, recorded under `testdata/rpm`.
+fn fixture_rpm() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/rpm/libxkbcommon-devel-1.13.1-4.fc45.x86_64.rpm")
+}
+
+#[test]
+fn reads_the_metadata_checksum() -> Result<()> {
+    let with_sum = pkg(
+        "pkgconf",
+        "2.4",
+        "1.fc45",
+        "",
+    )
+    .replace(
+        "<location",
+        r#"<checksum type="sha256" pkgid="YES">834489e0eb7f4cb5a0addf9557f36ff592d295b130ba9121ec2868413abb9584</checksum><location"#,
+    );
+    let f = fixture("sum", &image(), &[with_sum])?;
+    let id = f.pool.select("pkgconf")?;
+    assert_eq!(
+        f.pool.package(id[0]).sha256,
+        "834489e0eb7f4cb5a0addf9557f36ff592d295b130ba9121ec2868413abb9584"
+    );
+    Ok(())
+}
+
+#[test]
+fn favored_builds_win() -> Result<()> {
+    let fedora = vec![
+        pkg("ripgrep", "14.1", "1.fc45", ""),
+        pkg("ripgrep", "15.0", "1.fc45", ""),
+    ];
+    let mut f = fixture("favor", &image(), &fedora)?;
+    let old: Vec<_> = f
+        .pool
+        .select("ripgrep")?
+        .into_iter()
+        .filter(|id| f.pool.package(*id).evr == "14.1-1.fc45")
+        .collect();
+    let s = f.pool.install(&["ripgrep"], &[], &old)?;
+    assert_eq!(names(&s), vec!["ripgrep-14.1-1.fc45.x86_64"]);
+    let s = f.pool.install(&["ripgrep"], &[], &[])?;
+    assert_eq!(names(&s), vec!["ripgrep-15.0-1.fc45.x86_64"]);
+    Ok(())
+}
+
+#[test]
+fn adds_a_package_file() -> Result<()> {
+    // Many solvables, all hidden in a first solve: a package added after it
+    // must still be found.
+    let many: Vec<String> = (0..100)
+        .map(|i| pkg(&format!("filler{i}"), "1", "1.fc45", ""))
+        .collect();
+    let mut f = fixture("rpm", &image(), &many)?;
+    let all: Vec<_> = f.pool.all().collect();
+    f.pool.install(&["filler1"], &all, &[])?;
+    let repo = f.pool.create_empty("koji", 99)?;
+    let id = f.pool.add_rpm(repo, &fixture_rpm())?;
+    f.pool.prepare();
+    let p = f.pool.package(id);
+    assert_eq!(p.nevra(), "libxkbcommon-devel-1.13.1-4.fc45.x86_64");
+    assert_eq!(p.source, "libxkbcommon-1.13.1-4.fc45.src.rpm");
+    assert_eq!(f.pool.select("pkgconfig(xkbcommon)")?, vec![id]);
+    Ok(())
+}
+
+#[test]
+fn finds_image_owners_of_a_file() -> Result<()> {
+    let image = vec![pkg("ripgrep", "14.1", "1.fc45", "<file>/usr/bin/rg</file>")];
+    let f = fixture(
+        "owner",
+        &image,
+        &[pkg("fd", "9", "1.fc45", "<file>/usr/bin/fd</file>")],
+    )?;
+    let names = |path| -> Result<Vec<String>> {
+        Ok(f.pool
+            .image_owners(path)?
+            .into_iter()
+            .map(|id| f.pool.package(id).name)
+            .collect())
+    };
+    assert_eq!(names("/usr/bin/rg")?, vec!["ripgrep"]);
+    assert!(names("/usr/bin/fd")?.is_empty(), "fd is not in the image");
     Ok(())
 }

@@ -9,8 +9,9 @@
 //! ⚙ building   ✓ done   ! warning   ✗ error
 //! ```
 //!
-//! Symbols and helpers land here as commands need them (the live region and
-//! progress bars come with downloads in M2).
+//! Symbols and helpers land here as commands need them. Downloads print one
+//! permanent `↓` line per package; the live region with progress bars
+//! below them is still to come.
 
 use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
@@ -139,7 +140,6 @@ impl Ui {
     }
 
     /// Reports success, on stdout.
-    #[expect(dead_code)] // first used by add/remove (M3)
     pub fn done(&mut self, msg: impl Display) {
         let sym = self.out.style.green(SYM_DONE);
         self.out.line(format_args!("{sym} {msg}"));

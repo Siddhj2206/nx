@@ -5,12 +5,16 @@
 //! results on stdout, everything else on stderr.
 
 mod add;
+mod apply;
 mod help;
 mod host;
 mod info;
+mod list;
+mod repo;
 mod search;
 mod status;
 mod ui;
+mod why;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -37,7 +41,7 @@ struct Cli {
 /// group is in `help::PLACEMENT`.
 #[derive(Subcommand)]
 enum Command {
-    /// add packages (for now, --dry-run only: what would be installed)
+    /// add packages to a new generation (not activated yet)
     Add {
         /// names, provides (pkgconfig(xkbcommon)) or files (/usr/bin/rg)
         #[arg(value_name = "package", required = true)]
@@ -47,6 +51,20 @@ enum Command {
         dry_run: bool,
         #[command(flatten)]
         metadata: Metadata,
+    },
+    /// installed packages
+    #[command(visible_alias = "ls")]
+    List,
+    /// who provides a package, command or file, and why
+    Why {
+        #[arg(value_name = "name|path")]
+        what: String,
+    },
+    /// third-party RPM repos: add, list, remove
+    #[command(subcommand_required = true, arg_required_else_help = true)]
+    Repo {
+        #[command(subcommand)]
+        action: RepoAction,
     },
     /// find packages by name or summary
     Search {
@@ -66,6 +84,28 @@ enum Command {
     Status,
 }
 
+#[derive(Subcommand)]
+enum RepoAction {
+    /// add copr:owner/project, a .repo file's URL, or a repo URL with --key
+    Add {
+        #[arg(value_name = "repo")]
+        source: String,
+        /// the repo's signing key (https), when the source doesn't name one
+        #[arg(long, value_name = "url")]
+        key: Option<String>,
+        /// dnf priority, lower wins; Fedora's repos are 99, added ones 100
+        #[arg(long)]
+        priority: Option<i32>,
+    },
+    /// the image's repos and the ones nx added
+    List,
+    /// remove a repo nx added
+    Remove {
+        #[arg(value_name = "repo")]
+        name: String,
+    },
+}
+
 /// How the host-tier commands treat cached repo metadata.
 #[derive(Args)]
 struct Metadata {
@@ -77,13 +117,18 @@ struct Metadata {
 impl Metadata {
     /// Commands answer from the cache; only a repo with nothing cached, or
     /// `--refresh`, waits on the network.
-    fn load(&self, ui: &mut Ui) -> anyhow::Result<nx_rpm::Universe> {
-        let refresh = if self.refresh {
+    fn refresh(&self) -> nx_rpm::Refresh {
+        if self.refresh {
             nx_rpm::Refresh::Always
         } else {
             nx_rpm::Refresh::IfMissing
-        };
-        host::load(ui, refresh)
+        }
+    }
+
+    fn load(&self, ui: &mut Ui) -> anyhow::Result<nx_rpm::Universe> {
+        let refresh = self.refresh();
+        let manifest = host::current_manifest(&host::state())?;
+        host::load(ui, refresh, &manifest)
     }
 }
 
@@ -102,9 +147,18 @@ fn main() -> ExitCode {
             packages,
             dry_run,
             metadata,
-        } => add::check(dry_run)
-            .and_then(|()| metadata.load(&mut ui))
-            .and_then(|mut u| add::run(&mut ui, &mut u, &packages)),
+        } => add::run(&mut ui, &packages, dry_run, metadata.refresh()),
+        Command::List => list::run(&mut ui),
+        Command::Why { what } => why::run(&mut ui, &what),
+        Command::Repo { action } => match action {
+            RepoAction::Add {
+                source,
+                key,
+                priority,
+            } => repo::add(&mut ui, &source, key.as_deref(), priority),
+            RepoAction::List => repo::list(&mut ui),
+            RepoAction::Remove { name } => repo::remove(&mut ui, &name),
+        },
         Command::Search { terms, metadata } => metadata
             .load(&mut ui)
             .map(|u| search::run(&mut ui, &u, &terms)),
@@ -131,7 +185,13 @@ fn parse_error(ui: &mut Ui, err: &clap::Error) -> ExitCode {
                 Some(name) => help::command(&mut ui.out, &name),
                 None => help::main(&mut ui.out),
             }
-            ExitCode::SUCCESS
+            // Asked for help: success. Help because something was missing
+            // (`nx repo`): misuse, as clap itself would say.
+            if err.kind() == ErrorKind::DisplayHelp {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(EXIT_MISUSE)
+            }
         }
         ErrorKind::DisplayVersion => {
             ui.out

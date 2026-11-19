@@ -40,7 +40,7 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A repo loaded into a [`Pool`], by index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RepoId(usize);
 
 /// A package in a [`Pool`], by libsolv's solvable id.
@@ -67,6 +67,9 @@ pub struct Package {
     pub location: String,
     pub download_size: u64,
     pub install_size: u64,
+    /// The package file's SHA-256 (hex), from the repo metadata; empty when
+    /// the metadata has none or uses another algorithm.
+    pub sha256: String,
 }
 
 impl Package {
@@ -97,8 +100,29 @@ pub fn source_name(source: &str) -> &str {
 pub enum Solution {
     /// Packages to add, none of them in the image.
     Install(Vec<Package>),
+    /// Why it can't be solved.
+    Problems(Problems),
+}
+
+/// A failed solve.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Problems {
     /// libsolv's explanation of each problem, one string per problem.
-    Problems(Vec<String>),
+    pub messages: Vec<String>,
+    /// Every package the problems' rules name, as the package a rule is
+    /// about or a provider of the dependency it is about, hidden ones
+    /// included. A caller that can supply a missing build looks here for
+    /// what is in the way.
+    pub involved: Vec<SolvableId>,
+}
+
+impl Problems {
+    fn message(messages: Vec<String>) -> Self {
+        Self {
+            messages,
+            involved: Vec::new(),
+        }
+    }
 }
 
 /// A libsolv pool.
@@ -188,6 +212,25 @@ impl Pool {
         Ok(id)
     }
 
+    /// An empty repo, for packages added one file at a time
+    /// ([`Pool::add_rpm`]).
+    pub fn create_empty(&mut self, name: &str, priority: i32) -> Result<RepoId> {
+        Ok(self.create_repo(name, priority)?.0)
+    }
+
+    /// Adds one package file's header to `repo`. Call [`Pool::prepare`]
+    /// again before the next lookup or solve.
+    pub fn add_rpm(&mut self, repo: RepoId, path: &Path) -> Result<SolvableId> {
+        let c = cpath(path)?;
+        // SAFETY: the repo belongs to this pool; libsolv reads the file and
+        // internalizes the repo (no REPO_NO_INTERNALIZE).
+        let id = unsafe { sys::repo_add_rpm(self.repo_ptr(repo), c.as_ptr(), 0) };
+        if id == 0 {
+            return Err(self.error(path.display().to_string()));
+        }
+        Ok(SolvableId(id))
+    }
+
     /// Writes a repo as a `.solv` file, which loads in a fraction of the
     /// time its XML takes.
     pub fn write_solv(&self, repo: RepoId, path: &Path) -> Result<()> {
@@ -219,6 +262,9 @@ impl Pool {
     /// Builds the lookup indexes. Call after loading every repo and before
     /// [`Pool::select`] or [`Pool::install`].
     pub fn prepare(&mut self) {
+        // A considered map from an earlier solve is sized for the solvables
+        // of then; one added since would read past it.
+        self.set_considered(&[]);
         // SAFETY: live pool.
         unsafe {
             sys::pool_addfileprovides(self.p());
@@ -266,6 +312,20 @@ impl Pool {
         Ok(pkgs.ids().map(SolvableId).collect())
     }
 
+    /// Image packages that own `path`, from the rpmdb's file lists.
+    pub fn image_owners(&self, path: &str) -> Result<Vec<SolvableId>> {
+        let path = cstr(path)?;
+        let flags = sys::SELECTION_FILELIST | sys::SELECTION_INSTALLED_ONLY;
+        let mut sel = Queue::new();
+        let mut pkgs = Queue::new();
+        // SAFETY: as in select().
+        unsafe {
+            sys::selection_make(self.p(), &mut sel.0, path.as_ptr(), flags as i32);
+            sys::selection_solvables(self.p(), &mut sel.0, &mut pkgs.0);
+        }
+        Ok(pkgs.ids().map(SolvableId).collect())
+    }
+
     /// Reads a package's details.
     pub fn package(&self, id: SolvableId) -> Package {
         // SAFETY: ids come from this pool (all/select/solve), so they index
@@ -281,6 +341,13 @@ impl Pool {
                 owned((*(*s).repo).name)
             };
             let mut medianr = 0;
+            let mut kind = 0;
+            let sum = sys::solvable_lookup_checksum(s, sys::SOLVABLE_CHECKSUM as i32, &mut kind);
+            let sha256 = if kind == sys::REPOKEY_TYPE_SHA256 as i32 {
+                owned(sum)
+            } else {
+                String::new()
+            };
             Package {
                 id,
                 name: owned(sys::pool_id2str(p, (*s).name)),
@@ -295,6 +362,7 @@ impl Pool {
                 location: owned(sys::solvable_lookup_location(s, &mut medianr)),
                 download_size: sys::solvable_lookup_num(s, sys::SOLVABLE_DOWNLOADSIZE as i32, 0),
                 install_size: sys::solvable_lookup_num(s, sys::SOLVABLE_INSTALLSIZE as i32, 0),
+                sha256,
             }
         }
     }
@@ -326,9 +394,18 @@ impl Pool {
 
     /// Solves installing `specs` on top of the installed set, which stays
     /// exactly as it is: nothing in it may be removed, upgraded or
-    /// replaced. `hidden` packages are treated as if absent from the repos.
+    /// replaced. `hidden` packages are treated as if absent from the repos;
+    /// `favored` ones win over other candidates (what is already locked).
     /// Weak dependencies are not pulled in.
-    pub fn install(&mut self, specs: &[&str], hidden: &[SolvableId]) -> Result<Solution> {
+    pub fn install(
+        &mut self,
+        specs: &[&str],
+        hidden: &[SolvableId],
+        favored: &[SolvableId],
+    ) -> Result<Solution> {
+        // Selections honour the considered map; the previous solve's hiding
+        // must not decide what a spec matches.
+        self.set_considered(&[]);
         let mut missing = Vec::new();
         for spec in specs {
             if self.select(spec)?.is_empty() {
@@ -336,7 +413,7 @@ impl Pool {
             }
         }
         if !missing.is_empty() {
-            return Ok(Solution::Problems(missing));
+            return Ok(Solution::Problems(Problems::message(missing)));
         }
         let mut job = self.one_of_per_spec(specs)?;
         if let Some(installed) = self.installed {
@@ -346,6 +423,9 @@ impl Pool {
                 (sys::SOLVER_LOCK | sys::SOLVER_SOLVABLE_REPO) as i32,
                 repoid,
             );
+        }
+        for id in favored {
+            job.push2((sys::SOLVER_FAVOR | sys::SOLVER_SOLVABLE) as i32, id.0);
         }
         self.set_considered(hidden);
 
@@ -357,10 +437,16 @@ impl Pool {
             sys::solver_set_flag(solver.0, sys::SOLVER_FLAG_ALLOW_UNINSTALL as i32, 0);
             let nproblems = sys::solver_solve(solver.0, &mut job.0);
             if nproblems > 0 {
-                let problems = (1..=nproblems)
+                let messages = (1..=nproblems)
                     .map(|i| owned(sys::solver_problem2str(solver.0, i)))
                     .collect();
-                return Ok(Solution::Problems(problems));
+                let mut involved = Vec::new();
+                for i in 1..=nproblems {
+                    self.involved(solver.0, i, &mut involved);
+                }
+                involved.sort();
+                involved.dedup();
+                return Ok(Solution::Problems(Problems { messages, involved }));
             }
             let trans = Transaction(sys::solver_create_transaction(solver.0));
             let mut adds = Vec::new();
@@ -382,15 +468,66 @@ impl Pool {
             if !changes.is_empty() {
                 // The lock should make this impossible; refuse rather than
                 // trust it.
-                return Ok(Solution::Problems(
+                return Ok(Solution::Problems(Problems::message(
                     changes
                         .into_iter()
                         .map(|n| format!("the solution would change {n}, which is in the image"))
                         .collect(),
-                ));
+                )));
             }
             adds.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(Solution::Install(adds))
+        }
+    }
+
+    /// Adds the packages `problem`'s rules name to `out`.
+    ///
+    /// # Safety
+    /// `solver` is live and has just solved with problems.
+    unsafe fn involved(&self, solver: *mut sys::Solver, problem: i32, out: &mut Vec<SolvableId>) {
+        let mut rules = Queue::new();
+        // SAFETY: per the contract; the queue is initialised.
+        unsafe { sys::solver_findallproblemrules(solver, problem, &mut rules.0) };
+        for rule in rules.ids() {
+            let (mut source, mut target, mut dep) = (0, 0, 0);
+            // SAFETY: rule ids come from the solver.
+            unsafe { sys::solver_ruleinfo(solver, rule, &mut source, &mut target, &mut dep) };
+            for id in [source, target] {
+                if id > 0 {
+                    out.push(SolvableId(id));
+                }
+            }
+            if dep != 0 {
+                out.extend(self.providers(dep));
+            }
+        }
+    }
+
+    /// Every package providing `dep`, as libsolv's inline
+    /// `pool_whatprovides` finds them.
+    fn providers(&self, dep: sys::Id) -> Vec<SolvableId> {
+        const RELDEP: u32 = 0x8000_0000;
+        let p = self.p();
+        // SAFETY: the pool is prepared; offsets index whatprovidesdata,
+        // whose lists end in 0. Rel ids index whatprovides_rel.
+        unsafe {
+            let cached = if (dep as u32) & RELDEP == 0 {
+                *(*p).whatprovides.add(dep as usize)
+            } else {
+                *(*p).whatprovides_rel.add(((dep as u32) ^ RELDEP) as usize)
+            };
+            let off = if cached != 0 {
+                cached as sys::Id
+            } else {
+                sys::pool_addrelproviders(p, dep)
+            };
+            let mut out = Vec::new();
+            let mut at = (*p).whatprovidesdata.add(off as usize);
+            while *at != 0 {
+                out.push(SolvableId(*at));
+                at = at.add(1);
+            }
+            out
         }
     }
 

@@ -7,10 +7,23 @@
 //! fixtures, without root and without a bootc system.
 
 pub mod deployment;
+pub mod generation;
+pub mod lockfile;
+pub mod manifest;
 pub mod os_release;
+pub mod state;
 
 pub use deployment::{Deployment, DeploymentSource, Deployments, RpmOstree};
+pub use generation::{Built, Generation};
+pub use lockfile::{Lock, LockedPackage, LockedRepo};
+pub use manifest::{Manifest, RepoEntry};
 pub use os_release::OsRelease;
+pub use state::{State, Store};
+
+/// The version of the state format (manifest, lockfile, generation layout)
+/// this nx writes. An older nx refuses newer state rather than misread it
+/// (design invariant 9).
+pub const FORMAT: u32 = 1;
 
 /// Errors from reading the system's state.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +48,23 @@ pub enum Error {
         what: &'static str,
         source: serde_json::Error,
     },
+    #[error("writing {path}: {source}")]
+    Write {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[error("parsing {path}: {message}")]
+    Toml {
+        path: std::path::PathBuf,
+        message: String,
+    },
+    #[error("{path} is format {version}, newer than this nx understands")]
+    Newer {
+        path: std::path::PathBuf,
+        version: u32,
+    },
+    #[error("{0}")]
+    Conflict(String),
     #[error("{0}")]
     Invalid(String),
 }

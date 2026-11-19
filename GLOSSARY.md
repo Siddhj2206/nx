@@ -53,6 +53,11 @@ One immutable, complete installed set under `/var/lib/nx/generations/<N>`,
 built for one image digest. `current` points at one; rollback moves it.
 _Avoid_: snapshot, version (of the installed set)
 
+**store**:
+`/var/lib/nx/store/rpm/<sha256>`: each package file nx installed, verified
+and unpacked once, named by the file's SHA-256. Generations link into it.
+_Avoid_: cache (the cache holds metadata and downloads, and can be deleted)
+
 **extension**:
 The one systemd-sysext directory nx assembles from a generation's host tier.
 

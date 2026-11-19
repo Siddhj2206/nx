@@ -18,5 +18,6 @@ workspace = true
 anstream = "1.0.0"
 anyhow = "1.0.104"
 clap = { version = "4.6.8", features = ["derive"] }
+nx-librpm = { version = "1.0.0-alpha.0", path = "../nx-librpm" }
 nx-core = { version = "1.0.0-alpha.0", path = "../nx-core" }
 nx-rpm = { version = "1.0.0-alpha.0", path = "../nx-rpm" }

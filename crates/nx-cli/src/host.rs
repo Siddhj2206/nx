@@ -1,10 +1,12 @@
 //! The host tier's view of this machine: which image, which repos, where
-//! the metadata cache lives. Shared by `search`, `info` and `add`.
+//! the metadata cache and nx's state live. Shared by every host-tier
+//! command.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use nx_core::{DeploymentSource, OsRelease, RpmOstree};
+use nx_core::{DeploymentSource, Manifest, OsRelease, RpmOstree, State};
+use nx_rpm::repo::{Added, Repo};
 use nx_rpm::{Freshness, Options, Refresh, Universe, Ureq, Vars};
 
 use crate::ui::Ui;
@@ -17,6 +19,57 @@ pub fn cache_dir() -> Result<PathBuf> {
     }
     let home = std::env::var_os("HOME").context("neither XDG_CACHE_HOME nor HOME is set")?;
     Ok(PathBuf::from(home).join(".cache/nx"))
+}
+
+/// nx's state directory: `NX_STATE_DIR`, else `/var/lib/nx`. Until nxd
+/// (which owns `/var/lib/nx`) exists, changing state needs write access to
+/// it; the variable points a VM test or a user at another directory.
+pub fn state() -> State {
+    let root = std::env::var_os("NX_STATE_DIR")
+        .filter(|d| !d.is_empty())
+        .map_or_else(
+            || PathBuf::from(nx_core::state::DEFAULT_ROOT),
+            PathBuf::from,
+        );
+    State::new(root)
+}
+
+/// Where `nx repo add` pins third-party keys.
+pub fn keys_dir(state: &State) -> PathBuf {
+    state.root().join("keys")
+}
+
+/// The booted image's own root, for checking what the image ships: the
+/// deployment's tree under `/sysroot`, which no extension overlays, or `/`
+/// off a bootc system.
+pub fn image_root(source: &dyn DeploymentSource) -> PathBuf {
+    source
+        .deployments()
+        .ok()
+        .and_then(|d| d.booted().map(|b| b.root(Path::new("/sysroot"))))
+        .filter(|r| r.join("usr").is_dir())
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// The repos a manifest adds.
+pub fn added_repos(manifest: &Manifest, vars: &Vars) -> Result<Vec<Repo>> {
+    manifest
+        .repos
+        .iter()
+        .map(|r| {
+            Repo::added(
+                &Added {
+                    name: &r.name,
+                    baseurl: r.baseurl.as_deref(),
+                    metalink: r.metalink.as_deref(),
+                    gpgkey: r.gpgkey.as_deref(),
+                    priority: r.priority,
+                },
+                vars,
+            )
+            .with_context(|| format!("repo {} in the manifest", r.name))
+        })
+        .collect()
 }
 
 /// Resolver options for the booted system under `root`.
@@ -39,13 +92,16 @@ pub fn options(root: &Path, source: &dyn DeploymentSource, refresh: Refresh) -> 
         },
         arch,
         refresh,
+        extra: Vec::new(),
     })
 }
 
-/// Loads the universe for the running system, telling the user about
-/// downloads, out-of-date metadata and repos that could not be loaded.
-pub fn load(ui: &mut Ui, refresh: Refresh) -> Result<Universe> {
-    let opts = options(Path::new("/"), &RpmOstree, refresh)?;
+/// Loads the universe for the running system and the repos `manifest`
+/// adds, telling the user about downloads, out-of-date metadata and repos
+/// that could not be loaded.
+pub fn load(ui: &mut Ui, refresh: Refresh, manifest: &Manifest) -> Result<Universe> {
+    let mut opts = options(Path::new("/"), &RpmOstree, refresh)?;
+    opts.extra = added_repos(manifest, &opts.vars)?;
     let err = &mut ui.err;
     let universe = Universe::load(&opts, &Ureq::new(), &mut |repo| {
         let sym = err.style.cyan(crate::ui::SYM_FETCH);
@@ -75,4 +131,12 @@ pub fn load(ui: &mut Ui, refresh: Refresh) -> Result<Universe> {
         ));
     }
     Ok(universe)
+}
+
+/// The current generation's manifest, or an empty one.
+pub fn current_manifest(state: &State) -> Result<Manifest> {
+    Ok(nx_core::Generation::current(state)
+        .context("reading the current generation")?
+        .map(|g| g.manifest)
+        .unwrap_or_default())
 }

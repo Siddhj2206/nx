@@ -1,41 +1,72 @@
-//! `nx add`: resolves only (`--dry-run`) until the store (M2) and
-//! activation (M3) land.
+//! `nx add`: resolves the manifest plus the new packages, downloads and
+//! unpacks what the store lacks, and builds the next generation. Nothing
+//! is activated yet: that is nxd's job.
 
-use anyhow::{Result, bail};
-use nx_rpm::{Package, Plan, Universe};
+use std::time::Instant;
 
+use anyhow::Result;
+use nx_rpm::{Package, Refresh};
+
+use crate::apply::Session;
 use crate::ui::{self, Stream, Ui};
 
-/// Refuses before anything is loaded: only `--dry-run` works yet.
-pub fn check(dry_run: bool) -> Result<()> {
-    if !dry_run {
-        bail!("nx add can only plan for now: run nx add --dry-run");
+pub fn run(ui: &mut Ui, specs: &[String], dry_run: bool, refresh: Refresh) -> Result<()> {
+    let started = Instant::now();
+    let mut session = Session::open(ui, refresh, dry_run, None)?;
+    let mut manifest = session.manifest();
+    let mut all = manifest.host.packages.clone();
+    for spec in specs {
+        if !all.contains(spec) {
+            all.push(spec.clone());
+        }
     }
+    let resolved = session.resolve(ui, &all)?;
+
+    // A new spec nothing was resolved for is already in the image; it is
+    // left out of the manifest, as there is nothing to keep.
+    let fresh: Vec<&String> = specs
+        .iter()
+        .filter(|s| !manifest.host.packages.contains(s))
+        .collect();
+    let (wanted, in_image): (Vec<&String>, Vec<&String>) = fresh
+        .into_iter()
+        .partition(|s| resolved.all.iter().any(|p| p.requested.contains(s)));
+    let in_image: Vec<&str> = in_image.iter().map(|s| s.as_str()).collect();
+
+    if dry_run {
+        render_plan(&mut ui.out, &in_image, &resolved.new);
+        return Ok(());
+    }
+    if resolved.new.is_empty() && wanted.is_empty() {
+        render_nothing(&mut ui.out, specs, &in_image);
+        return Ok(());
+    }
+    let wanted: Vec<String> = wanted.into_iter().cloned().collect();
+    manifest.add_host(&wanted);
+    let built = session.install(ui, &manifest, &resolved.all)?;
+    for nevra in &built.outside_usr {
+        ui.warn(format_args!(
+            "{nevra} has files outside /usr, which the extension leaves out"
+        ));
+    }
+    render_added(
+        &mut ui.out,
+        &resolved.new,
+        built.generation.number,
+        started.elapsed().as_secs_f64(),
+    );
+    ui.warn(format_args!(
+        "generation {} is built but not active: nx cannot activate generations yet",
+        built.generation.number
+    ));
     Ok(())
 }
 
-pub fn run(ui: &mut Ui, universe: &mut Universe, specs: &[String]) -> Result<()> {
-    let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
-    match universe.plan(&specs)? {
-        Plan::Install(packages) => {
-            render(&mut ui.out, &specs, &packages);
-            Ok(())
-        }
-        Plan::Problems(problems) => {
-            bail!("can't add {}\n{}", specs.join(" "), problems.join("\n"))
-        }
-    }
-}
-
-/// Lists what adding `specs` installs, in columns.
-fn render(out: &mut Stream, specs: &[&str], packages: &[Package]) {
+/// `--dry-run`: what adding would install, in columns.
+fn render_plan(out: &mut Stream, in_image: &[&str], packages: &[Package]) {
     let style = out.style;
     if packages.is_empty() {
-        out.line(format_args!(
-            "{} {} already in the image",
-            style.green(ui::SYM_DONE),
-            specs.join(", ")
-        ));
+        render_nothing(out, &[], in_image);
         return;
     }
     let column =
@@ -64,15 +95,58 @@ fn render(out: &mut Stream, specs: &[&str], packages: &[Package]) {
     )));
 }
 
+/// Nothing to install: say why for each spec.
+fn render_nothing(out: &mut Stream, specs: &[String], in_image: &[&str]) {
+    let style = out.style;
+    let sym = style.green(ui::SYM_DONE);
+    if !in_image.is_empty() {
+        out.line(format_args!(
+            "{sym} {} already in the image",
+            in_image.join(", ")
+        ));
+    }
+    let added: Vec<&str> = specs
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !in_image.contains(s))
+        .collect();
+    if !added.is_empty() {
+        out.line(format_args!("{sym} {} already added", added.join(", ")));
+    }
+    if in_image.is_empty() && added.is_empty() {
+        out.line(format_args!("{sym} nothing to add"));
+    }
+}
+
+/// After an install: one `+` line per new package, then the total.
+fn render_added(out: &mut Stream, packages: &[Package], generation: u32, secs: f64) {
+    let style = out.style;
+    let size: u64 = packages.iter().map(|p| p.download_size).sum();
+    for p in packages {
+        out.line(format_args!(
+            "{} {} {}",
+            style.green(ui::SYM_ADDED),
+            p.name,
+            style.dim(&p.evr)
+        ));
+    }
+    out.line(format_args!(
+        "{} {} · generation {generation} · {} in {secs:.1}s",
+        style.green(ui::SYM_DONE),
+        ui::plural(packages.len(), "package") + " added",
+        ui::size(size)
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ui::SharedBuf;
 
-    fn text(specs: &[&str], packages: &[Package]) -> String {
+    fn text(f: impl FnOnce(&mut Stream)) -> String {
         let buf = SharedBuf::default();
         let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
-        render(&mut ui.out, specs, packages);
+        f(&mut ui.out);
         buf.text()
     }
 
@@ -88,13 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn lists_packages_in_columns_with_totals() {
+    fn plans_in_columns_with_totals() {
         let plan = [
             package("libxkbcommon-devel", "1.11.0-1.fc45", "fedora", 60),
             package("pkgconf", "2.4-1.fc45", "updates-archive", 40),
         ];
         assert_eq!(
-            text(&["libxkbcommon-devel"], &plan),
+            text(|out| render_plan(out, &[], &plan)),
             "\n\
              \x20 + libxkbcommon-devel  1.11.0-1.fc45  fedora           60 KiB\n\
              \x20 + pkgconf             2.4-1.fc45     updates-archive  40 KiB\n\
@@ -104,7 +178,25 @@ mod tests {
     }
 
     #[test]
-    fn nothing_to_add() {
-        assert_eq!(text(&["glibc"], &[]), "  ✓ glibc already in the image\n");
+    fn says_why_there_is_nothing_to_add() {
+        assert_eq!(
+            text(|out| render_plan(out, &["glibc"], &[])),
+            "  ✓ glibc already in the image\n"
+        );
+        let specs = ["glibc".to_owned(), "wayland-devel".to_owned()];
+        assert_eq!(
+            text(|out| render_nothing(out, &specs, &["glibc"])),
+            "  ✓ glibc already in the image\n  ✓ wayland-devel already added\n"
+        );
+    }
+
+    #[test]
+    fn reports_what_was_added() {
+        let added = [package("libxkbcommon-devel", "1.13.1-4.fc45", "koji", 74)];
+        assert_eq!(
+            text(|out| render_added(out, &added, 3, 1.24)),
+            "  + libxkbcommon-devel 1.13.1-4.fc45\n\
+             \x20 ✓ 1 package added · generation 3 · 74 KiB in 1.2s\n"
+        );
     }
 }

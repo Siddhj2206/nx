@@ -14,8 +14,11 @@ const GROUPS: [&str; 3] = ["Packages", "Maintenance", "System"];
 /// group. The test below fails for a command left out.
 const PLACEMENT: &[(&str, &str)] = &[
     ("add", "Packages"),
+    ("list", "Packages"),
     ("search", "Packages"),
     ("info", "Packages"),
+    ("why", "Packages"),
+    ("repo", "Maintenance"),
     ("status", "System"),
 ];
 
@@ -79,12 +82,25 @@ pub fn command(s: &mut Stream, name: &str) {
         "  {} nx {}{}\n",
         st.bold("Usage:"),
         name,
-        usage_args(c)
+        if c.has_subcommands() {
+            " <command> [args]".to_owned()
+        } else {
+            usage_args(c)
+        }
     ));
     let args: Vec<_> = c
         .get_arguments()
         .filter(|a| !a.is_hide_set() && !matches!(a.get_id().as_str(), "help" | "version"))
         .collect();
+    let subcommands: Vec<_> = c.get_subcommands().filter(|c| !c.is_hide_set()).collect();
+    if !subcommands.is_empty() {
+        s.raw(format_args!("\n  {}\n", st.dim("Commands")));
+        for sub in subcommands {
+            let left = format!("{}{}", st.cyan(sub.get_name()), usage_args(sub));
+            let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            s.raw(format_args!("    {}{about}\n", pad(&left, 22)));
+        }
+    }
     if !args.is_empty() {
         s.raw(format_args!("\n  {}\n", st.dim("Options")));
         for a in args {

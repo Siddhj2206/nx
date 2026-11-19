@@ -45,7 +45,7 @@ pub struct Vars {
 }
 
 impl Vars {
-    fn expand(&self, s: &str) -> String {
+    pub fn expand(&self, s: &str) -> String {
         s.replace("${releasever}", &self.releasever)
             .replace("$releasever", &self.releasever)
             .replace("${basearch}", &self.basearch)
@@ -158,6 +158,77 @@ pub fn parse(text: &str, file: &Path, vars: &Vars) -> Vec<Repo> {
         .collect()
 }
 
+/// Priority of a repo added with `nx repo add`: one below Fedora's, so
+/// Fedora wins a name both repos have (design: *Repositories and COPR*).
+pub const ADDED_PRIORITY: i32 = DEFAULT_PRIORITY + 1;
+
+/// Where COPR serves its builds.
+const COPR: &str = "https://download.copr.fedorainfracloud.org/results";
+
+/// `copr:owner/project` → its base URL for this release and arch, and its
+/// key's URL.
+pub fn copr(name: &str, vars: &Vars) -> Option<(String, String)> {
+    let (owner, project) = name.strip_prefix("copr:")?.split_once('/')?;
+    let ok = |s: &str| {
+        // Names start with a letter or digit (`@` for a group), so `..`
+        // can't climb out of the results tree.
+        s.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '@')
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"@-_.+".contains(&b))
+    };
+    if !ok(owner) || !ok(project) {
+        return None;
+    }
+    let base = format!(
+        "{COPR}/{owner}/{project}/fedora-{}-{}/",
+        vars.releasever, vars.basearch
+    );
+    Some((base, format!("{COPR}/{owner}/{project}/pubkey.gpg")))
+}
+
+/// What the manifest records about an added repo.
+#[derive(Debug, Clone, Default)]
+pub struct Added<'a> {
+    pub name: &'a str,
+    pub baseurl: Option<&'a str>,
+    pub metalink: Option<&'a str>,
+    pub gpgkey: Option<&'a str>,
+    pub priority: Option<i32>,
+}
+
+impl Repo {
+    /// A repo from the manifest. `copr:owner/project` needs only its name.
+    pub fn added(a: &Added, vars: &Vars) -> Result<Self> {
+        let (baseurl, gpgkey) = match (a.baseurl, a.metalink, copr(a.name, vars)) {
+            (None, None, Some((base, key))) => (vec![base], vec![key]),
+            (None, None, None) => {
+                return Err(Error::Invalid(format!(
+                    "repo {} has neither baseurl nor metalink",
+                    a.name
+                )));
+            }
+            (base, _, _) => (
+                base.map(|b| vec![vars.expand(b)]).unwrap_or_default(),
+                a.gpgkey.map(|k| vec![vars.expand(k)]).unwrap_or_default(),
+            ),
+        };
+        Ok(Self {
+            id: a.name.replace('/', ":"),
+            name: a.name.to_owned(),
+            baseurl,
+            metalink: a.metalink.map(|m| vars.expand(m)),
+            mirrorlist: None,
+            enabled: true,
+            gpgcheck: true,
+            gpgkey,
+            priority: a.priority.unwrap_or(ADDED_PRIORITY),
+            cost: 1000,
+            metadata_expire: Some(DEFAULT_EXPIRE),
+            file: PathBuf::from("manifest.toml"),
+        })
+    }
+}
+
 /// dnf's default `metadata_expire`: 48 hours.
 pub const DEFAULT_EXPIRE: Duration = Duration::from_secs(48 * 3600);
 
@@ -189,6 +260,31 @@ fn truthy(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copr_repos_need_only_a_name() -> Result<()> {
+        let r = Repo::added(
+            &Added {
+                name: "copr:atim/lazygit",
+                ..Added::default()
+            },
+            &vars(),
+        )?;
+        assert_eq!(r.id, "copr:atim:lazygit");
+        assert_eq!(
+            r.baseurl,
+            ["https://download.copr.fedorainfracloud.org/results/atim/lazygit/fedora-45-x86_64/"]
+        );
+        assert_eq!(
+            r.gpgkey,
+            ["https://download.copr.fedorainfracloud.org/results/atim/lazygit/pubkey.gpg"]
+        );
+        assert_eq!(r.priority, ADDED_PRIORITY);
+        assert!(r.gpgcheck);
+        assert!(copr("copr:../y", &vars()).is_none());
+        assert!(copr("copr:onlyowner", &vars()).is_none());
+        Ok(())
+    }
 
     fn vars() -> Vars {
         Vars {

@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+nx-librpm = { version = "1.0.0-alpha.0", path = "../nx-librpm" }
 nx-solv = { version = "1.0.0-alpha.0", path = "../nx-solv" }
 quick-xml = "0.42.0"
 sha2 = "0.11.1"
