@@ -11,7 +11,8 @@
 #   sudo spike/m0-sysext.sh --remove
 #
 # Record what it prints in docs/design.md (M0) and answer the open questions
-# there: refresh latency, SELinux labels, overlay headroom.
+# there: refresh latency, SELinux labels, overlay headroom. Results from
+# Neptuno 45.20261118 are in the design doc under M0.
 set -euo pipefail
 
 name=nx-spike
@@ -63,7 +64,9 @@ done
 
 step "download (only the named packages, no dependency resolution)"
 t=$(date +%s%N)
-dnf download --destdir "$work/rpms" "${packages[@]}"
+# Native and noarch only: without --arch, dnf also fetches the i686 builds
+# and their files collide on unpack.
+dnf download --arch "$(uname -m)" --arch noarch --destdir "$work/rpms" "${packages[@]}"
 echo "download: $(ms "$t") ms"
 
 step "unpack into $ext"
@@ -86,8 +89,12 @@ printf 'ID=%s\nVERSION_ID=%s\n' "$ID" "$VERSION_ID" \
 echo "unpack: $(ms "$t") ms, $(find "$ext" -type f | wc -l) files, $(du -sh "$ext" | cut -f1)"
 
 step "SELinux labels"
-if command -v restorecon >/dev/null; then
-	t=$(date +%s%N); restorecon -RF "$ext"; echo "restorecon: $(ms "$t") ms"
+# Label the tree as if it were mounted at /, which is where its files
+# appear once merged. restorecon would label them by where they sit
+# (/var/lib/extensions → var_lib_t), not as usr_t/bin_t/lib_t.
+if command -v setfiles >/dev/null; then
+	fc=/etc/selinux/targeted/contexts/files/file_contexts
+	t=$(date +%s%N); setfiles -r "$ext" "$fc" "$ext"; echo "setfiles -r: $(ms "$t") ms"
 	sample=$(find "$ext/usr" -type f -name '*.pc' -print -quit)
 	[[ -n $sample ]] && ls -Z "$sample"
 fi
