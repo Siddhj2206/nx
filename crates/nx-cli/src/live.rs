@@ -40,7 +40,12 @@ pub fn activate(ui: &mut Ui, state: &State, number: u32, forced: Option<Backend>
         e => anyhow::Error::new(e).context("asking nxd to activate the generation"),
     })?;
     let live = match response {
-        Response::Activated { backend, fallback } => {
+        Response::Activated {
+            backend,
+            fallback,
+            events,
+            warnings,
+        } => {
             if let Some(why) = fallback {
                 ui.warn(format_args!(
                     "sysext could not merge ({why}); using the prefix backend, `nx shell` exports it"
@@ -51,6 +56,12 @@ pub fn activate(ui: &mut Ui, state: &State, number: u32, forced: Option<Backend>
                 backend.name(),
                 started.elapsed().as_millis()
             ));
+            for event in events {
+                ui.service(event);
+            }
+            for warning in warnings {
+                ui.warn(warning);
+            }
             Ok(())
         }
         Response::Failed { message } => Err(anyhow::anyhow!(message)),

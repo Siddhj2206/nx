@@ -2,13 +2,16 @@
 //! image digest. Building assembles the extension tree from the store; it
 //! never activates anything (that is nxd's job).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use nx_scriptlet::{Context, Intents, Leftover};
+use serde::{Deserialize, Serialize};
 
 use crate::lockfile::Lock;
 use crate::manifest::Manifest;
 use crate::state::{self, State};
-use crate::{Error, Result};
+use crate::{Error, FORMAT, Result};
 
 /// A generation on disk.
 #[derive(Debug, Clone)]
@@ -17,6 +20,87 @@ pub struct Generation {
     pub dir: PathBuf,
     pub manifest: Manifest,
     pub lock: Lock,
+    /// What its packages' scriptlets mean for units (empty for a
+    /// generation built before nx read scriptlets).
+    pub activation: Activation,
+}
+
+/// `activation.toml`: what making a generation live asks of systemd, as
+/// translated from its packages' scriptlets. nxd diffs the outgoing and
+/// incoming generation's records: a package that appears gets its presets
+/// applied, one that disappears has its units stopped and disabled, one
+/// whose version changes has its units restarted if running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activation {
+    #[serde(default = "format")]
+    pub version: u32,
+    #[serde(default, rename = "package")]
+    pub packages: Vec<ActivationPackage>,
+}
+
+fn format() -> u32 {
+    FORMAT
+}
+
+impl Default for Activation {
+    fn default() -> Self {
+        Self {
+            version: FORMAT,
+            packages: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationPackage {
+    pub name: String,
+    pub nevra: String,
+    #[serde(flatten)]
+    pub intents: Intents,
+    /// Names of the `sysusers.d` files the package ships or nx wrote for
+    /// it, which nxd applies when the package appears or changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sysusers_files: Vec<String>,
+    /// The same for `tmpfiles.d`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tmpfiles_files: Vec<String>,
+}
+
+impl Activation {
+    pub fn parse(text: &str, path: &Path) -> Result<Self> {
+        let a: Self = toml::from_str(text).map_err(|e| Error::Toml {
+            path: path.to_owned(),
+            message: e.to_string(),
+        })?;
+        if a.version > FORMAT {
+            return Err(Error::Newer {
+                path: path.to_owned(),
+                version: a.version,
+            });
+        }
+        Ok(a)
+    }
+
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string(self).map_err(|e| Error::Serialize {
+            what: "activation.toml",
+            message: e.to_string(),
+        })
+    }
+
+    pub fn package(&self, name: &str) -> Option<&ActivationPackage> {
+        self.packages.iter().find(|p| p.name == name)
+    }
+}
+
+/// A package whose scriptlets nx won't translate, and the text it left.
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub name: String,
+    pub nevra: String,
+    /// What an allowlist entry for it must say.
+    pub digest: String,
+    pub leftovers: Vec<Leftover>,
 }
 
 impl Generation {
@@ -24,10 +108,22 @@ impl Generation {
         let dir = state.generations_dir().join(number.to_string());
         let manifest_path = dir.join("manifest.toml");
         let lock_path = dir.join("lock.toml");
+        let activation_path = dir.join("activation.toml");
+        let activation = match std::fs::read_to_string(&activation_path) {
+            Ok(text) => Activation::parse(&text, &activation_path)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Activation::default(),
+            Err(source) => {
+                return Err(Error::Read {
+                    path: activation_path,
+                    source,
+                });
+            }
+        };
         Ok(Self {
             number,
             manifest: Manifest::parse(&read(&manifest_path)?, &manifest_path)?,
             lock: Lock::parse(&read(&lock_path)?, &lock_path)?,
+            activation,
             dir,
         })
     }
@@ -91,15 +187,20 @@ pub struct Spec<'a> {
     pub image_root: &'a Path,
     /// The image's os-release `ID`, for the extension-release file.
     pub os_id: &'a str,
+    /// Whether the image has a package of this name: a trigger watching it
+    /// can fire.
+    pub image_has: &'a dyn Fn(&str) -> bool,
 }
 
 /// A built generation, and what was left out of it.
 #[derive(Debug)]
 pub struct Built {
     pub generation: Generation,
-    /// Packages with files outside `/usr`, which an extension cannot carry;
-    /// they wait for the scriptlet translator (tmpfiles, sysusers).
+    /// Packages with files an extension can't carry and tmpfiles can't
+    /// place either (under `/opt`, `/srv`, `/boot`…); they are left out.
     pub outside_usr: Vec<String>,
+    /// Packages whose leftover scriptlets the manifest allows.
+    pub allowed: Vec<String>,
 }
 
 /// Where the extension declares which OS it extends.
@@ -121,20 +222,103 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     let store = state.store();
     let mut tree = Tree::default();
     let mut outside_usr = Vec::new();
+    let mut allowed = Vec::new();
+    let mut refusals = Vec::new();
+    let mut activation = Activation::default();
+    // Files the extension gains that no package ships: sysusers.d and
+    // tmpfiles.d translations.
+    let mut generated: Vec<(String, String)> = Vec::new();
+    let names: HashSet<&str> = spec.lock.host.iter().map(|p| p.name.as_str()).collect();
+    let ctx = Context {
+        present: &|n| names.contains(n) || (spec.image_has)(n),
+        removable: &|n| names.contains(n),
+    };
     for p in &spec.lock.host {
         let root = store.path(&p.sha256);
         if !root.is_dir() {
             return Err(Error::Invalid(format!("{} is not in the store", p.nevra)));
         }
-        if top_level(&root)?.iter().any(|name| name != "usr") {
+        let meta = store
+            .meta(&p.sha256)?
+            .ok_or_else(|| Error::Invalid(format!("{} has no recorded scriptlets", p.nevra)))?;
+        let translation = nx_scriptlet::translate(&meta.scripts, &ctx);
+        if !translation.leftovers.is_empty() {
+            let digest = translation.digest();
+            let ok = spec
+                .manifest
+                .scriptlets
+                .iter()
+                .any(|a| a.package == p.name && a.matches(&digest));
+            if ok {
+                allowed.push(p.name.clone());
+            } else {
+                refusals.push(Refusal {
+                    name: p.name.clone(),
+                    nevra: p.nevra.clone(),
+                    digest,
+                    leftovers: translation.leftovers,
+                });
+                continue;
+            }
+        }
+        let tmpfiles = nx_scriptlet::tmpfiles(&meta.files);
+        let mut left_out = !tmpfiles.unplaced.is_empty();
+        for name in top_level(&root)? {
+            let into = match name.as_str() {
+                "usr" => "usr".to_owned(),
+                // The usrmerge links of the image.
+                "bin" | "sbin" | "lib" | "lib64" => format!("usr/{name}"),
+                // Config and state defaults: copied into place by tmpfiles.
+                "etc" | "var" => format!("usr/share/factory/{name}"),
+                // /run holds directories tmpfiles creates; the record says
+                // whether it holds anything else.
+                "run" => continue,
+                n if n.starts_with(".nx-") => continue,
+                _ => {
+                    left_out = true;
+                    continue;
+                }
+            };
+            tree.add(&root, Path::new(&name), Path::new(&into), &p.nevra)?;
+        }
+        if left_out {
             outside_usr.push(p.nevra.clone());
         }
-        tree.add(&root, Path::new("usr"), &p.nevra)?;
+        let file_stem = format!("nx-{}", p.name);
+        let mut sysusers_files = conf_files(&root, "sysusers.d");
+        let mut tmpfiles_files = conf_files(&root, "tmpfiles.d");
+        if !translation.intents.sysusers.is_empty() {
+            generated.push((
+                format!("usr/lib/sysusers.d/{file_stem}.conf"),
+                generated_file(&p.nevra, &translation.intents.sysusers),
+            ));
+            sysusers_files.push(format!("{file_stem}.conf"));
+        }
+        if !tmpfiles.lines.is_empty() {
+            generated.push((
+                format!("usr/lib/tmpfiles.d/{file_stem}.conf"),
+                generated_file(&p.nevra, &tmpfiles.lines),
+            ));
+            tmpfiles_files.push(format!("{file_stem}.conf"));
+        }
+        activation.packages.push(ActivationPackage {
+            name: p.name.clone(),
+            nevra: p.nevra.clone(),
+            intents: translation.intents,
+            sysusers_files,
+            tmpfiles_files,
+        });
+    }
+    if !refusals.is_empty() {
+        return Err(Error::Scriptlets(refusals));
     }
     let tree = tree.follow_image_links(spec.image_root)?;
     tree.check_image(spec.image_root)?;
     tree.write(&sysext)?;
     tree.verify(&sysext)?;
+    for (rel, text) in &generated {
+        write(&sysext.join(rel), text)?;
+    }
 
     let release = sysext.join(EXTENSION_RELEASE);
     write(
@@ -145,6 +329,8 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     let lock_path = tmp.join("lock.toml");
     write(&manifest_path, &spec.manifest.to_toml()?)?;
     write(&lock_path, &spec.lock.to_toml()?)?;
+    let activation_path = tmp.join("activation.toml");
+    write(&activation_path, &activation.to_toml()?)?;
     // What a later command will read back must be what was asked for.
     let readback = Manifest::parse(&read(&manifest_path)?, &manifest_path)? == *spec.manifest
         && Lock::parse(&read(&lock_path)?, &lock_path)? == *spec.lock;
@@ -162,7 +348,34 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     Ok(Built {
         generation: Generation::read(state, number)?,
         outside_usr,
+        allowed,
     })
+}
+
+/// The `.conf` files a package ships in `usr/lib/<dir>` (or `lib/<dir>`).
+fn conf_files(root: &Path, dir: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for base in ["usr/lib", "lib"] {
+        if let Ok(entries) = std::fs::read_dir(root.join(base).join(dir)) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".conf") && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+fn generated_file(nevra: &str, lines: &[String]) -> String {
+    let mut text = format!("# Written by nx from {nevra}; nx never runs its scriptlets.\n");
+    for l in lines {
+        text.push_str(l);
+        text.push('\n');
+    }
+    text
 }
 
 /// Design invariant 1 for an extension tree already on disk (nxd checks
@@ -228,9 +441,11 @@ enum Node {
 struct Tree(BTreeMap<PathBuf, Node>);
 
 impl Tree {
-    /// Adds `root/rel` and everything under it, owned by `owner`.
-    fn add(&mut self, root: &Path, rel: &Path, owner: &str) -> Result<()> {
-        let path = root.join(rel);
+    /// Adds `root/from` and everything under it, as `to` in the extension,
+    /// owned by `owner`.
+    fn add(&mut self, root: &Path, from: &Path, to: &Path, owner: &str) -> Result<()> {
+        let rel = to;
+        let path = root.join(from);
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -265,7 +480,7 @@ impl Tree {
             let mut names: Vec<_> = entries.flatten().map(|e| e.file_name()).collect();
             names.sort();
             for name in names {
-                self.add(root, &rel.join(name), owner)?;
+                self.add(root, &from.join(&name), &rel.join(&name), owner)?;
             }
         }
         Ok(())
@@ -528,6 +743,15 @@ mod tests {
     /// A state with packages in the store: (sha, [(path, content)]).
     /// Content starting with `->` makes a symlink.
     fn setup(tmp: &TempDir, pkgs: &[(&str, &[(&str, &str)])]) -> Result<(State, Lock)> {
+        setup_meta(tmp, pkgs, &|_| nx_scriptlet::PackageMeta::default())
+    }
+
+    /// [`setup`], with each package's recorded header data from `meta`.
+    fn setup_meta(
+        tmp: &TempDir,
+        pkgs: &[(&str, &[(&str, &str)])],
+        meta: &dyn Fn(&str) -> nx_scriptlet::PackageMeta,
+    ) -> Result<(State, Lock)> {
         let state = State::new(tmp.0.join("state"));
         let guard = state.lock()?;
         let mut lock = Lock::new(Some("sha256:ab".into()), "45", "x86_64");
@@ -543,6 +767,7 @@ mod tests {
                         None => write(&to, content)?,
                     }
                 }
+                state::write_meta(dir, &meta(name))?;
                 Ok::<(), Error>(())
             })?;
             lock.host.push(LockedPackage {
@@ -571,6 +796,25 @@ mod tests {
             lock,
             image_root,
             os_id: "fedora",
+            image_has: &|_| false,
+        }
+    }
+
+    fn script(body: &str) -> nx_scriptlet::Script {
+        nx_scriptlet::Script {
+            interpreter: String::new(),
+            body: body.into(),
+        }
+    }
+
+    fn pkg_file(path: &str, mode: u32, flags: u32) -> nx_scriptlet::PackageFile {
+        nx_scriptlet::PackageFile {
+            path: path.into(),
+            mode,
+            user: "svc".into(),
+            group: "svc".into(),
+            flags,
+            link: String::new(),
         }
     }
 
@@ -599,13 +843,18 @@ mod tests {
         let built = build(&state, &guard, &spec(&manifest, &lock, &root))?;
         let g = &built.generation;
         assert_eq!(g.number, 1);
-        assert_eq!(built.outside_usr, ["filesystem-extra-1-1.fc45.x86_64"]);
+        assert_eq!(built.outside_usr, Vec::<String>::new());
         let sysext = g.sysext();
         assert_eq!(
             std::fs::read_to_string(sysext.join("usr/include/xkbcommon/xkbcommon.h")).ok(),
             Some("h".into())
         );
+        // /etc content waits in the factory for tmpfiles to copy.
         assert!(!sysext.join("etc").exists());
+        assert_eq!(
+            std::fs::read_to_string(sysext.join("usr/share/factory/etc/thing.conf")).ok(),
+            Some("c".into())
+        );
         assert_eq!(
             std::fs::read_link(sysext.join("usr/lib64/libxkbcommon.so")).ok(),
             Some(PathBuf::from("libxkbcommon.so.0"))
@@ -689,6 +938,135 @@ mod tests {
         assert!(sysext.join("usr/bin/tool").is_file());
         assert!(sysext.join("usr/bin/sub/x").is_file());
         assert!(!sysext.join("usr/sbin").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn places_etc_var_and_usrmerge_paths() -> Result<()> {
+        let tmp = TempDir::new("place");
+        let (state, lock) = setup_meta(
+            &tmp,
+            &[(
+                "svc",
+                &[
+                    ("lib/systemd/system/svc.service", "u"),
+                    ("etc/svc.conf", "c"),
+                    ("opt/svc/bin", "o"),
+                    ("usr/bin/svc", "b"),
+                ],
+            )],
+            &|_| nx_scriptlet::PackageMeta {
+                files: vec![
+                    pkg_file("/etc/svc.conf", 0o100_644, 17),
+                    pkg_file("/var/lib/svc", 0o040_750, 0),
+                    pkg_file("/var/lib/svc/state", 0o100_644, 64),
+                    pkg_file("/opt/svc/bin", 0o100_755, 0),
+                ],
+                ..Default::default()
+            },
+        )?;
+        let root = image(&tmp, &[])?;
+        let manifest = Manifest::default();
+        let guard = state.lock()?;
+        let built = build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        let sysext = built.generation.sysext();
+        assert!(sysext.join("usr/lib/systemd/system/svc.service").is_file());
+        assert!(!sysext.join("lib").exists() && !sysext.join("opt").exists());
+        assert_eq!(built.outside_usr, ["svc-1-1.fc45.x86_64"]);
+        let tmpfiles = read(&sysext.join("usr/lib/tmpfiles.d/nx-svc.conf"))?;
+        assert_eq!(
+            tmpfiles,
+            "# Written by nx from svc-1-1.fc45.x86_64; nx never runs its scriptlets.\n\
+             C /etc/svc.conf 0644 svc svc -\n\
+             d /var/lib/svc 0750 svc svc -\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_scriptlets_it_cannot_translate_until_allowed() -> Result<()> {
+        let tmp = TempDir::new("refuse");
+        let meta = |_: &str| nx_scriptlet::PackageMeta {
+            scripts: nx_scriptlet::Scripts {
+                phases: vec![
+                    (
+                        nx_scriptlet::Phase::Post,
+                        script("sed -i s/a/b/ /etc/svc.conf\n"),
+                    ),
+                    (
+                        nx_scriptlet::Phase::Postun,
+                        script("getent group svc >/dev/null || groupadd -r svc\n"),
+                    ),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (state, lock) = setup_meta(&tmp, &[("svc", &[("usr/bin/svc", "b")])], &meta)?;
+        let root = image(&tmp, &[])?;
+        let mut manifest = Manifest::default();
+        let guard = state.lock()?;
+        let Err(Error::Scriptlets(refusals)) =
+            build(&state, &guard, &spec(&manifest, &lock, &root))
+        else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].leftovers[0].source, "%post");
+        assert_eq!(state.generations()?, Vec::<u32>::new());
+
+        // An entry for other text doesn't apply; the reviewed text does.
+        manifest.scriptlets.push(crate::ScriptletAllow {
+            package: "svc".into(),
+            digest: "0".repeat(64),
+        });
+        assert!(build(&state, &guard, &spec(&manifest, &lock, &root)).is_err());
+        manifest.scriptlets[0].digest = refusals[0].digest.clone();
+        let built = build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        assert_eq!(built.allowed, ["svc"]);
+        // What was understood is still carried out.
+        let sysusers = read(
+            &built
+                .generation
+                .sysext()
+                .join("usr/lib/sysusers.d/nx-svc.conf"),
+        )?;
+        assert!(sysusers.ends_with("g svc -\n"), "{sysusers}");
+        Ok(())
+    }
+
+    #[test]
+    fn records_what_each_package_asks_of_systemd() -> Result<()> {
+        let tmp = TempDir::new("activation");
+        let meta = |_: &str| nx_scriptlet::PackageMeta {
+            scripts: nx_scriptlet::Scripts {
+                phases: vec![(
+                    nx_scriptlet::Phase::Post,
+                    script(
+                        "if [ $1 -eq 1 ] && [ -x \"/usr/lib/systemd/systemd-update-helper\" ]; then\n\
+                         /usr/lib/systemd/systemd-update-helper install-system-units svc.service || :\nfi\n",
+                    ),
+                )],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (state, lock) = setup_meta(&tmp, &[("svc", &[("usr/bin/svc", "b")])], &meta)?;
+        let root = image(&tmp, &[])?;
+        let manifest = Manifest::default();
+        let guard = state.lock()?;
+        let built = build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        let a = &built.generation.activation;
+        let svc = a.package("svc");
+        assert_eq!(
+            svc.map(|p| p.intents.preset.clone()),
+            Some(vec![nx_scriptlet::UnitRef {
+                scope: nx_scriptlet::Scope::System,
+                name: "svc.service".into()
+            }])
+        );
+        // Read back from disk, as nxd will.
+        assert_eq!(Generation::read(&state, 1)?.activation, *a);
         Ok(())
     }
 

@@ -16,6 +16,8 @@ use crate::{Error, Image, Layout, Result};
 pub struct Validated {
     /// The extension tree's real path (no symlink in it).
     pub sysext: PathBuf,
+    /// What its packages ask of systemd.
+    pub activation: nx_core::Activation,
 }
 
 /// The uids of the members of group `wheel` under `root`: those it lists
@@ -47,17 +49,17 @@ pub fn wheel_uids(root: &Path) -> Vec<u32> {
 }
 
 /// Checks generation `number` of `layout`'s state. Files may be owned by
-/// root or one of `allowed` (nx's user, the caller, wheel); nothing may be
-/// writable by others, setuid, setgid, carry file capabilities or be a
-/// device, socket or FIFO.
-pub fn validate(layout: &Layout, number: u32, allowed: &[u32]) -> Result<Validated> {
+/// root or by a uid `allowed` accepts (nx's user, the caller, wheel);
+/// nothing may be writable by others, setuid, setgid, carry file
+/// capabilities or be a device, socket or FIFO.
+pub fn validate(layout: &Layout, number: u32, allowed: &dyn Fn(u32) -> bool) -> Result<Validated> {
     let refuse = |reason: String| Error::Refused { number, reason };
     let root = layout
         .state
         .root()
         .join("generations")
         .join(number.to_string());
-    let owned = |uid: u32| uid == 0 || allowed.contains(&uid);
+    let owned = |uid: u32| uid == 0 || allowed(uid);
 
     for dir in [layout.state.root().join("generations"), root.clone()] {
         let m = std::fs::symlink_metadata(&dir)
@@ -69,7 +71,8 @@ pub fn validate(layout: &Layout, number: u32, allowed: &[u32]) -> Result<Validat
             )));
         }
     }
-    Generation::read(&layout.state, number).map_err(|e| refuse(format!("can't read it: {e}")))?;
+    let generation = Generation::read(&layout.state, number)
+        .map_err(|e| refuse(format!("can't read it: {e}")))?;
     let sysext = root.join("sysext");
     let m = std::fs::symlink_metadata(&sysext)
         .map_err(|e| refuse(format!("no extension tree: {e}")))?;
@@ -91,7 +94,10 @@ pub fn validate(layout: &Layout, number: u32, allowed: &[u32]) -> Result<Validat
         }
     }
     check_release(layout, &sysext).map_err(refuse)?;
-    Ok(Validated { sysext })
+    Ok(Validated {
+        sysext,
+        activation: generation.activation,
+    })
 }
 
 fn walk(dir: &Path, owned: &dyn Fn(u32) -> bool) -> Result<(), String> {

@@ -73,8 +73,8 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
                     source,
                 })?
                 .uid();
-            let mut allowed = nx_activate::wheel_uids(&ctx.layout.root);
-            allowed.extend([nx, peer.uid]);
+            let wheel = nx_activate::Wheel::new(&*ctx.runner, &ctx.layout.root);
+            let allowed = |uid: u32| uid == nx || uid == peer.uid || wheel.is_member(uid);
             let layout = nx_activate::Layout {
                 image: (ctx.image)(),
                 ..ctx.layout.clone()
@@ -83,6 +83,8 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
             Ok(Response::Activated {
                 backend: done.backend,
                 fallback: done.fallback,
+                events: done.services.events,
+                warnings: done.services.warnings,
             })
         }
     }
@@ -266,7 +268,8 @@ mod tests {
                 response,
                 Ok(Response::Activated {
                     backend: Backend::Sysext,
-                    fallback: None
+                    fallback: None,
+                    ..
                 })
             ),
             "{response:?}"

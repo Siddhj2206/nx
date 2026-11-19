@@ -1,0 +1,2 @@
+/usr/lib/systemd/system/bluetooth.service
+/usr/lib/systemd/user/mpris-proxy.service

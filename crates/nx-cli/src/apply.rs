@@ -176,8 +176,10 @@ impl<'m> Session<'m> {
                 lock: &lock,
                 image_root: &image_root,
                 os_id: &self.machine.release.id,
+                image_has: &|name| self.universe.in_image(name),
             },
-        )?;
+        )
+        .map_err(refusal_error)?;
         crate::live::activate(
             ui,
             &self.state,
@@ -193,7 +195,13 @@ impl<'m> Session<'m> {
         let store = self.state.store();
         let missing: Vec<&Planned> = all
             .iter()
-            .filter(|p| !store.contains(&p.package.sha256) || p.file.is_some())
+            .filter(|p| {
+                // An entry unpacked before nx read scriptlets is fetched
+                // again for its record.
+                !store.contains(&p.package.sha256)
+                    || store.meta(&p.package.sha256).ok().flatten().is_none()
+                    || p.file.is_some()
+            })
             .collect();
         // Koji builds are on disk already.
         let jobs: Vec<Job> = missing
@@ -250,10 +258,18 @@ impl<'m> Session<'m> {
                 let hint = self.keys.change_hint(&repo.id);
                 let repo_keys = self.keys.get(&repo)?;
                 let stage = store.stage(guard, &from.sha256, |dest| -> Result<()> {
-                    nx_librpm::unpack(file, &repo_keys.keyring, dest)
+                    let unpacked = nx_librpm::unpack(file, &repo_keys.keyring, dest)
                         .with_context(|| format!("unpacking {nevra}{hint}"))?;
+                    state::write_meta(dest, &unpacked.meta)?;
                     Ok(())
                 })?;
+                if stage.is_none() && store.meta(&from.sha256)?.is_none() {
+                    // In the store, from before scriptlets were read: add
+                    // the record from the file's verified header.
+                    let meta = nx_librpm::metadata(file, &repo_keys.keyring)
+                        .with_context(|| format!("reading {nevra}{hint}"))?;
+                    state::write_meta(&store.path(&from.sha256), &meta)?;
+                }
                 staged.extend(stage);
                 if p.file.is_none() {
                     let _ = std::fs::remove_file(file);
@@ -318,6 +334,42 @@ impl<'m> Session<'m> {
         }
         Ok(lock)
     }
+}
+
+/// Turns a scriptlet refusal into the message the user needs: what was
+/// left, what to do about it.
+fn refusal_error(e: nx_core::Error) -> anyhow::Error {
+    let nx_core::Error::Scriptlets(refusals) = e else {
+        return e.into();
+    };
+    let mut msg = String::new();
+    for r in &refusals {
+        msg.push_str(&format!("{} has scriptlets nx can't translate\n", r.nevra));
+        for l in &r.leftovers {
+            msg.push_str(&format!("  {}\n", l.source));
+            for line in l.lines.iter().take(12) {
+                msg.push_str(&format!("    {line}\n"));
+            }
+            if l.lines.len() > 12 {
+                msg.push_str(&format!("    … {} more lines\n", l.lines.len() - 12));
+            }
+        }
+    }
+    let names: Vec<&str> = refusals.iter().map(|r| r.name.as_str()).collect();
+    msg.push_str(&format!(
+        "nx never runs scriptlets. Put it in your image instead:\n  RUN dnf install -y {}\n",
+        names.join(" ")
+    ));
+    msg.push_str("or, if you read the text above and it is safe to skip, add it anyway:\n");
+    let flags: Vec<String> = refusals
+        .iter()
+        .map(|r| format!("--allow-scriptlets {}={}", r.name, &r.digest[..16]))
+        .collect();
+    msg.push_str(&format!(
+        "  nx add <what you asked for> {}",
+        flags.join(" ")
+    ));
+    anyhow::anyhow!(msg)
 }
 
 /// Where a package's file is, what it must hash to, and the repo whose

@@ -25,6 +25,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
+use nx_scriptlet::{PackageFile, PackageMeta, Phase, Script, Scripts, Trigger};
 use sha2::{Digest, Sha256, Sha512};
 
 /// Errors from reading package files.
@@ -169,11 +170,14 @@ pub fn fingerprints(armored: &str) -> Result<Vec<String>> {
     Keyring::new()?.add(armored)
 }
 
-/// What [`unpack`] wrote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// What [`unpack`] wrote, and what the signed header says about the package.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Unpacked {
     pub files: usize,
     pub bytes: u64,
+    /// Scriptlets, triggers and the files outside `/usr`, read from the
+    /// same verified header the payload was checked against.
+    pub meta: PackageMeta,
 }
 
 /// Checks that `path` is signed by a key in `keyring` and that its header
@@ -190,6 +194,12 @@ pub fn verify(path: &Path, keyring: &Keyring) -> Result<()> {
 pub fn unpack(path: &Path, keyring: &Keyring, dest: &Path) -> Result<Unpacked> {
     let pkg = Package::open(path, keyring)?;
     pkg.unpack(dest)
+}
+
+/// Verifies `path` like [`verify`] and reads what its signed header says
+/// about scriptlets and files outside `/usr`, without unpacking.
+pub fn metadata(path: &Path, keyring: &Keyring) -> Result<PackageMeta> {
+    Package::open(path, keyring)?.meta()
 }
 
 /// An open, verified package file.
@@ -270,6 +280,7 @@ impl Package {
     }
 
     fn unpack(mut self, dest: &Path) -> Result<Unpacked> {
+        let meta = self.meta()?;
         // SAFETY: the header is live; the returned string is the header's.
         let compressor = unsafe {
             owned(sys::headerGetString(
@@ -347,7 +358,187 @@ impl Package {
         for (dir, mode) in &tree.dirs {
             set_mode(dir, *mode)?;
         }
+        tree.out.meta = meta;
         Ok(tree.out)
+    }
+
+    /// `rpm --qf`'s formatting of `fmt` against the header.
+    fn format(&self, fmt: &str) -> Result<String> {
+        let c = CString::new(fmt).map_err(|_| Error::Nul(fmt.to_owned()))?;
+        let mut err: sys::errmsg_t = std::ptr::null();
+        // SAFETY: the header is live; the result is null or malloc'd (freed
+        // below), and err is set to a static message on failure.
+        let out = unsafe { sys::headerFormat(self.header, c.as_ptr(), &mut err) };
+        if out.is_null() {
+            // SAFETY: err is null or a valid C string.
+            let message = unsafe { owned(err) };
+            return Err(self.payload(format!("reading the header: {message}")));
+        }
+        // SAFETY: out is a valid C string; copied, then freed once.
+        let text = unsafe {
+            let t = owned(out);
+            sys::rfree(out.cast());
+            t
+        };
+        Ok(text)
+    }
+
+    fn has(&self, tag: sys::rpmTag_e) -> bool {
+        // SAFETY: the header is live.
+        unsafe { sys::headerIsEntry(self.header, tag as _) != 0 }
+    }
+
+    /// Scriptlets, triggers and the files outside `/usr`.
+    fn meta(&self) -> Result<PackageMeta> {
+        let mut scripts = Scripts::default();
+        for (phase, tag, prog_tag, name) in [
+            (
+                Phase::Pretrans,
+                sys::RPMTAG_PRETRANS,
+                sys::RPMTAG_PRETRANSPROG,
+                "PRETRANS",
+            ),
+            (
+                Phase::Pre,
+                sys::RPMTAG_PREIN,
+                sys::RPMTAG_PREINPROG,
+                "PREIN",
+            ),
+            (
+                Phase::Post,
+                sys::RPMTAG_POSTIN,
+                sys::RPMTAG_POSTINPROG,
+                "POSTIN",
+            ),
+            (
+                Phase::Preun,
+                sys::RPMTAG_PREUN,
+                sys::RPMTAG_PREUNPROG,
+                "PREUN",
+            ),
+            (
+                Phase::Postun,
+                sys::RPMTAG_POSTUN,
+                sys::RPMTAG_POSTUNPROG,
+                "POSTUN",
+            ),
+            (
+                Phase::Posttrans,
+                sys::RPMTAG_POSTTRANS,
+                sys::RPMTAG_POSTTRANSPROG,
+                "POSTTRANS",
+            ),
+            (
+                Phase::Preuntrans,
+                sys::RPMTAG_PREUNTRANS,
+                sys::RPMTAG_PREUNTRANSPROG,
+                "PREUNTRANS",
+            ),
+            (
+                Phase::Postuntrans,
+                sys::RPMTAG_POSTUNTRANS,
+                sys::RPMTAG_POSTUNTRANSPROG,
+                "POSTUNTRANS",
+            ),
+        ] {
+            if !self.has(tag) && !self.has(prog_tag) {
+                continue;
+            }
+            let body = if self.has(tag) {
+                self.format(&format!("%{{{name}}}"))?
+            } else {
+                String::new()
+            };
+            let interpreter = if self.has(prog_tag) {
+                self.format(&format!("%{{{name}PROG}}"))?
+            } else {
+                String::new()
+            };
+            scripts.phases.push((
+                phase,
+                Script {
+                    interpreter: normal_interpreter(&interpreter),
+                    body,
+                },
+            ));
+        }
+        scripts.triggers = self.triggers("TRIGGER")?;
+        scripts.file_triggers = self.triggers("FILETRIGGER")?;
+        scripts
+            .file_triggers
+            .extend(self.triggers("TRANSFILETRIGGER")?);
+        Ok(PackageMeta {
+            scripts,
+            files: self.outside_usr()?,
+        })
+    }
+
+    /// The triggers of one family (`TRIGGER`, `FILETRIGGER`, …): each
+    /// condition names a target and the index of the script it runs.
+    fn triggers(&self, family: &str) -> Result<Vec<Trigger>> {
+        let conds = self.format(&format!(
+            "[%{{{family}NAME}}\t%{{{family}TYPE}}\t%{{{family}INDEX}}\n]"
+        ))?;
+        if conds.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let marker = "\u{1e}nx-script\u{1e}";
+        let bodies = self.format(&format!("[%{{{family}SCRIPTS}}\n{marker}\n]"))?;
+        let progs = self.format(&format!("[%{{{family}SCRIPTPROG}}\n]"))?;
+        let bodies: Vec<&str> = bodies.split(&format!("\n{marker}\n")).collect();
+        let progs: Vec<&str> = progs.lines().collect();
+        let mut out = Vec::new();
+        for line in conds.lines() {
+            let mut f = line.split('\t');
+            let (Some(target), Some(kind), Some(index)) = (f.next(), f.next(), f.next()) else {
+                return Err(self.payload(format!("malformed trigger entry {line:?}")));
+            };
+            let index: usize = index
+                .parse()
+                .map_err(|_| self.payload(format!("malformed trigger index {index:?}")))?;
+            let Some(body) = bodies.get(index) else {
+                return Err(self.payload(format!("trigger {target} has no script")));
+            };
+            out.push(Trigger {
+                kind: kind.to_owned(),
+                target: target.to_owned(),
+                script: Script {
+                    interpreter: normal_interpreter(progs.get(index).copied().unwrap_or("")),
+                    body: (*body).to_owned(),
+                },
+            });
+        }
+        Ok(out)
+    }
+
+    /// The file list entries not under `/usr`.
+    fn outside_usr(&self) -> Result<Vec<PackageFile>> {
+        let list = self.format(
+            "[%{FILENAMES}\t%{FILEMODES}\t%{FILEUSERNAME}\t%{FILEGROUPNAME}\t%{FILEFLAGS}\t%{FILELINKTOS}\n]",
+        )?;
+        let mut out = Vec::new();
+        for line in list.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            let [path, mode, user, group, flags, link] = f[..] else {
+                return Err(self.payload(format!("malformed file entry {line:?}")));
+            };
+            if path.starts_with("/usr/") || path == "/usr" {
+                continue;
+            }
+            let num = |s: &str| {
+                s.parse::<u32>()
+                    .map_err(|_| self.payload(format!("malformed file entry {line:?}")))
+            };
+            out.push(PackageFile {
+                path: path.to_owned(),
+                mode: num(mode)?,
+                user: user.to_owned(),
+                group: group.to_owned(),
+                flags: num(flags)?,
+                link: link.to_owned(),
+            });
+        }
+        Ok(out)
     }
 
     /// Writes the archive entry `fi` is at.
@@ -495,6 +686,17 @@ impl Drop for Package {
                 sys::Fclose(self.fd);
             }
         }
+    }
+}
+
+/// rpm records `/bin/sh` for every shell scriptlet; nx-scriptlet takes an
+/// empty interpreter to mean it.
+fn normal_interpreter(prog: &str) -> String {
+    let prog = prog.trim();
+    if prog == "/bin/sh" {
+        String::new()
+    } else {
+        prog.to_owned()
     }
 }
 

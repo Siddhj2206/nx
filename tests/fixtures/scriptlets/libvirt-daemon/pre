@@ -1,0 +1,18 @@
+
+    for sc in libvirtd ; do 
+        test -f "/etc/sysconfig/${sc}.rpmsave" || continue ; 
+        mv -v "/etc/sysconfig/${sc}.rpmsave" "/etc/sysconfig/${sc}.rpmsave.old" ; 
+    done 
+    
+
+    
+    mkdir -p /var/lib/rpm-state/libvirt || : 
+    for unit in libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tls.socket libvirtd-tcp.socket; do 
+        if ! test -e /usr/lib/systemd/system/$unit; then 
+            touch /var/lib/rpm-state/libvirt/preset-$unit || : 
+        fi 
+    done 
+    
+    
+    mkdir -p /var/lib/rpm-state/libvirt || : 
+    touch /var/lib/rpm-state/libvirt/restart-libvirtd.service || :

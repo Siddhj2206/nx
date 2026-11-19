@@ -107,6 +107,29 @@ impl State {
         Ok(Lock { _file: file })
     }
 
+    /// The cache every administrator shares (repo metadata, `.solv` files,
+    /// downloads), `<state>/cache`, when this user may write it or can make
+    /// it. Anyone else, and any machine without a writable state
+    /// directory, has no shared cache and keeps their own.
+    ///
+    /// Anything in it is checked again before it is trusted: metadata
+    /// against the checksums its repo's `repomd.xml` names, packages against
+    /// their signatures. An administrator who poisons it can fail another's
+    /// command, nothing more.
+    pub fn shared_cache(&self) -> Option<PathBuf> {
+        use rustix::fs::{Access, access};
+        let dir = self.root.join("cache");
+        if dir.is_dir() {
+            return access(&dir, Access::WRITE_OK | Access::EXEC_OK)
+                .is_ok()
+                .then_some(dir);
+        }
+        // Created under the state directory's default ACL, so the other
+        // administrators can write it too.
+        (access(&self.root, Access::WRITE_OK).is_ok() && std::fs::create_dir(&dir).is_ok())
+            .then_some(dir)
+    }
+
     pub fn store(&self) -> Store {
         Store {
             dir: self.store_dir(),
@@ -235,6 +258,23 @@ impl Store {
         self.path(sha256).is_dir()
     }
 
+    /// What the package's signed header said about its scriptlets and
+    /// files outside `/usr`, recorded when it was unpacked. `None` for an
+    /// entry unpacked before nx read them.
+    pub fn meta(&self, sha256: &str) -> Result<Option<nx_scriptlet::PackageMeta>> {
+        let path = self.path(sha256).join(META_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| Error::Toml {
+                    path,
+                    message: e.to_string(),
+                }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(Error::Read { path, source }),
+        }
+    }
+
     /// Unpacks a package beside the store: `fill` writes its tree into an
     /// empty directory, which [`Store::commit`] later moves in. `None` when
     /// the store has it already. Needs the state lock.
@@ -292,6 +332,27 @@ impl Store {
         self.commit(lock, staged.into_iter().collect())?;
         Ok(self.path(sha256))
     }
+}
+
+/// Where a store entry keeps its package record, beside the payload's top
+/// level. A package that ships a file of this name fails to unpack, since
+/// the record is created exclusively.
+pub const META_FILE: &str = ".nx-meta.json";
+
+/// Records `meta` in the store entry (or staging directory) `dir`.
+pub fn write_meta(dir: &Path, meta: &nx_scriptlet::PackageMeta) -> Result<()> {
+    use std::io::Write;
+    let path = dir.join(META_FILE);
+    let text = serde_json::to_string(meta).map_err(|e| Error::Serialize {
+        what: "package record",
+        message: e.to_string(),
+    })?;
+    File::options()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(|source| Error::Write { path, source })
 }
 
 /// A package unpacked beside the store, waiting for [`Store::commit`].
@@ -470,6 +531,20 @@ pub(crate) mod tests {
         assert!(store.contains(SHA));
         assert!(store.stage(&lock, SHA, |_| Ok::<(), Error>(()))?.is_none());
         assert!(free_space(&tmp.0.join("not/yet"))? > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_shared_cache_is_made_where_the_state_is_writable() -> Result<()> {
+        let tmp = TempDir::new("shared-cache");
+        let state = State::new(tmp.0.join("state"));
+        // No state directory yet: nothing to put a cache in.
+        assert_eq!(state.shared_cache(), None);
+        create_dir(state.root())?;
+        let cache = state.shared_cache();
+        assert_eq!(cache, Some(state.root().join("cache")));
+        assert!(state.root().join("cache").is_dir());
+        assert_eq!(state.shared_cache(), cache);
         Ok(())
     }
 

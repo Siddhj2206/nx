@@ -225,6 +225,13 @@ impl Universe {
         out
     }
 
+    /// Whether the image has a package named `name`.
+    pub fn in_image(&self, name: &str) -> bool {
+        self.pool
+            .select(name)
+            .is_ok_and(|ids| ids.iter().any(|id| self.pool.package(*id).installed))
+    }
+
     /// The package a name means: the image's copy if installed, else the
     /// newest available build that the image allows.
     pub fn info(&self, spec: &str) -> Result<Option<Package>> {

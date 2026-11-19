@@ -17,6 +17,10 @@ pub struct Manifest {
     /// Repos added with `nx repo add`; the image's own repos are not listed.
     #[serde(default, rename = "repo", skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<RepoEntry>,
+    /// Packages whose leftover scriptlet text the user reviewed and chose to
+    /// ignore (design, *Scriptlet translation*).
+    #[serde(default, rename = "scriptlets", skip_serializing_if = "Vec::is_empty")]
+    pub scriptlets: Vec<ScriptletAllow>,
     /// Sections this nx doesn't know yet (`[tool]` before M6), kept as
     /// written.
     #[serde(flatten)]
@@ -33,6 +37,7 @@ impl Default for Manifest {
             version: FORMAT,
             host: Host::default(),
             repos: Vec::new(),
+            scriptlets: Vec::new(),
             rest: toml::Table::new(),
         }
     }
@@ -47,6 +52,33 @@ pub struct Host {
     /// that works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<Backend>,
+}
+
+/// A package's scriptlets, reviewed. `digest` fingerprints the text nx
+/// couldn't translate: when the package's scriptlets change, so does it,
+/// and the entry stops applying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptletAllow {
+    pub package: String,
+    pub digest: String,
+}
+
+impl ScriptletAllow {
+    /// Whether this entry covers leftover text with fingerprint `digest`.
+    /// Sixteen hex digits are enough to name it.
+    pub fn matches(&self, digest: &str) -> bool {
+        self.digest.len() >= 16 && digest.starts_with(&self.digest)
+    }
+
+    /// Parses `package=digest`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (package, digest) = text.split_once('=')?;
+        let ok = digest.len() >= 16 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+        (ok && !package.is_empty()).then(|| Self {
+            package: package.to_owned(),
+            digest: digest.to_ascii_lowercase(),
+        })
+    }
 }
 
 /// One added repo. `copr:owner/project` needs nothing else; any other repo

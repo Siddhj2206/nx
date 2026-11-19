@@ -1,0 +1,2 @@
+/usr/lib/systemd/system/syncthing@.service
+/usr/lib/systemd/user/syncthing.service

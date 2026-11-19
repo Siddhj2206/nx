@@ -14,9 +14,9 @@ pub mod os_release;
 pub mod state;
 
 pub use deployment::{Deployment, DeploymentSource, Deployments, RpmOstree};
-pub use generation::{Built, Generation, Readable};
+pub use generation::{Activation, ActivationPackage, Built, Generation, Readable, Refusal};
 pub use lockfile::{Lock, LockedPackage, LockedRepo};
-pub use manifest::{Manifest, RepoEntry};
+pub use manifest::{Manifest, RepoEntry, ScriptletAllow};
 pub use os_release::OsRelease;
 pub use state::{Backend, State, Store};
 
@@ -65,10 +65,21 @@ pub enum Error {
     },
     #[error("{0}")]
     Conflict(String),
+    /// Packages whose scriptlets nx can't translate.
+    #[error("{}", refusal_summary(.0))]
+    Scriptlets(Vec<generation::Refusal>),
     #[error("serializing {what}: {message}")]
     Serialize { what: &'static str, message: String },
     #[error("{0}")]
     Invalid(String),
+}
+
+fn refusal_summary(r: &[generation::Refusal]) -> String {
+    let names: Vec<&str> = r.iter().map(|r| r.nevra.as_str()).collect();
+    format!(
+        "scriptlets nx doesn't run or translate: {}",
+        names.join(", ")
+    )
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

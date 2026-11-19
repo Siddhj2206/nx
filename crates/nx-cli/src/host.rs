@@ -91,9 +91,18 @@ impl Machine {
     }
 }
 
-/// nx's cache for unprivileged commands: `$XDG_CACHE_HOME/nx`, else
-/// `~/.cache/nx`. nxd keeps its own under `/var/lib/nx/cache` (M3).
+/// Where repo metadata and downloads are cached: the cache all
+/// administrators share (`/var/lib/nx/cache`) when this user can write it,
+/// so a second administrator's first change doesn't download the metadata
+/// again; otherwise their own, `$XDG_CACHE_HOME/nx` or `~/.cache/nx`.
 pub fn cache_dir() -> Result<PathBuf> {
+    if let Some(shared) = state().shared_cache() {
+        return Ok(shared);
+    }
+    user_cache_dir()
+}
+
+fn user_cache_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir).join("nx"));
     }

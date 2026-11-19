@@ -1,0 +1,7 @@
+# conditional support for grub2, grub2 is not available on all architectures
+# and tuned is noarch package, thus the following hack is needed
+if [ -d /etc/grub.d ]; then
+  cp -a /usr/share/tuned/grub2/00_tuned /etc/grub.d/00_tuned
+  selinuxenabled &>/dev/null && \
+    restorecon /etc/grub.d/00_tuned &>/dev/null || :
+fi

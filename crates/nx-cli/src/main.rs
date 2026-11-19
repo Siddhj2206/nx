@@ -55,6 +55,10 @@ enum Command {
         /// resolve and list what would be added; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// install despite scriptlets nx can't translate, after you reviewed
+        /// them: package=digest, as the refusal prints it
+        #[arg(long, value_name = "package=digest")]
+        allow_scriptlets: Vec<String>,
         #[command(flatten)]
         metadata: Metadata,
     },
@@ -189,8 +193,18 @@ fn main() -> ExitCode {
         Command::Add {
             packages,
             dry_run,
+            allow_scriptlets,
             metadata,
-        } => machine().and_then(|m| add::run(&mut ui, &m, &packages, dry_run, metadata.refresh())),
+        } => machine().and_then(|m| {
+            add::run(
+                &mut ui,
+                &m,
+                &packages,
+                dry_run,
+                &allow_scriptlets,
+                metadata.refresh(),
+            )
+        }),
         Command::Remove {
             packages,
             dry_run,

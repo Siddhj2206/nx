@@ -378,6 +378,7 @@ name = "nx-activate"
 version = "1.0.0-alpha.0"
 dependencies = [
  "nx-core",
+ "nx-scriptlet",
  "rustix",
  "serde_json",
  "thiserror",
@@ -400,6 +401,7 @@ dependencies = [
 name = "nx-core"
 version = "1.0.0-alpha.0"
 dependencies = [
+ "nx-scriptlet",
  "rustix",
  "serde",
  "serde_json",
@@ -412,6 +414,7 @@ name = "nx-librpm"
 version = "1.0.0-alpha.0"
 dependencies = [
  "libc",
+ "nx-scriptlet",
  "sha2",
  "thiserror",
 ]
@@ -436,6 +439,14 @@ dependencies = [
  "sha2",
  "thiserror",
  "ureq",
+]
+
+[[package]]
+name = "nx-scriptlet"
+version = "1.0.0-alpha.0"
+dependencies = [
+ "serde",
+ "sha2",
 ]
 
 [[package]]

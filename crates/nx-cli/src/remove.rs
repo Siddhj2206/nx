@@ -31,8 +31,19 @@ pub fn run(
         }
         Ok(())
     })?;
+    let resolved = session.resolve(ui, &session.manifest.host.packages.clone())?;
+    // An allowance for a package that is no longer installed would quietly
+    // pass it next time; the user should be asked again.
+    let names: HashSet<&str> = resolved
+        .all
+        .iter()
+        .map(|p| p.package.name.as_str())
+        .collect();
+    session
+        .manifest
+        .scriptlets
+        .retain(|a| names.contains(a.package.as_str()));
     let manifest = session.manifest.clone();
-    let resolved = session.resolve(ui, &manifest.host.packages)?;
     let keep: HashSet<String> = resolved.all.iter().map(|p| p.package.nevra()).collect();
     let dropped: Vec<LockedPackage> = session
         .current

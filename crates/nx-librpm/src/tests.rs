@@ -133,3 +133,46 @@ fn never_writes_through_a_symlink() -> std::io::Result<()> {
     assert!(real.contains(Path::new("usr/lib64")));
     Ok(())
 }
+
+/// What `rpm` printed for dbus-broker (`tests/fixtures/scriptlets/record.sh`)
+/// is what the header reader returns: the same scriptlet texts, and the
+/// trigger the package carries.
+#[test]
+fn reads_scriptlets_and_triggers_as_rpm_prints_them() -> Result<()> {
+    let dir = TempDir::new("meta");
+    let key = fedora()?;
+    let n = unpack(&testdata("dbus-broker-37-9.fc45.x86_64.rpm"), &key, &dir.0)?;
+    let recorded =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/scriptlets/dbus-broker");
+    let read = |f: &str| std::fs::read_to_string(recorded.join(f)).unwrap_or_default();
+    let scripts = &n.meta.scripts;
+    let body = |phase| {
+        scripts
+            .phases
+            .iter()
+            .find(|(p, _)| *p == phase)
+            .map(|(_, s)| s.body.trim().to_owned())
+    };
+    assert_eq!(body(Phase::Post), Some(read("post").trim().to_owned()));
+    assert_eq!(body(Phase::Preun), Some(read("preun").trim().to_owned()));
+    // An empty %postun with an interpreter is still there, and empty.
+    assert_eq!(body(Phase::Postun), Some(String::new()));
+    assert_eq!(scripts.phases.len(), 3);
+    assert_eq!(scripts.triggers.len(), 1);
+    let t = &scripts.triggers[0];
+    assert_eq!(
+        (t.target.as_str(), t.kind.as_str()),
+        ("dbus-daemon", "postun")
+    );
+    assert_eq!(t.script.body.trim(), read("trigger.0").trim());
+    Ok(())
+}
+
+#[test]
+fn lists_only_files_outside_usr() -> Result<()> {
+    let dir = TempDir::new("outside");
+    let n = unpack(&testdata(RPM), &fedora()?, &dir.0)?;
+    assert!(n.meta.files.is_empty(), "{:?}", n.meta.files);
+    assert!(n.meta.scripts.phases.is_empty());
+    Ok(())
+}

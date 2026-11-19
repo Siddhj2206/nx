@@ -4,7 +4,8 @@
 
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use nx_core::ScriptletAllow;
 use nx_rpm::{Package, Refresh};
 
 use crate::apply::Session;
@@ -16,11 +17,25 @@ pub fn run(
     machine: &Machine,
     specs: &[String],
     dry_run: bool,
+    allow: &[String],
     refresh: Refresh,
 ) -> Result<()> {
     let started = Instant::now();
+    let allow: Vec<ScriptletAllow> = allow
+        .iter()
+        .map(|a| {
+            ScriptletAllow::parse(a).with_context(|| {
+                format!("--allow-scriptlets wants package=digest (16 or more hex digits), not {a}")
+            })
+        })
+        .collect::<Result<_>>()?;
     let mut session = Session::open(ui, machine, refresh, dry_run, |_| Ok(()))?;
     let mut manifest = session.manifest.clone();
+    for a in allow {
+        if !manifest.scriptlets.contains(&a) {
+            manifest.scriptlets.push(a);
+        }
+    }
     let fresh: Vec<String> = specs
         .iter()
         .filter(|s| !manifest.host.packages.contains(s))
@@ -47,6 +62,11 @@ pub fn run(
         return Ok(());
     }
     let built = session.install(ui, &manifest, &resolved.all)?;
+    for name in &built.allowed {
+        ui.warn(format_args!(
+            "{name}: scriptlets nx can't translate are skipped, as you allowed"
+        ));
+    }
     for nevra in &built.outside_usr {
         ui.warn(format_args!(
             "{nevra} has files outside /usr, which the extension leaves out"

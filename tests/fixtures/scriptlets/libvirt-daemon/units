@@ -1,0 +1,6 @@
+/usr/lib/systemd/system/libvirtd-admin.socket
+/usr/lib/systemd/system/libvirtd-ro.socket
+/usr/lib/systemd/system/libvirtd-tcp.socket
+/usr/lib/systemd/system/libvirtd-tls.socket
+/usr/lib/systemd/system/libvirtd.service
+/usr/lib/systemd/system/libvirtd.socket

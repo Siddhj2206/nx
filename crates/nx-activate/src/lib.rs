@@ -12,7 +12,9 @@
 //! merge fails: no link, nothing merged, and `nx shell` exports the
 //! generation's `usr` as a prefix.
 
+mod units;
 mod validate;
+mod wheel;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -20,7 +22,9 @@ use std::process::Command;
 
 use nx_core::{Backend, State};
 
+pub use units::Services;
 pub use validate::{Validated, validate, wheel_uids};
+pub use wheel::Wheel;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -146,46 +150,122 @@ pub struct Activated {
     /// Why the sysext backend was passed over, when it was tried and the
     /// merge failed.
     pub fallback: Option<String>,
+    /// What was done to units, users and files, and what wasn't.
+    pub services: Services,
 }
 
 /// Makes generation `number` current and live. `forced` picks a backend;
 /// otherwise every activation probes: it tries sysext, and falls back to
 /// prefix if the merge fails (overlay depth, an unsupported kernel), so a
 /// system that can merge again later goes back to sysext by itself. The
-/// backend that ended up in use is recorded for `nx shell`. `allowed` are
-/// the uids that may own the generation's files besides root (see
+/// backend that ended up in use is recorded for `nx shell`. `allowed` says
+/// which uids besides root may own the generation's files (see
 /// [`validate`]).
+///
+/// Around the merge, units follow the generation's `activation.toml`: those
+/// of packages that leave are stopped and disabled first, and after it
+/// users and files are created for packages that appear, their presets
+/// applied, and changed ones restarted. The prefix backend merges nothing,
+/// so it sets none of that up.
 pub fn activate(
     layout: &Layout,
     runner: &dyn Runner,
     number: u32,
     forced: Option<Backend>,
-    allowed: &[u32],
+    allowed: &dyn Fn(u32) -> bool,
 ) -> Result<Activated> {
     let valid = validate(layout, number, allowed)?;
+    let merged = merged_now(layout);
+    let mut services = Services::default();
     if forced == Some(Backend::Prefix) {
+        unmerge_units(runner, &layout.root, merged.as_ref(), &mut services);
         prefix(layout, runner, number)?;
+        prefix_notice(&valid.activation, &mut services);
         return Ok(Activated {
             backend: Backend::Prefix,
             fallback: None,
+            services,
         });
     }
+    let transition = match &merged {
+        Some((old, ext)) => {
+            let t = units::plan(old, &valid.activation);
+            units::stop(runner, &layout.root, ext, &t, &mut services);
+            t
+        }
+        None => units::plan(&nx_core::Activation::default(), &valid.activation),
+    };
     match sysext(layout, runner, number, &valid) {
-        Ok(()) => Ok(Activated {
-            backend: Backend::Sysext,
-            fallback: None,
-        }),
+        Ok(()) => {
+            units::start(runner, &valid.sysext, &transition, &mut services);
+            Ok(Activated {
+                backend: Backend::Sysext,
+                fallback: None,
+                services,
+            })
+        }
         Err(Error::Command {
             program: "systemd-sysext",
             detail,
         }) if forced.is_none() => {
+            unmerge_units(runner, &layout.root, merged.as_ref(), &mut services);
             prefix(layout, runner, number)?;
+            prefix_notice(&valid.activation, &mut services);
             Ok(Activated {
                 backend: Backend::Prefix,
                 fallback: Some(detail),
+                services,
             })
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The record and extension of the generation that is merged now, if one
+/// is: the current one under the sysext backend.
+fn merged_now(layout: &Layout) -> Option<(nx_core::Activation, PathBuf)> {
+    if layout.state.backend().ok()? != Some(Backend::Sysext) {
+        return None;
+    }
+    let n = layout.state.current_number().ok()??;
+    let g = nx_core::Generation::read(&layout.state, n).ok()?;
+    Some((
+        g.activation,
+        layout
+            .state
+            .root()
+            .join("generations")
+            .join(n.to_string())
+            .join("sysext"),
+    ))
+}
+
+/// Stops the units of everything merged, before it is unmerged.
+fn unmerge_units(
+    runner: &dyn Runner,
+    root: &Path,
+    merged: Option<&(nx_core::Activation, PathBuf)>,
+    services: &mut Services,
+) {
+    if let Some((old, ext)) = merged {
+        units::stop(runner, root, ext, &units::plan_unmerge(old), services);
+    }
+}
+
+/// The prefix backend merges nothing, so a package's units (which name
+/// `/usr` paths), users and files are not set up.
+fn prefix_notice(new: &nx_core::Activation, services: &mut Services) {
+    let any = new.packages.iter().any(|p| {
+        !p.intents.preset.is_empty()
+            || !p.intents.restart.is_empty()
+            || !p.sysusers_files.is_empty()
+            || !p.tmpfiles_files.is_empty()
+    });
+    if any {
+        services.warnings.push(
+            "the prefix backend merges nothing, so services, users and files from packages are not set up"
+                .into(),
+        );
     }
 }
 

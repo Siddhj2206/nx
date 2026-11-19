@@ -1,0 +1,32 @@
+
+    for sc in libvirtd ; do 
+        test -f "/etc/sysconfig/${sc}.rpmsave" || continue ; 
+        mv -v "/etc/sysconfig/${sc}.rpmsave" "/etc/sysconfig/${sc}" ; 
+    done 
+    
+
+    
+     
+    for unit in libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tls.socket libvirtd-tcp.socket libvirtd.service; do 
+        if test -e /var/lib/rpm-state/libvirt/preset-$unit; then 
+            /usr/bin/systemctl --no-reload preset $unit || : 
+        fi 
+        rm -f /var/lib/rpm-state/libvirt/preset-$unit 
+    done 
+    rmdir /var/lib/rpm-state/libvirt 2>/dev/null || : 
+    
+    
+    if test -d /run/systemd/system && 
+       test -e /var/lib/rpm-state/libvirt/reload-libvirtd.service; then 
+        /usr/bin/systemctl try-reload-or-restart libvirtd.service >/dev/null 2>&1 || : 
+    fi 
+    rm -f /var/lib/rpm-state/libvirt/reload-libvirtd.service 
+    rmdir /var/lib/rpm-state/libvirt 2>/dev/null || : 
+    
+    
+    if test -d /run/systemd/system && 
+       test -e /var/lib/rpm-state/libvirt/restart-libvirtd.service; then 
+        /usr/bin/systemctl try-restart libvirtd.service >/dev/null 2>&1 || : 
+    fi 
+    rm -f /var/lib/rpm-state/libvirt/restart-libvirtd.service 
+    rmdir /var/lib/rpm-state/libvirt 2>/dev/null || :

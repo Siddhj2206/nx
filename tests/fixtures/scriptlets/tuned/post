@@ -1,0 +1,23 @@
+
+ 
+if [ $1 -eq 1 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then 
+    # Initial installation 
+    /usr/lib/systemd/systemd-update-helper install-system-units tuned.service || : 
+fi 
+
+
+# convert active_profile from full path to name (if needed)
+sed -i 's|.*/\([^/]\+\)/[^\.]\+\.conf|\1|' /etc/tuned/active_profile
+
+# convert GRUB_CMDLINE_LINUX to GRUB_CMDLINE_LINUX_DEFAULT
+if [ -r "/etc/default/grub" ]; then
+  sed -i 's/GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX \\$tuned_params"/GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT \\$tuned_params"/' \
+    /etc/default/grub
+fi
+
+# migrate all user-defined profiles from /etc/tuned/ to /etc/tuned/profiles/
+for f in /etc/tuned/*; do
+  if [ -e "$f/tuned.conf" ]; then
+    mv -n "$f" /etc/tuned/profiles/
+  fi
+done

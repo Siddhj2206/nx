@@ -43,6 +43,12 @@ pub enum Response {
         /// tried and failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fallback: Option<String>,
+        /// What was done to units, users and files ("started foo.service").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<String>,
+        /// Service steps that failed or were skipped; the merge stands.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
     },
     Failed {
         message: String,

@@ -102,6 +102,7 @@ mod tests {
             dir: Default::default(),
             manifest,
             lock,
+            activation: Default::default(),
         };
         assert_eq!(
             text(Some(&g)),

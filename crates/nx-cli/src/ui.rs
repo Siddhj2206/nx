@@ -23,6 +23,7 @@ pub const SYM_FETCH: &str = "↓";
 pub const SYM_DONE: &str = "✓";
 pub const SYM_WARN: &str = "!";
 pub const SYM_ERROR: &str = "✗";
+pub const SYM_SERVICE: &str = "⚙";
 
 /// Colours text for one stream, or leaves it plain.
 #[derive(Debug, Clone, Copy, Default)]
@@ -149,6 +150,12 @@ impl Ui {
     /// Reports something odd that didn't stop the work.
     pub fn warn(&mut self, msg: impl Display) {
         let sym = self.err.style.yellow(SYM_WARN);
+        self.err.line(format_args!("{sym} {msg}"));
+    }
+
+    /// Reports something done to a unit, user or file.
+    pub fn service(&mut self, msg: impl Display) {
+        let sym = self.err.style.cyan(SYM_SERVICE);
         self.err.line(format_args!("{sym} {msg}"));
     }
 

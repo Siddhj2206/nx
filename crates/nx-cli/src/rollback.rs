@@ -92,6 +92,7 @@ mod tests {
             dir: Default::default(),
             manifest: nx_core::Manifest::default(),
             lock,
+            activation: Default::default(),
         }
     }
 

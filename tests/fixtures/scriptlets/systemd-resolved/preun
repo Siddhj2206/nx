@@ -1,0 +1,17 @@
+
+ 
+if [ $1 -eq 0 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then 
+    # Package removal, not upgrade 
+    /usr/lib/systemd/systemd-update-helper remove-system-units systemd-resolved.service || : 
+fi 
+
+if [ $1 -eq 0 ] ; then
+        if [ -L /etc/resolv.conf ] && \
+            realpath /etc/resolv.conf | grep ^/run/systemd/resolve/; then
+                rm -f /etc/resolv.conf # no longer useful
+                # if network manager is enabled, move to it instead
+                [ -f /run/NetworkManager/resolv.conf ] && \
+                systemctl -q is-enabled NetworkManager.service &>/dev/null && \
+                    ln -fsv ../run/NetworkManager/resolv.conf /etc/resolv.conf
+        fi
+fi

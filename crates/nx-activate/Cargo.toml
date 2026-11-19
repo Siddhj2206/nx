@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+nx-scriptlet = { version = "1.0.0-alpha.0", path = "../nx-scriptlet" }
 nx-core = { version = "1.0.0-alpha.0", path = "../nx-core" }
 rustix = { version = "1", features = ["fs"] }
 serde_json = "1.0.154"

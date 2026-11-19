@@ -1,0 +1,13 @@
+
+ 
+if [ $1 -eq 0 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then 
+    # Package removal, not upgrade 
+    /usr/lib/systemd/systemd-update-helper remove-system-units tuned.service || : 
+fi 
+
+if [ "$1" == 0 ]; then
+# clear persistent storage
+  rm -f /var/lib/tuned/*
+# clear temporal storage
+  rm -f /run/tuned/*
+fi
