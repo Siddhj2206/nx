@@ -110,6 +110,9 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
 - Changing state needs write access to `/var/lib/nx` until nxd exists;
   `NX_STATE_DIR` points nx elsewhere. In the VM, run nx as an unprivileged
   user that owns the state directory, as nxd's `nx` user will.
+- `setfiles -r` fails with "Not a directory" on a path through the `current`
+  symlink; pass `realpath`. systemd-sysext finds nx through the symlink
+  `/var/lib/extensions/nx` (its boot-time search path), not `/run/extensions`.
 - A generation's extension directory must be named `nx` when merged: its
   release file is `extension-release.nx`.
 - A manifest change goes through `Session::open`'s `change` closure, which

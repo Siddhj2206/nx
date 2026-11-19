@@ -471,6 +471,12 @@ The `nx` CLI runs unprivileged. A small root daemon, `nxd`, does only the steps 
 - Never downloads, resolves or parses packages itself. The unprivileged CLI does that work and writes into store directories owned by a dedicated `nx` system user; nxd validates that a generation is complete and correctly owned before activating it.
 - Authorization via polkit: the active local session user in `wheel` may call it without a password. Everyone else needs admin auth.
 
+**Decisions for M3 (best practice, checked in the VM 2026-11-19)**
+
+- *Extension link.* `/var/lib/extensions/nx -> /var/lib/nx/current/sysext`, created by `tmpfiles.d`. `man systemd-sysext` names `/var/lib/extensions` the primary place to install extensions and `/run` and `/etc` suitable only for symlinks to them; only `/var/lib/extensions` is merged at boot without extra setup, and the link name `nx` is what matches `extension-release.nx`. On Neptuno the link merged, kept `usr_t` labels, and was merged again after a reboot. `setfiles -r` wants the resolved directory (`realpath`), not a path through `current`.
+- *The `nx` user.* A system user from `sysusers.d` (`u!`, no login shell, home `/var/lib/nx`) owns the state directory and runs the unprivileged background services (refresh timer, staging). `tmpfiles.d` creates `/var/lib/nx` setgid with a default ACL for group `wheel`, so interactive wheel users, who may call nxd without a password, write generations as themselves without being members of a group nx has to manage. nxd accepts a generation whose files are owned by root, `nx` or the calling uid (`SO_PEERCRED`), with no setuid bits and no symlink leaving the tree. It does not use `DynamicUser=`: state under `/var/lib/nx` must outlive the service and be owned by a stable uid.
+- *No wider trust.* A wheel user can already activate without a password, so a tree they own widens nothing for them. A user outside wheel is refused by polkit before nxd opens the tree, so what they own never reaches `/usr`.
+
 **Trust boundaries**
 
 - RPMs (repos and Koji): GPG-verified against Fedora keys from the image before unpacking; third-party repos against their pinned keys.

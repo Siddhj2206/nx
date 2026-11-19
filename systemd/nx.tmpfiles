@@ -1,0 +1,12 @@
+# nx's state directory. setgid keeps new files in group nx; the default ACL
+# lets wheel users (who may activate generations without a password, see the
+# polkit rule) write state too. The extension link is how systemd-sysext finds
+# nx at boot: /var/lib/extensions is its primary search path, and the link name
+# has to be `nx` to match extension-release.nx. Installed as
+# /usr/lib/tmpfiles.d/nx.conf.
+#Type Path                  Mode  User Group Age Argument
+d      /var/lib/nx          2775  nx   nx    -
+a+     /var/lib/nx          -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+d      /var/lib/nx/generations 2775 nx nx    -
+d      /var/lib/nx/store    2775  nx   nx    -
+L      /var/lib/extensions/nx -   -    -     -   /var/lib/nx/current/sysext
