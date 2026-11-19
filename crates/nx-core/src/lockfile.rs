@@ -24,6 +24,11 @@ pub struct Lock {
     /// booted image: empty, and still to be resolved by `nx sync`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
+    /// Manifest packages this generation leaves out because they don't
+    /// resolve against its image (a repo that has nothing for the new
+    /// release yet). `nx sync` tries them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
     #[serde(default, rename = "repo")]
     pub repos: Vec<LockedRepo>,
     #[serde(default, rename = "host")]
@@ -66,6 +71,7 @@ impl Lock {
             arch: arch.to_owned(),
             parent: None,
             pending: false,
+            skipped: Vec::new(),
             repos: Vec::new(),
             host: Vec::new(),
         }

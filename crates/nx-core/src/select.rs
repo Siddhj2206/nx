@@ -5,7 +5,7 @@
 //! questions here need only the lockfiles, so they are cheap enough to ask
 //! at boot, with no network and no libsolv.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::lockfile::Lock;
 use crate::state::{self, State};
@@ -49,6 +49,32 @@ pub fn newest_for(state: &State, digest: &str) -> Result<Option<u32>> {
         .rev()
         .find(|(_, lock)| lock.image.as_deref() == Some(digest))
         .map(|(number, _)| number))
+}
+
+/// Why a deployed image has no host tier, by digest: what the last `nx sync`
+/// could not resolve. `nx status` shows it; the journal has the same line.
+pub fn failures(state: &State) -> BTreeMap<String, String> {
+    // A missing or unreadable record is the same as no failures.
+    std::fs::read_to_string(state.root().join("sync-failures.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Replaces the failure record. Best effort: whoever cannot write the state
+/// directory cannot have run a sync that matters.
+pub fn record_failures(state: &State, failures: &BTreeMap<String, String>) {
+    let path = state.root().join("sync-failures.json");
+    if failures.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let tmp = state.root().join(".sync-failures.json.tmp");
+    if let Ok(text) = serde_json::to_string(failures)
+        && std::fs::write(&tmp, text).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &path);
+    }
 }
 
 /// What `nx gc` would do.
@@ -140,6 +166,18 @@ mod tests {
         };
         std::fs::create_dir_all(&dir).map_err(write)?;
         std::fs::write(dir.join("lock.toml"), lock.to_toml()?).map_err(write)
+    }
+
+    #[test]
+    fn failures_are_recorded_and_cleared() {
+        let dir = TempDir::new("failures");
+        let state = State::new(&dir.0);
+        assert!(failures(&state).is_empty());
+        let one = BTreeMap::from([("sha256:a".to_owned(), "no such package".to_owned())]);
+        record_failures(&state, &one);
+        assert_eq!(failures(&state), one);
+        record_failures(&state, &BTreeMap::new());
+        assert!(failures(&state).is_empty());
     }
 
     #[test]

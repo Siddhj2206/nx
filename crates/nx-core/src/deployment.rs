@@ -141,61 +141,35 @@ impl DeploymentSource for RpmOstree {
 /// loader's `ostree=` argument names the deployment through a symlink, and
 /// the image's digest is in its commit's metadata.
 #[derive(Debug)]
-pub struct BootedOstree {
+pub struct BootedOstree<O = OstreeCli> {
     /// `/`, or a fixture.
     pub root: PathBuf,
     /// The kernel command line.
     pub cmdline: String,
+    /// Reads a commit's metadata.
+    pub ostree: O,
 }
 
-impl BootedOstree {
-    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
-        let root = root.into();
-        let path = root.join("proc/cmdline");
-        let cmdline =
-            std::fs::read_to_string(&path).map_err(|source| Error::Read { path, source })?;
-        Ok(Self { root, cmdline })
-    }
-
-    /// `(osname, checksum, serial)` of the deployment a boot-loader path
-    /// resolves to: `…/deploy/<osname>/deploy/<checksum>.<serial>`.
-    pub fn parse(resolved: &Path) -> Option<(String, String, u32)> {
-        let leaf = resolved.file_name()?.to_str()?;
-        let (checksum, serial) = leaf.rsplit_once('.')?;
-        let osname = resolved.parent()?.parent()?.file_name()?.to_str()?;
-        Some((osname.to_owned(), checksum.to_owned(), serial.parse().ok()?))
-    }
-
-    /// The `ostree=` argument's path, e.g. `/ostree/boot.1/default/<bootcsum>/0`.
-    pub fn boot_path(cmdline: &str) -> Option<&str> {
-        cmdline
-            .split_whitespace()
-            .find_map(|arg| arg.strip_prefix("ostree="))
-    }
+/// What the booted deployment's image digest is read from: the ostree
+/// commit's metadata. The real one runs `ostree`; tests answer from a fixture.
+pub trait Ostree {
+    /// The `ostree.manifest-digest` of `checksum` in the repo at `repo`.
+    fn manifest_digest(&self, repo: &Path, checksum: &str) -> Result<String>;
 }
 
-impl DeploymentSource for BootedOstree {
-    fn deployments(&self) -> Result<Deployments> {
-        let invalid = |what: &str| Error::Invalid(format!("the booted deployment: {what}"));
-        let boot = Self::boot_path(&self.cmdline).ok_or_else(|| invalid("no ostree= argument"))?;
-        let link = self.root.join(boot.trim_start_matches('/'));
-        let resolved = std::fs::canonicalize(&link).map_err(|source| Error::Read {
-            path: link.clone(),
-            source,
-        })?;
-        let resolved = resolved
-            .strip_prefix(&self.root)
-            .map_or(resolved.clone(), |p| Path::new("/").join(p));
-        let (osname, checksum, serial) =
-            Self::parse(&resolved).ok_or_else(|| invalid("an unexpected path"))?;
+/// `ostree show`, unprivileged.
+#[derive(Debug, Default)]
+pub struct OstreeCli;
+
+impl Ostree for OstreeCli {
+    fn manifest_digest(&self, repo: &Path, checksum: &str) -> Result<String> {
         const COMMAND: &str = "ostree show --print-metadata-key=ostree.manifest-digest";
-        let repo = self.root.join("sysroot/ostree/repo");
         let out = Command::new("ostree")
             .arg(format!("--repo={}", repo.display()))
             .args([
                 "show",
                 "--print-metadata-key=ostree.manifest-digest",
-                &checksum,
+                checksum,
             ])
             .output()
             .map_err(|source| Error::Spawn {
@@ -209,10 +183,65 @@ impl DeploymentSource for BootedOstree {
             });
         }
         // A GVariant string: 'sha256:…'.
-        let digest = String::from_utf8_lossy(&out.stdout)
+        Ok(String::from_utf8_lossy(&out.stdout)
             .trim()
             .trim_matches('\'')
-            .to_owned();
+            .to_owned())
+    }
+}
+
+impl BootedOstree {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
+        Self::with(root, OstreeCli)
+    }
+}
+
+impl<O: Ostree> BootedOstree<O> {
+    pub fn with(root: impl Into<PathBuf>, ostree: O) -> Result<Self> {
+        let root = root.into();
+        let path = root.join("proc/cmdline");
+        let cmdline =
+            std::fs::read_to_string(&path).map_err(|source| Error::Read { path, source })?;
+        Ok(Self {
+            root,
+            cmdline,
+            ostree,
+        })
+    }
+}
+
+/// `(osname, checksum, serial)` of the deployment a boot-loader path
+/// resolves to: `…/deploy/<osname>/deploy/<checksum>.<serial>`.
+fn parse(resolved: &Path) -> Option<(String, String, u32)> {
+    let leaf = resolved.file_name()?.to_str()?;
+    let (checksum, serial) = leaf.rsplit_once('.')?;
+    let osname = resolved.parent()?.parent()?.file_name()?.to_str()?;
+    Some((osname.to_owned(), checksum.to_owned(), serial.parse().ok()?))
+}
+
+/// The `ostree=` argument's path, e.g. `/ostree/boot.1/default/<bootcsum>/0`.
+fn boot_path(cmdline: &str) -> Option<&str> {
+    cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("ostree="))
+}
+
+impl<O: Ostree> DeploymentSource for BootedOstree<O> {
+    fn deployments(&self) -> Result<Deployments> {
+        let invalid = |what: &str| Error::Invalid(format!("the booted deployment: {what}"));
+        let boot = boot_path(&self.cmdline).ok_or_else(|| invalid("no ostree= argument"))?;
+        let link = self.root.join(boot.trim_start_matches('/'));
+        let resolved = std::fs::canonicalize(&link).map_err(|source| Error::Read {
+            path: link.clone(),
+            source,
+        })?;
+        let resolved = resolved
+            .strip_prefix(&self.root)
+            .map_or(resolved.clone(), |p| Path::new("/").join(p));
+        let (osname, checksum, serial) =
+            parse(&resolved).ok_or_else(|| invalid("an unexpected path"))?;
+        let repo = self.root.join("sysroot/ostree/repo");
+        let digest = self.ostree.manifest_digest(&repo, &checksum)?;
         Ok(Deployments::new(vec![Deployment {
             id: format!("{osname}-{checksum}.{serial}"),
             osname,
@@ -242,16 +271,80 @@ mod booted_tests {
     fn reads_the_boot_path_and_the_deployment_it_names() {
         let cmdline = "BOOT_IMAGE=(hd0,gpt3)/boot/ostree/default-8218/vmlinuz root=UUID=x \
                        ostree=/ostree/boot.1/default/8218/0 rw";
-        assert_eq!(
-            BootedOstree::boot_path(cmdline),
-            Some("/ostree/boot.1/default/8218/0")
-        );
-        assert_eq!(BootedOstree::boot_path("ro quiet"), None);
+        assert_eq!(boot_path(cmdline), Some("/ostree/boot.1/default/8218/0"));
+        assert_eq!(boot_path("ro quiet"), None);
         let deployment = Path::new("/sysroot/ostree/deploy/default/deploy/159c70.0");
         assert_eq!(
-            BootedOstree::parse(deployment),
+            parse(deployment),
             Some(("default".to_owned(), "159c70".to_owned(), 0))
         );
-        assert_eq!(BootedOstree::parse(Path::new("/nonsense")), None);
+        assert_eq!(parse(Path::new("/nonsense")), None);
+    }
+
+    struct Fake(&'static str);
+    impl Ostree for Fake {
+        fn manifest_digest(&self, _repo: &Path, _checksum: &str) -> Result<String> {
+            Ok(self.0.to_owned())
+        }
+    }
+
+    /// A root with the boot symlink pointing at a deployment directory.
+    fn root(tag: &str) -> Result<PathBuf> {
+        let root = std::env::temp_dir().join(format!("nx-booted-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let deploy = root.join("sysroot/ostree/deploy/default/deploy/abc123.1");
+        std::fs::create_dir_all(&deploy).map_err(|source| Error::Read {
+            path: deploy.clone(),
+            source,
+        })?;
+        let boot = root.join("ostree/boot.1/default/8218");
+        std::fs::create_dir_all(&boot).map_err(|source| Error::Read {
+            path: boot.clone(),
+            source,
+        })?;
+        std::os::unix::fs::symlink(&deploy, boot.join("0")).map_err(|source| Error::Read {
+            path: boot.clone(),
+            source,
+        })?;
+        std::fs::create_dir_all(root.join("proc")).map_err(|source| Error::Read {
+            path: root.clone(),
+            source,
+        })?;
+        std::fs::write(
+            root.join("proc/cmdline"),
+            "root=UUID=x ostree=/ostree/boot.1/default/8218/0 rw\n",
+        )
+        .map_err(|source| Error::Read {
+            path: root.clone(),
+            source,
+        })?;
+        Ok(root)
+    }
+
+    #[test]
+    fn the_booted_deployment_comes_from_the_command_line_and_the_commit() -> Result<()> {
+        let root = root("ok")?;
+        let source = BootedOstree::with(&root, Fake("sha256:feed"))?;
+        let deployments = source.deployments()?;
+        let booted = deployments
+            .booted()
+            .ok_or(Error::Invalid("no booted".into()))?;
+        assert_eq!(booted.checksum, "abc123");
+        assert_eq!(booted.serial, 1);
+        assert_eq!(booted.image_digest.as_deref(), Some("sha256:feed"));
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn a_commit_without_an_image_digest_has_none() -> Result<()> {
+        let root = root("none")?;
+        let deployments = BootedOstree::with(&root, Fake(""))?.deployments()?;
+        let booted = deployments
+            .booted()
+            .ok_or(Error::Invalid("no booted".into()))?;
+        assert_eq!(booted.image_digest, None);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
     }
 }

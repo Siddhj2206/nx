@@ -38,6 +38,8 @@ pub struct Session<'m> {
     keys: Keys,
     /// Koji `name.arch` → the repo whose keys verified it.
     koji_repo: HashMap<String, String>,
+    /// Manifest packages the next generation leaves out ([`Session::leave_out`]).
+    skipped: Vec<String>,
 }
 
 /// What a resolve found.
@@ -97,6 +99,7 @@ impl<'m> Session<'m> {
             http: Ureq::new(),
             keys,
             koji_repo: HashMap::new(),
+            skipped: Vec::new(),
         })
     }
 
@@ -108,6 +111,11 @@ impl<'m> Session<'m> {
 
     fn locked(&self) -> &[LockedPackage] {
         self.current.as_ref().map_or(&[], |g| &g.lock.host)
+    }
+
+    /// Records that the next generation was resolved without `specs`.
+    pub fn leave_out(&mut self, specs: Vec<String>) {
+        self.skipped = specs;
     }
 
     /// Resolves `specs` (the whole manifest) into a host tier.
@@ -331,6 +339,7 @@ impl<'m> Session<'m> {
             self.universe.arch(),
         );
         lock.host = host;
+        lock.skipped = self.skipped.clone();
         lock.parent = self.current.as_ref().map(|g| g.number);
         for l in &self.universe.repos {
             let added = self.keys.is_added(&l.repo.id);

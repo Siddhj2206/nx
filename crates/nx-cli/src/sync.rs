@@ -76,11 +76,12 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
         Err(e) => return Err(anyhow::Error::new(e).context("reading the current generation")),
     };
     let (mut built, mut first_error) = (0, None);
+    let mut failures = std::collections::BTreeMap::new();
     for (role, d) in wanted(machine) {
         let Some(digest) = d.image_digest.as_deref() else {
             continue;
         };
-        if matches(&state, digest, &current)? {
+        if matches(&state, digest, &current, refresh)? {
             continue;
         }
         let result = build(ui, machine, role, &d, refresh);
@@ -91,10 +92,14 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
                     "no host tier for the {role} image ({}): {e:#}",
                     crate::ui::short_digest(digest)
                 ));
+                failures.insert(digest.to_owned(), format!("{e:#}"));
                 first_error.get_or_insert(e);
             }
         }
     }
+    // Only this run's failures stand: an image that now has a host tier, or
+    // is no longer deployed, drops out.
+    select::record_failures(&state, &failures);
     match first_error {
         Some(e) => Err(e.context("some deployed images have no host tier yet")),
         None => Ok(built),
@@ -102,14 +107,21 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
 }
 
 /// Whether the newest generation for `digest` was built from the
-/// manifest `current` has.
-fn matches(state: &nx_core::State, digest: &str, current: &Generation) -> Result<bool> {
+/// manifest `current` has. One that left packages out is tried again only
+/// when the metadata is being refreshed: that is when they might resolve.
+fn matches(
+    state: &nx_core::State,
+    digest: &str,
+    current: &Generation,
+    refresh: Refresh,
+) -> Result<bool> {
     let Some(n) = select::newest_for(state, digest)? else {
         return Ok(false);
     };
     // The empty generation `nx select` made at boot is a placeholder, not a
     // host tier.
-    if select::read_lock(state, n)?.pending {
+    let lock = select::read_lock(state, n)?;
+    if lock.pending || (!lock.skipped.is_empty() && refresh != Refresh::IfMissing) {
         return Ok(false);
     }
     if n == current.number {
@@ -143,7 +155,21 @@ fn build(
     let mut session = Session::open(ui, machine, refresh, false, |_| Ok(()))?;
     let was_current = session.current.as_ref().map(|g| g.number);
     let manifest = session.manifest.clone();
-    let resolved = session.resolve(ui, &manifest.host.packages)?;
+    let (resolved, skipped) = resolve_what_fits(ui, &mut session, &manifest.host.packages)?;
+    if !skipped.is_empty() {
+        // A repeat of the last attempt (the daily refresh, with the same
+        // repos still lacking them) would only add a generation like it.
+        if let Some(n) = select::newest_for(&session.state, digest)?
+            && same_as(&session.state, n, &resolved.all, &skipped)?
+        {
+            ui.step(format_args!(
+                "still nothing for {}; generation {n} stays",
+                skipped.join(", ")
+            ));
+            return Ok(());
+        }
+        session.leave_out(skipped);
+    }
     let built = session.build(ui, &manifest, &resolved.all)?;
     let number = built.generation.number;
     if booted {
@@ -166,6 +192,63 @@ fn build(
         if booted { ", live" } else { "" }
     ));
     Ok(())
+}
+
+/// Resolves the manifest; if it won't resolve as a whole, resolves each
+/// package alone and leaves out the ones that fail, with a warning. Better
+/// that than no host tier for an image: the others still come up. If no
+/// single package is at fault (two conflict), the original error stands.
+fn resolve_what_fits(
+    ui: &mut Ui,
+    session: &mut Session,
+    specs: &[String],
+) -> Result<(crate::apply::Resolved, Vec<String>)> {
+    let whole = match session.resolve(ui, specs) {
+        Ok(resolved) => return Ok((resolved, Vec::new())),
+        Err(e) => e,
+    };
+    let (mut kept, mut skipped) = (Vec::new(), Vec::new());
+    for spec in specs {
+        match session.resolve(ui, std::slice::from_ref(spec)) {
+            Ok(_) => kept.push(spec.clone()),
+            Err(e) => {
+                ui.warn(format_args!("leaving out {spec}: {}", first_line(&e)));
+                skipped.push(spec.clone());
+            }
+        }
+    }
+    if skipped.is_empty() {
+        return Err(whole);
+    }
+    let resolved = session
+        .resolve(ui, &kept)
+        .context("the rest of the manifest doesn't resolve either")?;
+    Ok((resolved, skipped))
+}
+
+fn first_line(e: &anyhow::Error) -> String {
+    format!("{e:#}")
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Whether generation `n` has exactly these packages and leaves out the
+/// same ones.
+fn same_as(
+    state: &nx_core::State,
+    n: u32,
+    all: &[nx_rpm::Planned],
+    skipped: &[String],
+) -> Result<bool> {
+    let lock = select::read_lock(state, n)?;
+    let have: std::collections::BTreeSet<&str> =
+        lock.host.iter().map(|p| p.nevra.as_str()).collect();
+    let want: std::collections::BTreeSet<String> = all.iter().map(|p| p.package.nevra()).collect();
+    Ok(lock.skipped == skipped
+        && have.len() == want.len()
+        && want.iter().all(|n| have.contains(n.as_str())))
 }
 
 #[cfg(test)]
@@ -216,10 +299,21 @@ mod tests {
         write(2, &lock)?;
         // `nx select` made generation 2 current for the booted image, but it
         // is empty: sync must still resolve for the image.
-        assert!(!matches(&state, "sha256:new", &current)?);
+        assert!(!matches(
+            &state,
+            "sha256:new",
+            &current,
+            Refresh::IfMissing
+        )?);
         lock.pending = false;
         write(2, &lock)?;
-        assert!(matches(&state, "sha256:new", &current)?);
+        assert!(matches(&state, "sha256:new", &current, Refresh::IfMissing)?);
+        // One that left a package out is retried when the metadata refreshes,
+        // not on every sync.
+        lock.skipped = vec!["copr-thing".into()];
+        write(2, &lock)?;
+        assert!(matches(&state, "sha256:new", &current, Refresh::IfMissing)?);
+        assert!(!matches(&state, "sha256:new", &current, Refresh::Always)?);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

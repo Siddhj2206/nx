@@ -79,8 +79,23 @@ fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<
         return None;
     }
     Some(match nx_core::select::newest_for(state, digest) {
-        Ok(Some(n)) => st.dim(&format!("host tier: generation {n}")),
-        Ok(None) => st.yellow("no host tier yet (nx sync)"),
+        Ok(Some(n)) => {
+            let left_out = nx_core::select::read_lock(state, n)
+                .map(|l| l.skipped)
+                .unwrap_or_default();
+            if left_out.is_empty() {
+                st.dim(&format!("host tier: generation {n}"))
+            } else {
+                st.yellow(&format!(
+                    "host tier: generation {n}, without {}",
+                    left_out.join(", ")
+                ))
+            }
+        }
+        Ok(None) => match nx_core::select::failures(state).get(digest) {
+            Some(why) => st.yellow(&format!("no host tier yet: {why}")),
+            None => st.yellow("no host tier yet (nx sync)"),
+        },
         Err(e) => st.yellow(&format!("host tier unreadable: {e}")),
     })
 }
@@ -88,10 +103,28 @@ fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<
 /// The current generation and the backend that made it live.
 fn host_tier(state: &State, st: crate::ui::Style) -> String {
     match (state.current_number(), state.backend()) {
-        (Ok(Some(n)), Ok(Some(backend))) => format!("generation {n} · {}", backend.name()),
-        (Ok(Some(n)), _) => format!("generation {n} {}", st.dim("· not made live")),
+        (Ok(Some(n)), Ok(Some(backend))) => format!(
+            "generation {n} · {}{}",
+            backend.name(),
+            left_out(state, n, st)
+        ),
+        (Ok(Some(n)), _) => format!(
+            "generation {n} {}{}",
+            st.dim("· not made live"),
+            left_out(state, n, st)
+        ),
         (Ok(None), _) => st.dim("nothing added yet"),
         (Err(e), _) => st.yellow(&format!("unreadable: {e}")),
+    }
+}
+
+/// `  without a, b` when the generation leaves manifest packages out.
+fn left_out(state: &State, n: u32, st: crate::ui::Style) -> String {
+    match nx_core::select::read_lock(state, n) {
+        Ok(lock) if !lock.skipped.is_empty() => {
+            st.yellow(&format!("  without {}", lock.skipped.join(", ")))
+        }
+        _ => String::new(),
     }
 }
 

@@ -14,7 +14,9 @@ pub mod os_release;
 pub mod select;
 pub mod state;
 
-pub use deployment::{BootedOstree, Deployment, DeploymentSource, Deployments, RpmOstree};
+pub use deployment::{
+    BootedOstree, Deployment, DeploymentSource, Deployments, Ostree, OstreeCli, RpmOstree,
+};
 pub use generation::{Activation, ActivationPackage, Built, Generation, Readable, Refusal};
 pub use lockfile::{Lock, LockedPackage, LockedRepo};
 pub use manifest::{Manifest, RepoEntry, ScriptletAllow};
