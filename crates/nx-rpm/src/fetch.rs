@@ -46,21 +46,49 @@ impl Default for Ureq {
     }
 }
 
-impl Http for Ureq {
-    fn get(&self, url: &str) -> Result<Vec<u8>> {
-        let fail = |e: ureq::Error| Error::Fetch {
-            url: url.to_owned(),
-            reason: e.to_string(),
-        };
+/// Attempts per request; mirrors.fedoraproject.org resets connections now
+/// and then, and one reset shouldn't drop a whole repo.
+const ATTEMPTS: u32 = 3;
+
+impl Ureq {
+    fn get_once(&self, url: &str) -> Result<Vec<u8>, ureq::Error> {
         self.0
             .get(url)
-            .call()
-            .map_err(fail)?
+            .call()?
             .body_mut()
             .with_config()
             .limit(1 << 30)
             .read_to_vec()
-            .map_err(fail)
+    }
+}
+
+/// Worth another try: the network, not the answer, failed.
+fn transient(e: &ureq::Error) -> bool {
+    match e {
+        ureq::Error::StatusCode(code) => *code >= 500 || *code == 429,
+        ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => true,
+        _ => false,
+    }
+}
+
+impl Http for Ureq {
+    fn get(&self, url: &str) -> Result<Vec<u8>> {
+        let mut attempt = 1;
+        loop {
+            match self.get_once(url) {
+                Ok(body) => return Ok(body),
+                Err(e) if attempt < ATTEMPTS && transient(&e) => {
+                    std::thread::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)));
+                    attempt += 1;
+                }
+                Err(e) => {
+                    return Err(Error::Fetch {
+                        url: url.to_owned(),
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
     }
 }
 

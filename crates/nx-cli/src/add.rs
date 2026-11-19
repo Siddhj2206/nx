@@ -13,7 +13,15 @@ pub fn run(ui: &mut Ui, universe: &mut Universe, specs: &[String], dry_run: bool
     let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
     let packages = match universe.plan(&specs)? {
         Plan::Install(p) => p,
-        Plan::Problems(problems) => {
+        Plan::Problems(mut problems) => {
+            // A missing repo, not a missing package, is the likelier cause.
+            if !universe.skipped.is_empty() {
+                let repos: Vec<&str> = universe.skipped.iter().map(|s| s.repo.as_str()).collect();
+                problems.push(format!(
+                    "{} could not be loaded (see above); try again",
+                    repos.join(", ")
+                ));
+            }
             bail!("can't add {}\n{}", specs.join(" "), problems.join("\n"));
         }
     };
