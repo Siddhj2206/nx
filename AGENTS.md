@@ -199,6 +199,18 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
 - A scriptlet allowance (`[[scriptlets]]`) is dropped by `nx remove` when its
   package leaves.
 
+- Fedora's nix ships only `nix`: no `nix-store`, `nix-env` or `nix-build`.
+  Realise with `nix build <path> --out-link <link>` (an indirect root that
+  names the link's absolute path, so make it at the generation's final name).
+- `store-paths.xz` covers every platform Hydra builds and narinfos carry no
+  `System`; store paths come from `nix eval` (ADR-0009), never a name match.
+- Don't set `SSL_CERT_FILE` or `LOCALE_ARCHIVE` for Nix tools: they find the
+  host's certificates and locale archive by default, and Fedora 45 has no
+  `/etc/pki/tls/certs/ca-bundle.crt`. Only `TERMINFO_DIRS` is needed.
+- The daemon reads `nix.conf` only at start; an extra cache works for an
+  untrusted user only once it is in `trusted-substituters` and the daemon
+  has restarted.
+
 Nix log pitfalls from nx 0.x, for M6:
 
 - Nix logs download retries at error level with "warning:" in the text, and

@@ -95,18 +95,18 @@ The tool tier is the default home for standalone CLI tools: prebuilt nixpkgs clo
 
 **One pin.** All tool-tier packages come from one nixpkgs channel release (a revision Hydra has built), recorded in the lockfile. `nx upgrade --tool` moves the pin to the channel's current release. This is ADR-0004, kept as is.
 
-**Finding store paths without evaluation**
+**Finding store paths: one evaluation per attribute and pin** ([ADR-0009](adr/0009-store-paths-by-evaluation.md))
 
-- The catalog comes from the release's `packages.json.br` (attribute, pname, version, `mainProgram`, `outputsToInstall`, unfree/broken flags), as in nx 0.x: built once per release, searched in milliseconds.
-- Store paths come from the same release's `store-paths.xz` (\~8 MB, every output Hydra built). Join it with the catalog on name, version and output to get attribute → store path.
-- If the join is ambiguous for an attribute, fall back to evaluating just that attribute (see *Unfree and uncached packages*). Measure how often that happens on real data before relying on the join.
+- The catalog comes from the release's `packages.json.br` (attribute, pname, version, `mainProgram`, `outputsToInstall`, unfree/broken flags), as in nx 0.x: built once per release, searched in milliseconds. Search, info and routing read only the catalog.
+- Store paths come from evaluating just the requested attributes, all in one `nix eval --json --file <release>/nixexprs.tar.xz` call, for `x86_64-linux` (the `Universe`'s arch), the outputs in `outputsToInstall` and the `drvPath`. The result goes into `lock.toml` per attribute, so an attribute is evaluated once per pin: `nx add` evaluates what is new, `nx upgrade --tool` evaluates everything once after moving the pin. Warm, an attribute takes 0.5–1.9 s and 130–550 MB; the first evaluation at a pin first fetches the release's nixexprs tarball (34 s on the VM), which the refresh timer can do ahead of time.
+- The `store-paths.xz` join was measured and dropped (M6 spike): the file lists every platform Hydra builds, so 98% of the attributes it has match several paths by name; catalog names don't match store names for language packages (`actdiag` is `python3.14-actdiag-3.0.0`); and wrappers Hydra doesn't build (`neovim`) aren't in it at all.
 
 **Fetching and verifying** (nix-daemon writes, nx decides)
 
 nx keeps [ADR-0001](adr/0001-nix-does-every-store-write.md): the daemon stays the only writer of `/nix/store`, and it already checks narinfo signatures and `NarHash` against the configured trusted keys. What nx adds is the decision of *what* to realise and the bookkeeping, with no profile and no registry.
 
 1. Walk the closure via `.narinfo` `References` from cache.nixos.org, in parallel (port nx 0.x's `internal/cache` walker), for sizes and the plan.
-2. Run `nix-store --realise <store path> --add-root <generation>/gcroots/<name> --indirect` with `--log-format internal-json`, so the daemon substitutes the closure and the generation holds the GC root. Progress comes from the log, as in nx 0.x (fixtures in `testdata/`).
+2. Run `nix build <store path>… --out-link <generation>/gcroots/<name> --log-format internal-json`, so the daemon substitutes the closure and the generation holds the GC root (`--out-link` registers an indirect root under `/nix/var/nix/gcroots/auto`, as `nix-store --add-root --indirect` did; Fedora's nix ships only the `nix` command). A path no cache has (a wrapper such as `neovim`) builds locally from its `drvPath` (`nix build <drv>^<outputs>`). The auto root names the link's absolute path, so the links are made at the generation's final name, after its rename. Progress comes from the log, as in nx 0.x (fixtures in `testdata/`; `nix-build-storepath.jsonl` is Nix 2.35's).
 3. Record references in `state.sqlite`; generations are the GC roots.
 
 **What changes compared with Neptuno's Nix setup today**
@@ -122,18 +122,18 @@ Plain `nix` commands keep working against the same store, as with nx 0.x. Droppi
 
 **Unfree and uncached packages**
 
-Hydra doesn't build unfree packages, so they are not in cache.nixos.org or `store-paths.xz`. nx handles them only when the package is on the manifest's `unfree` allowlist: it runs `nix build --impure` of that one attribute at the pinned revision with `NIXPKGS_ALLOW_UNFREE=1` (as nx 0.x does), rooted in the generation. Trusted extra caches (`nx cache add <url> <public key>`) go into the daemon's `extra-substituters`/`extra-trusted-public-keys` through nxd, so they are tried first. Most unfree CLI packages just fetch a vendor binary and patch it, so builds take seconds. Anything that fails to build is refused, pointing to an RPM repo for the host tier or the vendor's installer.
+Hydra doesn't build unfree packages, so they are not in cache.nixos.org or `store-paths.xz`. nx handles them only when the package is on the manifest's `unfree` allowlist: it runs `nix build --impure` of that one attribute at the pinned revision with `NIXPKGS_ALLOW_UNFREE=1` (as nx 0.x does), rooted in the generation. Trusted extra caches (`nx cache add <url> <public key>`) go into the daemon's `extra-trusted-substituters`/`extra-trusted-public-keys` through nxd, which restarts `nix-daemon` (it reads `nix.conf` only at start; the restart takes 11 ms and `KillMode=process` leaves running builds alone). nx then passes `--option extra-substituters <url>` on its own calls, which the daemon honours from an untrusted user only for a listed trusted substituter. Most unfree CLI packages just fetch a vendor binary and patch it, so builds take seconds. Anything that fails to build is refused, pointing to an RPM repo for the host tier or the vendor's installer.
 
 Unfree packages rebuild together when the pin moves.
 
 **Exposing binaries**
 
 - Each exposed binary is a tiny compiled shim in `~/.local/share/nx/bin` (after the system dirs on `PATH`) that sets per-process variables and `exec`s the real binary. Cost: about a millisecond.
-- The shim sets: `LOCALE_ARCHIVE` (Nix glibc can't read Fedora's locale archive), `SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt`, and `TERMINFO_DIRS` including the host's terminfo.
+- The shim sets only `TERMINFO_DIRS`, to the caller's value, then `/usr/share/terminfo`, then an empty entry (ncurses' own default): Nix's ncurses doesn't know host-only terminals such as `xterm-ghostty`. The M6 spike ran 20 common tools (ripgrep, fd, bat, jq, fzf, eza, git, gh, htop, just, helix, lazygit, starship, tmux, hyperfine, tokei, zig, yq, curl, less) from an empty environment and all worked. Nix's glibc already reads `/usr/lib/locale/locale-archive`, so `LOCALE_ARCHIVE` is unneeded, and Nix's OpenSSL finds the host's certificates through `/etc/ssl/certs`; `SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt` breaks it, since Fedora 45 has no such file.
 - nx never exports `LD_LIBRARY_PATH`, `PKG_CONFIG_PATH`, `XDG_DATA_DIRS`, `GIO_EXTRA_MODULES` or similar globally.
 - Known limits: Nix's glibc can't load Fedora's NSS modules, so user lookups fail for systemd-homed, SSSD or LDAP accounts (plain local users are fine; `nx doctor` warns). Some Nix wrappers set env vars that child host processes inherit; `nx doctor` flags them.
 
-**Garbage collection:** `nx gc` drops generations past retention and runs `nix-store --gc`; the daemon already skips paths that are live roots or in use by running processes.
+**Garbage collection:** `nx gc` drops generations past retention and runs `nix store gc`; the daemon already skips paths that are live roots or in use by running processes.
 
 **Port from nx 0.x:** the `packages.json.br` catalog builder, channel-release pinning, the parallel narinfo closure walker, and the per-package progress output.
 
@@ -525,13 +525,13 @@ Every merge also checks again that no file of the extension hides one of the boo
 
 ## Performance design
 
-nx should feel instant for reads and take about a second plus download time for installs. It gets there by never waiting on metadata in the foreground, never evaluating Nix on the hot path, and caching everything tied to the immutable image.
+nx should feel instant for reads and take about a second plus download time for installs. It gets there by never waiting on metadata in the foreground, evaluating Nix only once per new attribute and pin, and caching everything tied to the immutable image.
 
 | Target (estimate) | Operation |
 | --- | --- |
 | < 100 ms | `list`, `why`, `search`, `info`, `status` (local SQLite only) |
 | \~1 s + download | `add` of a host-tier package with warm metadata |
-| near-instant | `add` of a cached tool-tier package (symlink only) |
+| \~1 s + download | `add` of a tool-tier package new to this pin (one evaluation); near-instant when the lockfile has it |
 | measure first | `systemd-sysext refresh` on the target image (the slowest remaining step) |
 
 **Techniques**
@@ -540,7 +540,7 @@ nx should feel instant for reads and take about a second plus download time for 
 2. **zchunk metadata.** Fedora publishes zchunk repodata, so refreshes download only changed chunks. Skip `filelists` unless a query needs file paths.
 3. **Precomputed installed set.** The image's rpmdb is turned into `installed-<digest>.solv` once per image digest.
 4. **libsolv directly** (the solver dnf5 uses), loading cached `.solv` files. No Python, no dnf process.
-5. **No Nix evaluation on the hot path.** Lookups use the prebuilt local index; closures come from `.narinfo` references.
+5. **Nix evaluation only for new attributes.** Search and info use the prebuilt catalog; store paths are evaluated once per attribute and pin and kept in the lockfile; closures come from `.narinfo` references.
 6. **Parallel I/O.** HTTP/2 with a pool of connections, fastest-mirror selection, parallel downloads, and streaming zstd decompression straight into the store.
 7. **Cheap generation assembly.** Reflinks (btrfs/xfs) or hardlinks from the store; directory sysext, so no squashfs/erofs build.
 8. **Skip work.** Refresh the sysext only when host-tier content changed. Tool-tier changes only touch symlinks.
@@ -654,10 +654,10 @@ The biggest risk is the sysext backend on bootc. That is why the prefix backend 
 
 **Open questions for the tool tier**
 
-- [ ] How many top-level attributes map ambiguously when joining `packages.json.br` with `store-paths.xz`?
-- [ ] Does `nix-store --realise` of a store path taken from `store-paths.xz` substitute cleanly when the local store has never seen its derivation?
-- [ ] Can nxd add extra substituters without restarting a daemon that is mid-build?
-- [ ] Which shim environment variables are actually needed beyond `LOCALE_ARCHIVE`, `SSL_CERT_FILE` and `TERMINFO_DIRS`? Test the 20 most-used tools.
+- [x] How many top-level attributes map ambiguously when joining `packages.json.br` with `store-paths.xz`? Nearly all (M6 spike, nixpkgs-26.11pre1122334): of 133,489 free, unbroken attributes, 1,143 match exactly one path, 73,090 match several (the file covers x86_64-linux, aarch64-linux and aarch64-darwin, and narinfos carry no `System`), 59,256 match none (store names differ from catalog names, or Hydra doesn't build the attribute). nx evaluates instead ([ADR-0009](adr/0009-store-paths-by-evaluation.md)).
+- [x] Does realising a store path the local store has never seen substitute cleanly? Yes: `nix build <path> --out-link <link>` as an unprivileged wheel user, through the daemon, with no derivation known locally, substituted hyperfine and registered the root (1.0 s with its dependencies present; 31 ms when already valid). A path no substituter has fails with "is required, but there is no substituter that can build it".
+- [x] Can nxd add extra substituters without restarting a daemon that is mid-build? No restart-free way: the daemon reads `nix.conf` at start, and an untrusted client's `extra-substituters` is ignored until the daemon lists it in `trusted-substituters`. A restart is cheap and safe (11 ms, `KillMode=process`), and it is needed only when a cache is added or removed.
+- [x] Which shim environment variables are actually needed? Only `TERMINFO_DIRS` (see *Exposing binaries*).
 
 ## Prior art
 
@@ -683,7 +683,7 @@ Build in this order, riskiest first. Each milestone ends with a working, tested 
 4. **M3 — Activation and nxd.** Sysext and prefix backends with probing; nxd with polkit; `nx add`, `nx remove`, `nx rollback` live. *Exit:* `nx add wayland-devel` then `cargo build` of a Bevy app succeeds with no reboot. *Status:* done. `nx add`, `remove`, `repo add|remove` and `rollback` build or pick a generation and ask nxd to make it live (`nx generations` lists them from their lockfiles; `state.sqlite` stays deferred). nxd is socket-activated, one process per connection; it authorizes through `pkcheck` (the wheel rule allows an active local session without a password), validates the tree, labels it with `setfiles -r`, swaps `current`, links `/var/lib/extensions/nx` and runs `systemd-sysext refresh`, then checks `status --json` lists `nx` under `/usr`. On the Neptuno 45.20261118 VM an activation takes 80–150 ms end to end, and a request from a user polkit doesn't allow is refused with `current` untouched. `nx shell` exports the prefix backend's variables; with sysext it has nothing to add. Exit check: `nx add cargo wayland-devel libxkbcommon-devel alsa-lib-devel systemd-devel` (Fedora's own cargo, from the host tier, 295 s of that was the 81 MB download in the VM) and then `cargo build` of a Bevy 0.20 app with default features (wayland, x11, alsa, udev) succeeded in 5 m 52 s with no reboot. `tests/vm/m3.sh` repeats the add, remove, rollback, refusal and prefix checks. Left for later: `--dry-run` on `nx repo add|remove`, forcing the backend from the CLI (only `[host] backend` in the manifest), the compatibility check that would let `nx rollback` cross image digests (M5, so it refuses now).
 5. **M4 — Scriptlets and services.** Translator for sysusers/tmpfiles/presets/triggers with a test corpus; unit enable/start/stop. *Exit:* `nx add syncthing` installs and runs the service; unknown scriptlets are refused with a clear message. *Status:* done; see *Scriptlet translation, as built*. In the VM `nx add syncthing` makes `syncthing@.service` visible at once, `systemctl enable --now syncthing@tester` runs it, and `nx remove syncthing` stops and disables every instance before the refresh. `memcached` is refused for `memcached-selinux`'s `%pre` (`fixfiles`) with the image hint, and passes with `--allow-scriptlets`; its user and `/etc/sysconfig/memcached` appear through sysusers and tmpfiles. `tests/vm/m4.sh` repeats this and checks the shared cache. Also in M4: the shared metadata cache and NSS-aware wheel membership. Left for later: processes holding replaced files, and services on the prefix backend.
 6. **M5 — Image upgrade lifecycle.** Staged-image re-resolve, `nx-select.service`, notifications, GC. *Exit:* a bootc upgrade + reboot comes up with a matching host tier and no manual steps. *Status:* done; see *Image upgrade lifecycle, as built (M5)*. In the VM, with `wayland-devel` and `libxkbcommon-devel` added on Neptuno 45.20261118 and 45.20261117 staged (`tests/vm/m5.sh`): the bootc hook built the staged image's generation in 2 s with no command; a change made while it was staged (`nx add libxkbcommon-devel`) built both images' generations; after the reboot `nx-select` made the new image's generation current and sysext merged it, and after `bootc rollback` and a reboot it picked the old image's. With the booted image's generations deleted (the hook never ran), boot merged the previous generation because the offline check passed, and `nx sync` then built and activated the right one in 2.5 s (`nx-select` takes 0.1 s with a digest match, 1.3 s with the offline check). A generation of another Fedora release or one that doesn't resolve offline yields an empty generation and a boot with no host tier; `nx gc` kept the booted, rollback and newest generations. Left for later: desktop notifications. Afterwards: `nx-settle.service` runs `nx select --after-merge` once `systemd-sysext` has, and with the extension forced out of `/usr` in the VM (a wrong `VERSION_ID`, so nothing merged) the boot recorded the prefix backend and `nx shell` exported the generation's `usr`; the next `nx add` merged it again.
-7. **M6 — Tool tier.** Port nx 0.x's catalog, narinfo walker and internal-json progress; the `store-paths.xz` join; realisation through the daemon with per-generation GC roots; compiled shims; the system-plugging classifier and routing; the unfree path and extra caches. *Exit:* `nx add ripgrep` works with no Nix profile and no Nix env on `PATH`, and an allowlisted unfree tool installs. This is where nx 1.0 replaces nx 0.x in Neptuno.
+7. **M6 — Tool tier.** Port nx 0.x's catalog, narinfo walker and internal-json progress; store paths by evaluation (ADR-0009); realisation through the daemon with per-generation GC roots; compiled shims; the system-plugging classifier and routing; the unfree path and extra caches. *Exit:* `nx add ripgrep` works with no Nix profile and no Nix env on `PATH`, and an allowlisted unfree tool installs. This is where nx 1.0 replaces nx 0.x in Neptuno. *Spike (`spike/m6-tooltier.sh`, Neptuno 45.20261118, Nix 2.35.4):* the four tool-tier open questions are answered below; the `store-paths.xz` join doesn't work, so store paths come from evaluation ([ADR-0009](adr/0009-store-paths-by-evaluation.md)); Fedora's nix has no `nix-store`, so realising is `nix build --out-link`; and the shim needs only `TERMINFO_DIRS`.
 8. **M7 — Doctor, image hints, polish.** `nx doctor`, `nx apply`, migration helper from nx 0.x, shell completions with live values (package names from the catalog and the repos, installed packages for `remove`): compare clap_complete's dynamic completion with a [usage](https://usage.jdx.dev/) spec exported from clap, which also gives man pages and Markdown reference. *Exit:* daily-driver ready.
 
 **Working on it:** `AGENTS.md` has the gates and conventions. Work one milestone per session, and update this doc's open questions as they get answered. `compat::check`, `nx select` and `nx rollback` treat a generation with `skipped` as a normal one: it is what the image could resolve. A package is left out only for a resolve problem (`Unresolvable`); a network or cache error fails the sync instead. `nx add`, `remove` and `repo` keep a package the current generation left out out while it still doesn't resolve (`resolve_manifest`), with a warning; a package named on the command line must resolve, so a typo still fails.
