@@ -8,9 +8,11 @@ d      /var/lib/nx             2775  nx   nx    -
 d      /var/lib/nx/generations 2775  nx   nx    -
 d      /var/lib/nx/store       2775  nx   nx    -
 d      /var/lib/nx/keys        2775  nx   nx    -
+f      /var/lib/nx/lock        0664  nx   nx    -
 # Not recursive: it runs every boot, and the store is large. New files and
 # directories inherit the default entries.
 a+     /var/lib/nx             -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
 a+     /var/lib/nx/generations -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
 a+     /var/lib/nx/store       -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+a+     /var/lib/nx/lock        -     -    -     -   group:wheel:rw
 a+     /var/lib/nx/keys        -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx

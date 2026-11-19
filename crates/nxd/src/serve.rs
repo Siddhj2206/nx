@@ -64,8 +64,8 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
         } => {
             ctx.authorizer.check(peer, ACTION_ACTIVATE)?;
             let _guard = lock(&ctx.lock)?;
-            // Root, the owner of the state directory (nx) and the caller
-            // may own what they hand over.
+            // Root, the owner of the state directory (nx), the caller and
+            // the other administrators may own what they hand over.
             let state = ctx.layout.state.root();
             let nx = std::fs::metadata(state)
                 .map_err(|source| Error::Io {
@@ -73,13 +73,13 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
                     source,
                 })?
                 .uid();
-            let done = nx_activate::activate(
-                &ctx.layout,
-                &*ctx.runner,
-                generation,
-                backend,
-                &[nx, peer.uid],
-            )?;
+            let mut allowed = nx_activate::wheel_uids(&ctx.layout.root);
+            allowed.extend([nx, peer.uid]);
+            let layout = nx_activate::Layout {
+                image: (ctx.image)(),
+                ..ctx.layout.clone()
+            };
+            let done = nx_activate::activate(&layout, &*ctx.runner, generation, backend, &allowed)?;
             Ok(Response::Activated {
                 backend: done.backend,
                 fallback: done.fallback,
@@ -207,6 +207,7 @@ mod tests {
             extensions: dir.join("extensions"),
             root,
             file_contexts: None,
+            image: nx_activate::Image::None,
         };
         Ok((tmp, layout))
     }
@@ -223,6 +224,7 @@ mod tests {
                     layout,
                     runner: Box::new(Merges),
                     authorizer: Box::new(Allow(allow)),
+                    image: Box::new(|| nx_activate::Image::None),
                     lock,
                 };
                 if let Ok((stream, _)) = listener.accept() {

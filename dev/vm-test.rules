@@ -1,8 +1,10 @@
-// Test VM only (dev/vm-install): `tester` logs in over ssh, which polkit does
-// not count as a local, active session, so the wheel rule in 50-nx.rules
-// can't allow it. This rule stands in for sitting at the machine.
+// Test VM only (dev/vm-install): the testers log in over ssh, which polkit
+// does not count as a local, active session, so the wheel rule in
+// 50-nx.rules can't allow them. This rule stands in for sitting at the
+// machine. tester3 is deliberately left out (and is not in wheel).
 polkit.addRule(function(action, subject) {
-    if (action.id == "org.nx.activate" && subject.user == "tester") {
+    if (action.id == "org.nx.activate" &&
+        (subject.user == "tester" || subject.user == "tester2")) {
         return polkit.Result.YES;
     }
 });

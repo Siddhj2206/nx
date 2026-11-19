@@ -11,7 +11,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, target: Option<u32>, dry_run: bool) -
     let state = host::state();
     let _guard = state.lock().with_context(|| {
         format!(
-            "nx needs write access to {} (set NX_STATE_DIR to use another directory)",
+            "changing packages needs an administrator (a member of wheel): no write access to {}",
             state.root().display()
         )
     })?;

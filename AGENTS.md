@@ -128,6 +128,11 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   read-only in the VM; `dev/vm-install` bind-mounts a copy (until reboot,
   run it again). An ssh login is not a local, active session, so the wheel
   rule can't allow it: the VM has a rule for `tester` (`dev/vm-test.rules`).
+- nxd accepts files owned by root, `nx`, the caller and wheel members, and
+  checks again that the extension doesn't hide the booted image's files.
+  The state lock falls back to a read-only open only for someone who can
+  write the directory: flock needs no write access, so a fallback for anyone
+  would let a non-administrator take the lock and skip the permission check.
 - `nx rollback` follows `parent` in `lock.toml`, not the numbering: after a
   rollback, the next generation is numbered past the abandoned ones.
 - nxd runs as root in a directory wheel can write: it writes `current`

@@ -63,6 +63,7 @@ fn layout(tmp: &Tmp, selinux: bool) -> std::io::Result<Layout> {
         extensions: tmp.0.join("extensions"),
         root,
         file_contexts: selinux.then_some(contexts),
+        image: Image::None,
     })
 }
 
@@ -410,5 +411,54 @@ fn finds_the_policys_file_contexts() -> Result<()> {
     assert_eq!(file_contexts(&tmp.0), None, "targeted is the default");
     std::fs::write(tmp.0.join("etc/selinux/config"), "SELINUXTYPE=mls\n").map_err(io)?;
     assert!(file_contexts(&tmp.0).is_some());
+    Ok(())
+}
+
+#[test]
+fn wheel_members_are_listed_and_primary() -> Result<()> {
+    let tmp = Tmp::new("wheel");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    std::fs::create_dir_all(tmp.0.join("etc")).map_err(io)?;
+    std::fs::write(
+        tmp.0.join("etc/group"),
+        "root:x:0:\nwheel:x:10:alice,bob\nusers:x:100:\n",
+    )
+    .map_err(io)?;
+    std::fs::write(
+        tmp.0.join("etc/passwd"),
+        "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/h:/bin/sh\nbob:x:1001:100::/h:/bin/sh\n\
+         carol:x:1002:100::/h:/bin/sh\ndave:x:1003:10::/h:/bin/sh\n",
+    )
+    .map_err(io)?;
+    let mut uids = wheel_uids(&tmp.0);
+    uids.sort_unstable();
+    assert_eq!(uids, [1000, 1001, 1003]);
+    assert!(wheel_uids(&tmp.0.join("nowhere")).is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_image_is_checked_again_at_activation() -> Result<()> {
+    let tmp = Tmp::new("image");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let mut l = layout(&tmp, false).map_err(io)?;
+    let image = tmp.0.join("image");
+    std::fs::create_dir_all(image.join("usr/bin")).map_err(io)?;
+    l.image = Image::Root(image.clone());
+    validate(&l, 1, &[uid()])?;
+    // The image now ships the file generation 1 carries.
+    std::fs::write(image.join("usr/bin/tool"), "image").map_err(io)?;
+    assert!(refused(&l, &[uid()]).contains("the image already has /usr/bin/tool"));
+    let fake = Fake::new();
+    assert!(activate(&l, &fake, 1, None, &[uid()]).is_err());
+    assert!(fake.calls().is_empty(), "nothing ran");
+    l.image = Image::Unreadable("rpm-ostree is broken".into());
+    assert!(refused(&l, &[uid()]).contains("can't read the booted image"));
     Ok(())
 }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use nx_core::generation::EXTENSION_RELEASE;
 use nx_core::{Generation, OsRelease};
 
-use crate::{Error, Layout, Result};
+use crate::{Error, Image, Layout, Result};
 
 /// A generation that passed.
 #[derive(Debug)]
@@ -18,8 +18,36 @@ pub struct Validated {
     pub sysext: PathBuf,
 }
 
+/// The uids of the members of group `wheel` under `root`: those it lists
+/// and those whose primary group it is. They may all change nx's state, so
+/// files any of them wrote are acceptable (design, *Privilege model*).
+/// Accounts that exist only in NSS (SSSD, LDAP) aren't seen.
+pub fn wheel_uids(root: &Path) -> Vec<u32> {
+    let read =
+        |name: &str| std::fs::read_to_string(root.join("etc").join(name)).unwrap_or_default();
+    let group = read("group");
+    let Some((gid, members)) = group.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next()? == "wheel").then_some(())?;
+        f.next()?;
+        Some((f.next()?.to_owned(), f.next().unwrap_or("").to_owned()))
+    }) else {
+        return Vec::new();
+    };
+    read("passwd")
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            let (name, uid, primary) = (*f.first()?, f.get(2)?, *f.get(3)?);
+            (primary == gid || members.split(',').any(|m| m == name))
+                .then(|| uid.parse().ok())
+                .flatten()
+        })
+        .collect()
+}
+
 /// Checks generation `number` of `layout`'s state. Files may be owned by
-/// root or one of `allowed` (nx's user, the caller); nothing may be
+/// root or one of `allowed` (nx's user, the caller, wheel); nothing may be
 /// writable by others, setuid, setgid, carry file capabilities or be a
 /// device, socket or FIFO.
 pub fn validate(layout: &Layout, number: u32, allowed: &[u32]) -> Result<Validated> {
@@ -54,6 +82,14 @@ pub fn validate(layout: &Layout, number: u32, allowed: &[u32]) -> Result<Validat
     let sysext = std::fs::canonicalize(&sysext)
         .map_err(|e| refuse(format!("can't resolve {}: {e}", sysext.display())))?;
     walk(&sysext, &owned).map_err(refuse)?;
+    match &layout.image {
+        Image::None => {}
+        Image::Root(image) => nx_core::generation::check_extension(&sysext, image)
+            .map_err(|e| refuse(e.to_string()))?,
+        Image::Unreadable(why) => {
+            return Err(refuse(format!("can't read the booted image: {why}")));
+        }
+    }
     check_release(layout, &sysext).map_err(refuse)?;
     Ok(Validated { sysext })
 }

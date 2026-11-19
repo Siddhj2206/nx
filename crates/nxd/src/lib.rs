@@ -9,8 +9,9 @@ pub mod serve;
 
 use std::path::PathBuf;
 
-use nx_activate::{Layout, Runner, System};
+use nx_activate::{Image, Layout, Runner, System};
 use nx_core::State;
+use nx_core::{DeploymentSource, RpmOstree};
 
 /// Why a request was not carried out.
 #[derive(Debug, thiserror::Error)]
@@ -94,11 +95,35 @@ fn parse_start_time(stat: &str) -> Option<u64> {
     after.split_whitespace().nth(19)?.parse().ok()
 }
 
+/// The booted deployment's tree under `/sysroot`, which no extension
+/// overlays; `Image::None` off a bootc system (ostree's marker).
+fn booted_image() -> Image {
+    if !std::path::Path::new("/run/ostree-booted").exists() {
+        return Image::None;
+    }
+    let root = RpmOstree
+        .deployments()
+        .map_err(|e| e.to_string())
+        .and_then(|d| {
+            d.booted()
+                .map(|b| b.root(std::path::Path::new("/sysroot")))
+                .ok_or_else(|| "rpm-ostree reports no booted deployment".to_owned())
+        });
+    match root {
+        Ok(root) if root.join("usr").is_dir() => Image::Root(root),
+        Ok(root) => Image::Unreadable(format!("{} has no /usr", root.display())),
+        Err(e) => Image::Unreadable(e),
+    }
+}
+
 /// What a request runs against.
 pub struct Context {
     pub layout: Layout,
     pub runner: Box<dyn Runner>,
     pub authorizer: Box<dyn Authorizer>,
+    /// Finds the booted image each time a request needs it (an image
+    /// update changes it under a long-running `--serve`).
+    pub image: Box<dyn Fn() -> Image>,
     /// Held while a request runs: with one process per connection, two
     /// activations must not interleave.
     pub lock: PathBuf,
@@ -111,6 +136,7 @@ impl Context {
             layout: Layout::system(state),
             runner: Box::new(System),
             authorizer: Box::new(Polkit),
+            image: Box::new(booted_image),
             lock: PathBuf::from("/run/nxd.lock"),
         }
     }

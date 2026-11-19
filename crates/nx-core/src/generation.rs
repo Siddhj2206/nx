@@ -165,6 +165,55 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     })
 }
 
+/// Design invariant 1 for an extension tree already on disk (nxd checks
+/// it again at activation: the image may have moved since the build, as
+/// with a rollback): no file of `extension` may hide one of the image's.
+/// Directories merge; anything else is refused.
+pub fn check_extension(extension: &Path, image_root: &Path) -> Result<()> {
+    let mut clashes = Vec::new();
+    collect_clashes(extension, Path::new(""), image_root, &mut clashes)?;
+    if clashes.is_empty() {
+        return Ok(());
+    }
+    let more = clashes.len().saturating_sub(5);
+    clashes.truncate(5);
+    let mut msg = format!("the image already has {}", clashes.join(", "));
+    if more > 0 {
+        msg.push_str(&format!(" and {more} more"));
+    }
+    Err(Error::Conflict(msg))
+}
+
+fn collect_clashes(
+    extension: &Path,
+    rel: &Path,
+    image_root: &Path,
+    clashes: &mut Vec<String>,
+) -> Result<()> {
+    let dir = extension.join(rel);
+    let entries = std::fs::read_dir(&dir).map_err(|source| Error::Read {
+        path: dir.clone(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Read {
+            path: dir.clone(),
+            source,
+        })?;
+        let rel = rel.join(entry.file_name());
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if let Ok(meta) = std::fs::symlink_metadata(image_root.join(&rel))
+            && (!is_dir || !meta.is_dir())
+        {
+            clashes.push(format!("/{}", rel.display()));
+        }
+        if is_dir {
+            collect_clashes(extension, &rel, image_root, clashes)?;
+        }
+    }
+    Ok(())
+}
+
 /// One path in the extension and where it comes from.
 #[derive(Debug)]
 enum Node {
@@ -574,6 +623,28 @@ mod tests {
         assert_eq!(again.generation.number, 2);
         assert_eq!(state.current_number()?, Some(1));
         assert_eq!(state.generations()?, [1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_extension_on_disk_is_checked_against_a_newer_image() -> Result<()> {
+        let tmp = TempDir::new("recheck");
+        let (state, lock) = setup(&tmp, &[("pkgconf", &[("usr/bin/pkgconf", "new")])])?;
+        let root = image(&tmp, &[])?;
+        let manifest = Manifest::default();
+        let guard = state.lock()?;
+        let built = build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        let sysext = built.generation.sysext();
+        check_extension(&sysext, &root)?;
+        // The image grows the file the extension carries.
+        let newer = image(&tmp, &["usr/bin/pkgconf"])?;
+        let err = check_extension(&sysext, &newer)
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            err.as_deref(),
+            Some("the image already has /usr/bin/pkgconf")
+        );
         Ok(())
     }
 

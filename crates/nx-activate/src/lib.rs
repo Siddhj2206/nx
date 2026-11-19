@@ -20,7 +20,7 @@ use std::process::Command;
 
 use nx_core::{Backend, State};
 
-pub use validate::{Validated, validate};
+pub use validate::{Validated, validate, wheel_uids};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -54,6 +54,20 @@ pub struct Layout {
     pub root: PathBuf,
     /// The policy's `file_contexts`, or `None` when SELinux is off.
     pub file_contexts: Option<PathBuf>,
+    /// The booted image's own tree, which an extension must not shadow.
+    pub image: Image,
+}
+
+/// Where to check an extension for files that would hide the image's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Image {
+    /// Not a bootc system: nothing is the image's to protect.
+    None,
+    /// The booted deployment's root under `/sysroot`.
+    Root(PathBuf),
+    /// A bootc system whose booted deployment couldn't be found: refuse
+    /// rather than merge unchecked.
+    Unreadable(String),
 }
 
 impl Layout {
@@ -64,6 +78,7 @@ impl Layout {
             extensions: PathBuf::from("/var/lib/extensions"),
             root: PathBuf::from("/"),
             file_contexts: file_contexts(Path::new("/")),
+            image: Image::None,
         }
     }
 

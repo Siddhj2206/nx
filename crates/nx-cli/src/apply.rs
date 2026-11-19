@@ -66,7 +66,7 @@ impl<'m> Session<'m> {
         } else {
             Some(state.lock().with_context(|| {
                 format!(
-                    "nx needs write access to {} (set NX_STATE_DIR to use another directory)",
+                    "changing packages needs an administrator (a member of wheel): no write access to {}",
                     state.root().display()
                 )
             })?)

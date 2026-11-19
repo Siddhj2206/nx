@@ -75,15 +75,33 @@ impl State {
             create_dir(&dir)?;
         }
         let path = self.root.join("lock");
-        let file = File::options()
+        // The first user to change anything creates the file; another
+        // administrator may not be able to open it for writing, and flock
+        // doesn't need that. Someone who can't write the directory either
+        // isn't one, and gets the error.
+        let file = match File::options()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
-            .map_err(|source| Error::Write {
-                path: path.clone(),
-                source,
-            })?;
+        {
+            Ok(f) => f,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && rustix::fs::access(&self.root, rustix::fs::Access::WRITE_OK).is_ok() =>
+            {
+                File::open(&path).map_err(|source| Error::Write {
+                    path: path.clone(),
+                    source,
+                })?
+            }
+            Err(source) => {
+                return Err(Error::Write {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        };
         file.lock()
             .map_err(|source| Error::Write { path, source })?;
         Ok(Lock { _file: file })
