@@ -62,7 +62,8 @@ strike it from here once done, and record the decision in `design.md`.
    parse user-controlled data as root. Options: nxd copies or chowns the
    extension to root before merging, or a root/`nx`-user unpacker owns the
    store. The one 1.0 design decision left.
-7. *The background services run as root, not as the `nx` user* that the
+7. **Deferred past 1.0**, with the `nx`-user builder (6): alone, `User=nx` only moves the `.trash` problem. The design's *The `nx` user* says what it runs today. The finding as written:
+   *The background services run as root, not as the `nx` user* that the
    design and `nx.sysusers` describe (`nx-sync`, `nx-refresh`,
    `nx-upgrade` have no `User=`). That is why root-built generations can't
    be deleted by wheel and the `.trash-*` rename-and-purge exists
@@ -115,15 +116,18 @@ strike it from here once done, and record the decision in `design.md`.
     add/remove/upgrade/sync have no unit tests, and every M6/M7 regression
     was found in the VM. `nx-nix`'s `Web` has no seam either (nx-rpm's
     `Http` does).
-11. *Who owns a command is computed three times:* `Session::expose`'s owner
+11. **Fixed.** `host::has_command`, for exposure and doctor (`why` builds paths, not a check). The finding as written:
+    *Who owns a command is computed three times:* `Session::expose`'s owner
     closure, `doctor::tools`, `why::owner_of_path`, each scanning
     `COMMAND_DIRS` with `symlink_metadata`.
-12. *Background problems are read three ways.* `status`, `doctor` and
+12. **Fixed.** `problems.rs` reads the records once; `doctor` and `notify` render it (`status` shows them per image row from the same records). The finding as written:
+    *Background problems are read three ways.* `status`, `doctor` and
     `notify` each read the sync failures, left-out packages and the upgrade
     failure with their own wording. One `problems(state, deployments)` for
     three renderers. The records themselves live in `select.rs`, which is
     about choosing generations.
-13. *Small duplications.* `drv^outputs` installables built twice
+13. **Fixed**, but the repo identity: `tool::from_drv`, `tool::pinned`, `State::generation_dir`, `nx_core::state::sync_dir`, `generation::image_clash`. The name/id split of an added repo stays: the manifest keeps what the user typed, the id is derived. The finding as written:
+    *Small duplications.* `drv^outputs` installables built twice
     (`plan_from`, `restore`); `Release { rev, name, url }` rebuilt by hand
     from `LockedTool` in `tool::pinned`, `status.rs`, `list.rs`; generation
     paths (`generations/<n>/sysext`) hardcoded in nx-activate, doctor and
@@ -132,36 +136,39 @@ strike it from here once done, and record the decision in `design.md`.
     `check_extension` repeat the "first five clashes" message; the repo
     identity is two things (manifest `name`, pool/cache/key `id` via
     `id_of`), which is where the id-collision checks come from.
-14. *`--override` means two opposite things:* against another tool package
+14. **Fixed.** `nx add --without <cmd>` (`[overrides] without`); older `names` entries still count. The finding as written:
+    *`--override` means two opposite things:* against another tool package
     "give this package the name", against the image or host tier "I accept
     losing the name". Two flags (`--take`, `--without`) say it.
-15. *Misplaced types.* `nx-librpm` (the FFI wrapper) depends on
+15. **Kept, on purpose.** Moving the header types into `nx-librpm` would make the pure `nx-scriptlet` (and its tests) link librpm; the types are plain data the translator defines, and librpm fills them. The finding as written:
+    *Misplaced types.* `nx-librpm` (the FFI wrapper) depends on
     `nx-scriptlet` for `PackageMeta`, `Script`, `Phase`: the header data
     model belongs in librpm, the translator consumes it.
-16. *Swapped names.* `nx apply` is in `converge.rs`; `apply.rs` holds
+16. **Fixed.** `session.rs` is the Session, `apply.rs` is `nx apply`. The finding as written:
+    *Swapped names.* `nx apply` is in `converge.rs`; `apply.rs` holds
     `Session` and the generation builder.
 
 ## Robustness and performance
 
-17. RPM downloads are held whole in memory (`Http::get` → `Vec<u8>`, 1 GiB
+17. **Fixed.** `Http::download` streams to disk hashing; `sha256_file` reads in pieces. Was: RPM downloads are held whole in memory (`Http::get` → `Vec<u8>`, 1 GiB
     limit, four threads), and `sha256_file` reads whole files. Stream to
     disk while hashing.
-18. `mirrorlist=` and `cost=` are parsed and never used: a third-party
+18. **Fixed.** A mirrorlist's lines (or a metalink it answers with) are the bases; `cost=` removed. Was: `mirrorlist=` and `cost=` are parsed and never used: a third-party
     `.repo` with only a `mirrorlist` can't sync.
-19. `nx-notify.path` (`PathChanged=/var/lib/nx`) fires on every mutating
+19. **Fixed.** It watches the two record files and the generations. Was: `nx-notify.path` (`PathChanged=/var/lib/nx`) fires on every mutating
     command (the lock file's close-after-write), not only on failures.
-20. Every activation runs `setfiles` and `systemd-sysext refresh`, tool-only
+20. **Documented** (design, *Techniques* 8): a second path for tool-only changes isn't worth 240 ms. Was: Every activation runs `setfiles` and `systemd-sysext refresh`, tool-only
     changes included; the design says only when host-tier content changed.
     Fine, but say so.
-21. `Universe::attribute` re-solves once per spec on every plan, and
+21. **Kept.** Fine at today's sizes; noted here. Was: `Universe::attribute` re-solves once per spec on every plan, and
     `resolve_what_fits` loops over that: about N² solves per sync. Fine at
     today's sizes.
-22. `repo add|remove` and `cache add|remove` have no `--dry-run`, though the
+22. **Fixed.** Both take `--dry-run`. Was: `repo add|remove` and `cache add|remove` have no `--dry-run`, though the
     CLI section says every mutating command does.
 
 ## Docs drift (`design.md` against what is built)
 
-23. Still specified, not built and not planned: `state.sqlite` and the
+23. **Fixed.** The layout, update policy, packaging, techniques, crate list and conventions describe what is built; what isn't is said to be. Was: Still specified, not built and not planned: `state.sqlite` and the
     "local SQLite index" (invariant 9, the performance table, the layout);
     the `nx-elf` crate and a candidate-crate table mostly unused (tokio,
     reqwest, rusqlite, rpm-rs, nix-compat, goblin, tracing); the RPM header
@@ -176,17 +183,11 @@ strike it from here once done, and record the decision in `design.md`.
 
 ## Neptuno (`nx-1.0` branch)
 
-24. With 2 fixed, "nx collects its own garbage" in `doc/product.md` and the
+24. **Nothing to do.** With 2 fixed, "nx collects its own garbage" in `doc/product.md` and the
     `neptuno` skill is now true, as of the daily refresh. Removing the Nix
     PATH workarounds, the devlibs and devbox holds up.
 
-## Suggested order
+## Status
 
-1. Done: 1–6 (6 by root's copy).
-2. 7 stays until the `nx`-user builder: alone,
-   `User=nx` would only move the `.trash` problem (wheel-built trees with
-   cut ACL masks are no more removable by `nx` than root-built ones are by
-   wheel).
-3. One converge pipeline with a testable `Session` (8–10): the largest drop
-   in code, and orchestration tests without the VM.
-4. 11–22, then prune the design doc (23).
+Everything above is fixed or decided except 7 (with the `nx`-user builder,
+after 1.0), the dry-run half of 3, and the tool tier's `Web` seam in 10.

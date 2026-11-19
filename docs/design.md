@@ -65,7 +65,7 @@ The host tier holds Fedora RPMs for the exact booted release, overlaid onto `/us
 
 - Download the RPMs, verify GPG signatures against the Fedora keys shipped in the image, and stream the zstd cpio payload into the content-addressed store.
 - Never run `%pre`/`%post` scriptlets. See *Scriptlet translation*.
-- Record each package's file list, `Provides` and owner metadata in the local SQLite index.
+- Record each package's scriptlets and files outside `/usr`, read from its signed header, beside it in the store (`.nx-meta.json`); what a generation holds is its `lock.toml`.
 
 **Activation backends.** nx probes at startup and picks one; the user can force either.
 
@@ -107,7 +107,7 @@ nx keeps [ADR-0001](adr/0001-nix-does-every-store-write.md): the daemon stays th
 
 1. Walk the closure via `.narinfo` `References` from cache.nixos.org, in parallel (port nx 0.x's `internal/cache` walker), for sizes and the plan.
 2. Run `nix build <store path>… --out-link <generation>/gcroots/<name> --log-format internal-json`, so the daemon substitutes the closure and the generation holds the GC root (`--out-link` registers an indirect root under `/nix/var/nix/gcroots/auto`, as `nix-store --add-root --indirect` did; Fedora's nix ships only the `nix` command). A path no cache has (a wrapper such as `neovim`) builds locally from its `drvPath` (`nix build <drv>^<outputs>`). The auto root names the link's absolute path, so the links are made at the generation's final name, after its rename. Progress comes from the log, as in nx 0.x (fixtures in `testdata/`; `nix-build-storepath.jsonl` is Nix 2.35's).
-3. Record references in `state.sqlite`; generations are the GC roots.
+3. The generation's `lock.toml` records the store paths, and its `gcroots/` link holds them.
 
 **What changes compared with Neptuno's Nix setup today**
 
@@ -148,7 +148,7 @@ Unfree packages rebuild together when the pin moves.
 - *Extra caches.* nxd writes `/etc/nix/nx.conf` from the activated generation's `[[cache]]` entries (https URLs and `name:key` only), adds `!include nx.conf` to `nix.conf` once, and restarts `nix-daemon` with `try-restart` only when the file changed.
 - *PATH.* `shell/nx.sh` (profile.d) and `shell/nx.fish` (`/usr/share/fish/vendor_conf.d`: a bootc image's fish reads `/usr/etc/fish`, never `/etc/fish/conf.d`) append `/var/lib/nx/current/bin`.
 - *Exit check (`tests/vm/m6.sh`).* On the VM, `nx add ripgrep` runs `rg` from an `env -i` environment, a login shell finds it on `PATH`, and the generation's root is registered in `/nix/var/nix/gcroots/auto`; `nx add ngrok` is refused, `nx add --allow-unfree ngrok` builds it from its derivation (107 s, most of it fetching the stdenv) and it runs; `tester`'s `nx gc` removes generations including root-built ones, runs `nix store gc`, and ngrok's path survives only while a kept generation uses it; root's `nx gc` then leaves no `.trash-` entry. A failed local build names the vendor's RPM repo (`nx repo add`, `nx add --host`) or installer as the way out. A tool already in the store takes about 3 s (evaluation, a generation, nxd).
-- *Left for later.* `nx doctor`'s checks (NSS, leaked wrapper variables); the refresh timer fetching the next release's nixexprs ahead of time; `nx upgrade` evaluating packages one at a time when one attribute is gone (now the whole upgrade fails and names it); state.sqlite (references live in the lockfile).
+- *Left for later.* The refresh timer fetching the next release's nixexprs ahead of time. (Done in M7: `nx doctor`'s checks; `nx upgrade` keeping a package the new release lacks. Dropped: `state.sqlite`, the lockfiles hold it.)
 
 ## Image-level packages (outside nx)
 
@@ -170,12 +170,11 @@ nx never touches the image. It does not edit the Containerfile, build images, or
 
 **After the user adds it to their image**
 
-- `nx status` lists outstanding hints until then.
 - On the next image digest, nx sees the package in the image's rpmdb, clears the hint, and drops any host-tier copies the image now provides.
 
 ## Tier routing and name ownership
 
-The host tier is only for packages that plug into the system; standalone tools default to the tool tier. `nx add <pkg>` decides automatically from the RPM header (fetched by HTTP Range request, a few KB) and the nixpkgs catalog; `--host` and `--tool` override it, and `nx why` shows the reason.
+The host tier is only for packages that plug into the system; standalone tools default to the tool tier. `nx add <pkg>` decides automatically from the repo metadata (`primary.xml`: name, provides, requires, the files in `bin` directories) and the nixpkgs catalog; `--host` and `--tool` override it, and `nx why` shows the reason.
 
 **A package plugs into the system if it:**
 
@@ -200,7 +199,7 @@ A package whose files are only binaries, man pages and shell completions is stan
 
 Routing decisions and their reasons are recorded in the lockfile and cached per NEVRA or store path. `routing.cli_tools = "fedora"` in the manifest restores Fedora-first for standalone tools.
 
-**Name mapping.** Fedora names are canonical. A small alias table maps common nixpkgs attribute names and binary names (`rg` → `ripgrep`). `nx search` shows both sources with the source marked.
+**Name mapping.** Fedora names are canonical. A nixpkgs name matches by attribute, then top-level `pname`, then `mainProgram` (`rg` → `ripgrep`); there is no alias table. `nx search` shows both sources with the source marked.
 
 **Name ownership**
 
@@ -220,7 +219,7 @@ The host tier accepts COPR and other third-party RPM repos through the same pipe
 - Repos the image already enables in `/etc/yum.repos.d` are imported read-only and marked as image-provided. nx never edits those files.
 - `nx repo list` / `nx repo remove` manage them. Repos are recorded in `manifest.toml`; the metadata checksum and key fingerprint of each go in `lock.toml`. An added repo's key is pinned by content, `/var/lib/nx/keys/<sha256>.asc`, and `lock.toml` names it (`key`): a pin is never replaced, `nx repo remove` leaves it for the generations that still name it (a rollback verifies with the key it was built with), and `nx gc` removes the ones no kept generation names. A pin is checked against its name when read. Pins from before (`keys/<repo id>.asc`) are read when a lock names no key, and pinned by content from then on.
 
-**Pipeline:** identical to Fedora's. repomd → cached `.solv` → libsolv → RPM header classification → host tier. No zchunk is assumed for third-party repos.
+**Pipeline:** identical to Fedora's. repomd → cached `.solv` → libsolv → classification from the metadata → host tier. nx reads the primary metadata whole (gzip, xz or zstd), never zchunk.
 
 **Guardrails**
 
@@ -291,13 +290,17 @@ All nx state lives under `/var/lib/nx` and is addressed by content. A generation
     manifest.toml              # what the user asked for
     lock.toml                  # what was resolved
   current -> generations/<N>   # atomic symlink swap
-  cache/
+    activation.toml            # units, users and files its packages need
+  keys/<sha256>.asc            # added repos' keys, pinned by content
+  sync-failures.json, upgrade-failure.json   # what the background jobs couldn't do
+  cache/                       # shared by administrators (else ~/.cache/nx)
     solv/<repo>-<checksum>.solv
     solv/installed-<image-digest>.solv
-    repodata/                  # zchunk metadata
-    nixindex-<rev>.sqlite
-  state.sqlite                 # file ownership, name owners, history
-/var/lib/extensions/nx -> /var/lib/nx/current/sysext
+    repodata/<repo>/           # repomd.xml and primary metadata
+    packages/, koji/           # downloads
+    nix/                       # one catalog per nixpkgs release
+/var/lib/nx-merged/<N>.<pid>/  # root's copy of the merged generation's sysext/
+/var/lib/extensions/nx -> /var/lib/nx-merged/<N>.<pid>
 # PATH ends in /var/lib/nx/current/bin (/etc/profile.d/nx.sh, vendor_conf.d/nx.fish)
 ```
 
@@ -308,7 +311,6 @@ All nx state lives under `/var/lib/nx` and is addressed by content. A generation
 packages = ["wayland-devel", "libxkbcommon-devel", "alsa-lib-devel", "syncthing"]
 
 [tool]
-channel = "nixpkgs-unstable"
 packages = ["ripgrep", "neovim", "zig"]
 unfree = ["some-unfree-tool"]   # allowlist for the unfree fallback
 
@@ -352,7 +354,7 @@ Every new image digest invalidates the host tier, not only a Fedora major bump: 
 3. Build `installed-<staged-digest>.solv` from the staged deployment's rpmdb, read in place at `/sysroot/ostree/deploy/<osname>/deploy/<checksum>.<serial>/usr/lib/sysimage/rpm` (readable unprivileged).
 4. Re-solve the manifest against it and assemble a new generation tagged with the staged digest. Packages now provided by the image are dropped from the host tier automatically.
 5. If anything fails to resolve, keep going with the rest and record the failures for `nx status`. Send a desktop notification.
-6. Re-check tool-tier closures (ELF scan, see *Doctor*). They don't depend on the image, so normally nothing changes.
+6. The tool tier is carried over as it is: it doesn't depend on the image.
 
 **At boot**
 
@@ -386,7 +388,7 @@ Six things update on independent clocks, and nx is correct only if a host-tier g
 | Fedora `updates` repo | daily | Fedora | Background metadata refresh; notify; apply on `nx upgrade` |
 | nixpkgs channel | days to weeks | upstream | Background index rebuild; apply on `nx upgrade` |
 | COPR repos | arbitrary | COPR owners | Same as `updates` |
-| nx itself | releases | `nx self-update` | State-format migration; no re-resolve needed |
+| nx itself | releases | an image update (nx ships in it; no self-update) | Newer formats are read; an older nx reads the newest snapshot it can (invariant 9) |
 
 **Invariants** (every code path must keep these; write tests for each)
 
@@ -398,15 +400,16 @@ Six things update on independent clocks, and nx is correct only if a host-tier g
 6. **Every manifest change resolves for all deployed digests.** `nx add` while an update is staged rebuilds both the current and the staged generation.
 7. **Boot never needs the network.** Generation selection uses only local state.
 8. **Manifest is intent, not state.** A package the image now provides stays in the manifest, marked image-provided, so it comes back if the image drops it.
-9. **State is versioned.** `state.sqlite`, manifest and generation format carry a version. An older nx facing newer state falls back to the newest snapshot it can read, else goes read-only.
+9. **State is versioned.** The manifest, lockfile and `activation.toml` carry a version. An older nx facing newer state falls back to the newest snapshot it can read, else goes read-only.
 
-**Default update policy**
+**Default update policy (as built)**
 
-- A daily timer refreshes Fedora/COPR metadata (including `updateinfo.xml`, for security advisories) and the nixpkgs index. It never applies anything.
-- nx sends a desktop notification when host-tier packages have security advisories, or when tool-tier packages are stale beyond a threshold.
+- `nx-refresh.timer` runs `nx sync --refresh` daily: fresh repo metadata, a generation for every deployed image, `nx gc` and `nix store gc`. It never moves a package past what the manifest's resolve gives.
+- `nx-upgrade.timer` runs `nx upgrade --tool` weekly: the nixpkgs pin moves; a package the new release lacks keeps its build.
 - `nx upgrade` applies host-tier leaf upgrades (packages unrelated to the image) and tool-tier upgrades. `--host` / `--tool` restrict it. Image relatives never move here; they move with the image.
-- Opt-in: `auto_upgrade = "security"` applies security advisories automatically. Off by default, because it swaps files under running programs.
+- What the background jobs couldn't do reaches the session as a notification (`nx-notify.path`, `nx notify`) and `nx doctor`.
 - Image updates need no nx command: the staged-image hook and `nx-select` handle them.
+- Not built: security advisories (`updateinfo.xml`) and applying them automatically, and notifications about stale tools.
 
 ### Image changes, nx packages unchanged
 
@@ -427,7 +430,7 @@ Six things update on independent clocks, and nx is correct only if a host-tier g
 
 | Scenario | Risk | nx behavior | User sees |
 | --- | --- | --- | --- |
-| `updates` has a newer build of a host-tier leaf | None, normal upgrade | Applied on `nx upgrade` (or automatically for security advisories if opted in) | Notification, then the normal upgrade output |
+| `updates` has a newer build of a host-tier leaf | None, normal upgrade | Applied on `nx upgrade` | Notification, then the normal upgrade output |
 | `updates` has a newer build of a library that is in the image | Newest `-devel` no longer matches the image's library | Invariant 3: keep the exact image build of the relatives; fetch from Koji if the repo dropped it | Nothing; `-devel` always matches |
 | A new leaf needs a newer library than the image has | Would require upgrading the image's copy | Invariant 4: refuse | "foo needs libbar ≥ 2.1, image has 2.0: update your image" |
 | A host-tier package is retired from the repos | No future updates | Keep the installed build from the store; mark orphaned; exclude it on the next release change if unresolvable | `nx status`: "orphaned" |
@@ -440,20 +443,15 @@ Six things update on independent clocks, and nx is correct only if a host-tier g
 
 nx ships inside the user's image, installed by the user's own Containerfile. nx still never modifies the image; it just lives there.
 
-**Packaging (decision):** an RPM (or equivalent Containerfile step) that installs:
+**Packaging (decision, M7):** a release tarball per Fedora release and architecture that an image unpacks at `/` (the binaries, units and presets, sysusers, tmpfiles, polkit, PATH snippets, completions, man pages; *Milestones*, M7). Nothing for `/nix`: the tool tier needs the image's Nix (`nix-core`, `nix.mount`, the daemon), which Neptuno already ships; without it the tool tier is off with a hint.
 
-- `nx` and `nxd` in `/usr/bin`
-- units (`nxd.socket`, `nxd.service`, `nx-select.service`, `nx-refresh.timer`) in `/usr/lib/systemd/system`, enabled via presets
-- the polkit rule in `/usr/share/polkit-1/rules.d`
-- nothing for `/nix`: the tool tier needs the image's Nix (`nix-core`, `nix.mount`, the daemon), which Neptuno already ships. Without it the tool tier is disabled with a hint.
-
-On Neptuno the units are declared in `build/packages/*.toml` like every other unit ("declare, then enable"); the install step follows nx 0.x's: a release tarball pinned by checksum in `20-overlay.sh`.
+On Neptuno the units are declared in `build/packages/*.toml` like every other unit ("declare, then enable"); `20-overlay.sh` unpacks the tarball, pinned by `SHA256SUMS`.
 
 **Consequence:** nx's version changes only when the image changes. CLI and `nxd` always match, and there is no self-update. The hard case becomes `bootc rollback`: an older nx boots against state a newer nx already migrated.
 
 | Scenario | Risk | nx behavior | User sees |
 | --- | --- | --- | --- |
-| Image update brings a newer nx | State format changed | Migrate `state.sqlite` / manifest / generation format at first run after boot (or in `nx-select`), after snapshotting the old state | One-line "migrated state to v3" |
+| Image update brings a newer nx | State format changed | Migrate the manifest / lockfile / generation format at first run after boot (or in `nx-select`), after snapshotting the old state | One-line "migrated state to v3" |
 | `bootc rollback` brings back an older nx | Older binary meets migrated state | Migrations keep the previous format's snapshot. An older nx finding newer state switches to the newest snapshot it understands, read-write. Generations record the format they were built with, so `nx-select` can still pick the rollback digest's generation | Nothing in the common case; a note in `nx status` |
 | Rollback past a snapshot that no longer exists | No readable state | Read-only mode; `nx-select` still merges the rollback digest's generation if its format is readable; mutating commands refuse | "state is newer than this nx; boot the newer image or run `nx reset`" |
 | New nx version changes routing rules (e.g. a longer GPU library list) | Existing installs no longer match the rules | Never re-route silently; `nx doctor` lists packages the new rules would route differently | Doctor report |
@@ -509,7 +507,7 @@ The `nx` CLI runs unprivileged. A small root daemon, `nxd`, does only the steps 
 **nxd**
 
 - Socket-activated systemd service on a Unix socket, one process per connection (`nxd.socket` with `Accept=yes` starts `nxd@.service` with the connection on stdin), so a request is handled in a fresh process that exits when it answers. A lock serializes concurrent requests. The unit uses no mount-namespace options (`ProtectSystem=`, `PrivateTmp=`): the merge would be invisible outside it.
-- Exposes a narrow, typed API, one JSON line each way (`nx-proto`): `Activate { generation, backend? }` (M3, and M4 too: sysusers, tmpfiles and units are derived by nxd from the generation's own `activation.toml`, so no request names a unit or a path); `gc()` (M5). The client names a generation by number and never sends a path.
+- Exposes a narrow, typed API, one JSON line each way (`nx-proto`): `Activate { generation, backend? }` (M3, and M4 too: sysusers, tmpfiles and units are derived by nxd from the generation's own `activation.toml`, so no request names a unit or a path). The client names a generation by number and never sends a path.
 - Never downloads, resolves or parses packages itself. The unprivileged CLI does that work and writes into store directories owned by a dedicated `nx` system user; nxd validates that a generation is complete and correctly owned before activating it.
 - Authorization via polkit: the active local session user in `wheel` may call it without a password. Everyone else needs admin auth.
 
@@ -517,7 +515,7 @@ The `nx` CLI runs unprivileged. A small root daemon, `nxd`, does only the steps 
 
 - *Extension link.* `/var/lib/extensions/nx -> /var/lib/nx/current/sysext`, created by `tmpfiles.d`. `man systemd-sysext` names `/var/lib/extensions` the primary place to install extensions and `/run` and `/etc` suitable only for symlinks to them; only `/var/lib/extensions` is merged at boot without extra setup, and the link name `nx` is what matches `extension-release.nx`. On Neptuno the link merged, kept `usr_t` labels, and was merged again after a reboot. `setfiles -r` wants the resolved directory (`realpath`), not a path through `current`. *Since the 1.0 audit* the link names root's copy instead: see *Root's copy*, below.
 - *Root's copy (1.0 audit).* The CLI unpacks as its user and a generation hardlinks the store, so the files of `generations/<N>/sysext` belong to whoever built them, and before this the merged `/usr` was those very inodes: anything running as that user (not only a person at an active session, which is all polkit checks) could rewrite a binary that root's services run, with no prompt. nxd now copies the generation's tree into `/var/lib/nx-merged/<N>.<pid>` (root's, 0755, outside the wheel-writable state directory), reflinked (`FICLONE`; btrfs on Neptuno, so it costs no space), and merges the copy: files are root's, modes lose group and other write, directories lose setgid, ACLs aren't copied. The checks run as the copy is made (each file opened `O_NOFOLLOW` and checked on its descriptor; invariant 1 and the release on the copy), so what was checked is what merges. Only the merged copy is kept; a failed merge puts the link back and drops the new one. Chowning the store in place was not an option: `fs.protected_hardlinks` would then stop the next build from hardlinking it. At boot `nx select` stages the generation it picks the same way (`nx_activate::stage_at_boot`, labelled, no refresh: `systemd-sysext.service` merges it next), and when it can't tell which fits it removes the copies so the link names nothing. Cost: an activation went from 80–150 ms to about 240 ms on the VM, and a boot whose generation changed takes about 2 s in `nx select` (the copy and `setfiles`). Not covered: root's `nx sync`/`nx upgrade` still read caches and lockfiles wheel can write (a libsolv or librpm bug would be needed), and `nx shell`'s prefix stays the builder's tree, which only that user's shell uses.
-- *The `nx` user.* A system user from `sysusers.d` (`u!`, no login shell, home `/var/lib/nx`) owns the state directory and runs the unprivileged background services (refresh timer, staging). `tmpfiles.d` creates `/var/lib/nx` setgid with a default ACL for group `wheel`, so interactive wheel users, who may call nxd without a password, write generations as themselves without being members of a group nx has to manage. nxd accepts a generation whose files are owned by root, the owner of the state directory (`nx`) or the calling uid (`SO_PEERCRED`). It refuses setuid and setgid files, file capabilities, device nodes, FIFOs and sockets, and files writable by everyone, and an extension-release that doesn't match the running system. It never follows a symlink: a link in a package is just a link in the merged `/usr`. It does not use `DynamicUser=`: state under `/var/lib/nx` must outlive the service and be owned by a stable uid.
+- *The `nx` user.* A system user from `sysusers.d` (`u!`, no login shell, home `/var/lib/nx`) owns the state directory. The background services (`nx-sync`, `nx-refresh`, `nx-upgrade`) run as root in 1.0, which is why root-built generations wheel can't delete go to `.trash-*` for root's next gc; running them as `nx` waits for an `nx`-user builder (*Why not unpack as `nx`*), since alone it would only move that problem. `tmpfiles.d` creates `/var/lib/nx` setgid with a default ACL for group `wheel`, so interactive wheel users, who may call nxd without a password, write generations as themselves without being members of a group nx has to manage. nxd accepts a generation whose files are owned by root, the owner of the state directory (`nx`) or the calling uid (`SO_PEERCRED`). It refuses setuid and setgid files, file capabilities, device nodes, FIFOs and sockets, and files writable by everyone, and an extension-release that doesn't match the running system. It never follows a symlink: a link in a package is just a link in the merged `/usr`. It does not use `DynamicUser=`: state under `/var/lib/nx` must outlive the service and be owned by a stable uid.
 - *No wider trust.* A wheel user can already activate without a password, so a tree they own widens nothing for them. A user outside wheel is refused by polkit before nxd opens the tree, so what they own never reaches `/usr`. What reaches `/usr` is root's copy (*Root's copy*, above): owning the generation gives no write access to what is merged.
 
 - *Several administrators.* nxd also accepts files owned by any member of group `wheel` (`/etc/group` and `/etc/passwd` first, then `getent group wheel` and `id -G <uid>`, so accounts that exist only in SSSD or LDAP count; answers are cached per request), so one administrator can activate generations that link packages another unpacked. The state lock opens read-only when the file belongs to someone else but the directory is writable, since flock needs no write access.
@@ -548,7 +546,7 @@ nx should feel instant for reads and take about a second plus download time for 
 
 | Target (estimate) | Operation |
 | --- | --- |
-| < 100 ms | `list`, `why`, `search`, `info`, `status` (local SQLite only) |
+| < 100 ms | `list`, `why`, `search`, `info`, `status` (lockfiles and cached metadata only) |
 | \~1 s + download | `add` of a host-tier package with warm metadata |
 | \~1 s + download | `add` of a tool-tier package new to this pin (one evaluation); near-instant when the lockfile has it |
 | measure first | `systemd-sysext refresh` on the target image (the slowest remaining step) |
@@ -556,14 +554,14 @@ nx should feel instant for reads and take about a second plus download time for 
 **Techniques**
 
 1. **Background metadata refresh.** A systemd timer refreshes repo metadata and the nixpkgs index. Commands use the cache; `nx add --refresh` forces it. Never auto-update in the foreground like brew.
-2. **zchunk metadata.** Fedora publishes zchunk repodata, so refreshes download only changed chunks. Skip `filelists` unless a query needs file paths.
+2. **Primary metadata only.** `filelists` is never fetched: the classifier needs only the files `primary.xml` lists. zchunk isn't used; a daily refresh downloads a repo's primary when it changed.
 3. **Precomputed installed set.** The image's rpmdb is turned into `installed-<digest>.solv` once per image digest.
 4. **libsolv directly** (the solver dnf5 uses), loading cached `.solv` files. No Python, no dnf process.
 5. **Nix evaluation only for new attributes.** Search and info use the prebuilt catalog; store paths are evaluated once per attribute and pin and kept in the lockfile; closures come from `.narinfo` references.
-6. **Parallel I/O.** HTTP/2 with a pool of connections, fastest-mirror selection, parallel downloads, and streaming zstd decompression straight into the store.
+6. **Parallel I/O.** Four package downloads at once, each streamed to disk and hashed on the way; mirrors in the metalink's order, the next on a failure.
 7. **Cheap generation assembly.** Reflinks (btrfs/xfs) or hardlinks from the store; directory sysext, so no squashfs/erofs build.
-8. **Skip work.** Refresh the sysext only when host-tier content changed. Tool-tier changes only touch symlinks.
-9. **Startup.** One Rust binary, no runtime to boot, lazy-open SQLite, no network unless the command needs it.
+8. **Skip work.** Evaluate only new attributes; download only what the store lacks. Every activation copies (reflinked), labels and refreshes the extension, a tool-only change too: about 240 ms on the VM, so not worth a second path.
+9. **Startup.** One Rust binary, no runtime to boot, no network unless the command needs it.
 
 ## CLI surface
 
@@ -604,51 +602,32 @@ The verbs mirror brew. Every mutating command prints the tier and source it chos
 
 nx is written in Rust as one Cargo workspace. Rust was chosen because the namespace/mount syscalls, libsolv FFI and the bootc/composefs ecosystem are all first-class there, while Go's multithreaded runtime makes namespace work awkward and cgo complicates static builds.
 
-**Workspace layout**
+**Workspace layout** (AGENTS.md *Layout* has the detail)
 
 ```
 nx/
   crates/
-    nx-cli/        # clap CLI, output, progress; unprivileged
-    nxd/           # root daemon: activation, sysusers/tmpfiles, units
-    nx-core/       # store, generations, manifest/lock, state.sqlite, routing
-    nx-rpm/        # repo metadata, libsolv bindings, download, verify, unpack
-    nx-nix/        # nixpkgs catalog, narinfo closure walk, realise via the daemon, internal-json log
-    nx-activate/   # sysext + prefix backends, probing, refresh
-    nx-scriptlet/  # scriptlet idiom matcher -> sysusers/tmpfiles/presets
-    nx-elf/        # ELF scanning for routing and doctor
-    nx-proto/      # typed CLI <-> nxd protocol
-  systemd/         # nxd.socket, nxd.service, nx-select.service, nx-refresh.timer
-  polkit/          # rules file
-  tests/           # integration tests run in a bootc VM
+    nx-cli/        # nx: clap, output, every command; the Session pipeline
+    nxd/           # root daemon: authorization, one request per process
+    nx-activate/   # what nxd runs: validate and copy, label, sysext/prefix, units
+    nx-core/       # state, store, generations, manifest, lockfile, deployments
+    nx-rpm/        # repos, metadata, the libsolv universe, downloads, keys, Koji
+    nx-solv/       # safe libsolv (bindgen)
+    nx-librpm/     # safe librpm: keys, signatures, payloads (bindgen)
+    nx-scriptlet/  # scriptlet translator and tmpfiles planner
+    nx-nix/        # channel, catalog, evaluation, narinfo, nix, its log
+    nx-http/       # the HTTP client and retry policy
+    nx-proto/      # CLI <-> nxd protocol
+    nx-shim/       # the tool-tier shim
+  systemd/, polkit/, shell/   # what an image installs
+  tests/vm/        # milestone checks in a bootc VM
 ```
-
-Crates are added when a milestone needs them, not ahead of time; the tree above is where things go, not a checklist.
 
 **Linking.** The binaries link dynamically against the image's glibc and libsolv (`libsolv` is already in the image through dnf5/rpm-ostree; build against `libsolv-devel` in a `fedora:<release>` container). nx then shares the host ABI like any other host-tier program, and releases are built per Fedora release instead of as static tarballs ([ADR-0006](adr/0006-rust-rebuild-two-tiers.md) amends ADR-0005).
 
-**Candidate crates** (verify maintenance status before adopting)
+**Dependencies.** clap, serde and toml, ureq (rustls, the platform verifier), rustix, thiserror and anyhow, sha2, quick-xml, brotli-decompressor; libsolv and librpm from the image through bindgen (ADR-0007, ADR-0008). No async runtime, no SQLite, no ELF parser.
 
-| Need | Crate |
-| --- | --- |
-| CLI | `clap` |
-| Async, HTTP/2 | `tokio`, `reqwest` |
-| Local index | `rusqlite` |
-| Config | `serde`, `toml` |
-| RPM headers, payload, signatures | `rpm` (rpm-rs) |
-| Dependency solving | libsolv via `bindgen` (own `-sys` crate) |
-| Nix narinfo, store paths | `nix-compat` (from snix/tvix) |
-| ELF parsing | `goblin` |
-| Syscalls, mounts | `rustix` |
-| Compression | `zstd`, `xz2` |
-| Daemon IPC, polkit | Unix socket + `SO_PEERCRED`, or `zbus` |
-| Logging | `tracing` |
-
-**Conventions for Claude Code**
-
-- `cargo clippy -- -D warnings` and `cargo fmt` clean on every commit.
-- No `unwrap()` outside tests; errors via `thiserror` in libraries, `anyhow` in binaries.
-- Every module that touches the system goes behind a trait so unit tests run without root, with a fake filesystem root.
+**Conventions:** AGENTS.md (gates, output, pitfalls).
 
 ## Risks and open questions
 
@@ -695,7 +674,7 @@ None of these covers live install of host-ABI `-devel` packages on bootc, which 
 | [ABRoot](https://awesome.ecosyste.ms/projects/github.com%2Fvanilla-os%2Fabroot) (Vanilla OS) | Generates a local OCI image with user changes and applies it on top | Avoid for the fast path: rebuild + reboot, same cost as an image rebuild |
 | SUSE sysext images | Sysexts rebuilt alongside each OS snapshot ([systemd-devel](https://lists.freedesktop.org/archives/systemd-devel/2024-November/050870.html)) | Confirms the version-lockstep approach |
 
-## Milestones for Claude Code
+## Milestones
 
 Build in this order, riskiest first. Each milestone ends with a working, tested command, not scaffolding. Develop and test in a bootc VM built from the user's own image, never on the daily driver until M5: Neptuno rebuilds daily, so the image digest changes almost every day and a host tier without the M5 lifecycle breaks on the next update.
 
