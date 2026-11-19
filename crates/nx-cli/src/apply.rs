@@ -274,6 +274,11 @@ impl<'m> Session<'m> {
         let guard = self.guard.take().context("a dry run cannot build")?;
         let mut files = self.fetch(ui, all)?;
         let host = self.unpack(&guard, all, &mut files)?;
+        let store = self.state.store();
+        let image_only = image_only(&host, &|sha| store.path(sha));
+        if !image_only.is_empty() {
+            return Err(image_hint(&image_only));
+        }
         let image_root = self.machine.image_root()?;
         let tool = self.expose(ui, manifest, &host, &image_root)?;
         let mut lock = self.lock(host)?;
@@ -532,6 +537,57 @@ impl<'m> Session<'m> {
         }
         Ok(lock)
     }
+}
+
+/// What only the image can use, by the directory a package ships: content
+/// read before `systemd-sysext` merges anything, or loaded into the kernel.
+const IMAGE_ONLY: &[(&str, &str)] = &[
+    (
+        "usr/lib/modules",
+        "ships kernel modules, which only the image's kernel can load",
+    ),
+    (
+        "usr/share/selinux/packages",
+        "ships an SELinux policy module, which only the image can install",
+    ),
+    (
+        "usr/lib/dracut/modules.d",
+        "ships initrd content, which runs before nx's packages are there",
+    ),
+];
+
+/// The packages of `host` that only work from the image, with the reason;
+/// `root` is where a package's files are.
+fn image_only(
+    host: &[LockedPackage],
+    root: &dyn Fn(&str) -> PathBuf,
+) -> Vec<(String, &'static str)> {
+    host.iter()
+        .filter_map(|p| {
+            let dir = root(&p.sha256);
+            IMAGE_ONLY
+                .iter()
+                .find(|(path, _)| {
+                    std::fs::read_dir(dir.join(path)).is_ok_and(|mut d| d.next().is_some())
+                })
+                .map(|(_, why)| (p.name.clone(), *why))
+        })
+        .collect()
+}
+
+/// The image hint (design, *Image-level packages*): why, and the line for
+/// the user's Containerfile. nx never changes the image itself.
+fn image_hint(packages: &[(String, &str)]) -> anyhow::Error {
+    let mut msg = String::new();
+    for (name, why) in packages {
+        msg.push_str(&format!("{name} {why}\n"));
+    }
+    let names: Vec<&str> = packages.iter().map(|(n, _)| n.as_str()).collect();
+    msg.push_str(&format!(
+        "Put it in your image instead:\n  RUN dnf install -y {}",
+        names.join(" ")
+    ));
+    anyhow::anyhow!(msg)
 }
 
 /// Turns a scriptlet refusal into the message the user needs: what was
@@ -821,5 +877,30 @@ mod tests {
         assert_eq!(still_left_out(&skipped, &specs, &v(&["a"])), v(&["b"]));
         // Removed from the manifest: nothing to leave out.
         assert_eq!(still_left_out(&skipped, &v(&["b", "c"]), &[]), v(&["b"]));
+    }
+
+    #[test]
+    fn kernel_modules_get_the_image_hint() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-image-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("kmod/usr/lib/modules/7.3.3/extra"))?;
+        std::fs::create_dir_all(dir.join("devel/usr/include"))?;
+        std::fs::create_dir_all(dir.join("empty/usr/lib/modules"))?;
+        let package = |name: &str| LockedPackage {
+            name: name.into(),
+            nevra: String::new(),
+            repo: String::new(),
+            sha256: name.into(),
+            requested: Vec::new(),
+        };
+        let host = [package("kmod"), package("devel"), package("empty")];
+        let found = image_only(&host, &|sha| dir.join(sha));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            image_hint(&found).to_string(),
+            "kmod ships kernel modules, which only the image's kernel can load\n\
+             Put it in your image instead:\n  RUN dnf install -y kmod"
+        );
+        Ok(())
     }
 }

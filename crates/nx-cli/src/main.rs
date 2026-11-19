@@ -10,6 +10,7 @@ mod boot;
 mod cache;
 mod compat;
 mod converge;
+mod doctor;
 mod gc;
 mod generations;
 mod help;
@@ -17,6 +18,7 @@ mod host;
 mod info;
 mod list;
 mod live;
+mod migrate;
 mod notify;
 mod remove;
 mod repo;
@@ -174,6 +176,14 @@ enum Command {
     },
     /// the image nx resolves against: booted, staged and rollback
     Status,
+    /// check that what nx set up is what the system runs
+    Doctor,
+    /// move nx 0.x's packages (the Nix profile) into nx
+    Migrate {
+        /// list what would move; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// give every deployed image a host tier that matches the manifest
     Sync {
         #[command(flatten)]
@@ -272,6 +282,21 @@ impl Metadata {
         let universe = host::load(ui, &machine, self.refresh(), &manifest)?;
         Ok((universe, current))
     }
+}
+
+/// nx 0.x's profile and registry, under `$HOME`.
+fn legacy() -> Option<nx_nix::profile::Legacy> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    let xdg = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    Some(nx_nix::profile::Legacy::new(
+        Path::new(&home),
+        xdg("XDG_STATE_HOME").as_deref(),
+        xdg("XDG_CONFIG_HOME").as_deref(),
+    ))
 }
 
 fn machine() -> anyhow::Result<host::Machine> {
@@ -387,6 +412,33 @@ fn main() -> ExitCode {
         Command::Notify => notify::seen_file().and_then(|seen| {
             notify::run(&mut ui, &host::state(), &RpmOstree, &notify::Busctl, &seen)
         }),
+        Command::Doctor => {
+            let machine = machine().ok();
+            let deployments = nx_core::DeploymentSource::deployments(&RpmOstree).ok();
+            let env = |k: &str| std::env::var(k).ok();
+            let legacy = legacy();
+            let state = host::state();
+            doctor::run(
+                &mut ui,
+                &doctor::Inputs {
+                    state: &state,
+                    root: Path::new("/"),
+                    image_root: machine.and_then(|m| m.image_root().ok()),
+                    deployments,
+                    env: &env,
+                    legacy,
+                    label: &doctor::label,
+                },
+            )
+        }
+        Command::Migrate { dry_run } => match legacy() {
+            Some(l) => {
+                machine().and_then(|m| migrate::run(&mut ui, &m, &l, &nx_nix::System, dry_run))
+            }
+            None => Err(anyhow::anyhow!(
+                "HOME is not set, so there is no Nix profile to read"
+            )),
+        },
         Command::Status => status::run(
             &mut ui,
             &RpmOstree,
