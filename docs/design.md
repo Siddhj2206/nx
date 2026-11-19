@@ -74,7 +74,7 @@ The host tier holds Fedora RPMs for the exact booted release, overlaid onto `/us
 | `sysext` (preferred) | One aggregate directory extension at `/var/lib/extensions/nx/`, with `usr/lib/extension-release.d/extension-release.nx` declaring `ID` and `VERSION_ID` (or `SYSEXT_LEVEL`). Activated with `systemd-sysext refresh`. Files appear at standard paths in `/usr`. | A test merge succeeds on this image |
 | `prefix` (fallback) | The current generation's `usr` (`/var/lib/nx/current/sysext/usr`, no copy; a rollback moves it) is the prefix. `nx shell` and the shell hook export `PATH`, `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, `LD_LIBRARY_PATH` (only inside `nx shell`), `XDG_DATA_DIRS`. Services go under `/etc/systemd/system` via drop-ins pointing into the prefix. | sysext merge fails (overlay depth, SELinux, unsupported) |
 
-**Probing (M3).** Every unforced activation tries sysext first: label, link, `systemd-sysext refresh`, then `status --json` must list `nx` under `/usr`. If the merge fails (overlay depth, an unsupported kernel) nxd puts the previous generation back, removes the link, unmerges and uses the prefix backend, and the CLI says why. The next activation tries sysext again, so a system that can merge later goes back by itself. `[host] backend = "sysext" | "prefix"` in the manifest forces one, and a forced sysext that fails is an error. The backend in use is in `/var/lib/nx/backend` for `nx shell`.
+**Probing (M3).** Every unforced activation tries sysext first: label, link, `systemd-sysext refresh`, then `status --json` must list `nx` under `/usr`. If the merge fails (overlay depth, an unsupported kernel) nxd puts the previous generation back, removes the link, unmerges and uses the prefix backend, and the CLI says why. The next activation tries sysext again, so a system that can merge later goes back by itself. `[host] backend = "sysext" | "prefix"` in the manifest forces one, and a forced sysext that fails is an error. The backend in use is in `/var/lib/nx/backend` for `nx shell`. At boot, `nx-settle.service` does the same check after `systemd-sysext` ran (see *Image upgrade lifecycle*).
 
 **Rules for the sysext backend**
 
@@ -476,7 +476,7 @@ On Neptuno the units are declared in `build/packages/*.toml` like every other un
 | Disk fills up | Failed download or unpack | Space check before downloading (size from metadata); GC suggestion | Clear error with `nx gc` hint |
 | Two `nx` commands at once | Racing writes | One global lock in `/var/lib/nx`; read commands don't take it | Second command waits |
 | `bootc upgrade` runs while `nx add` is running | Staged digest changes mid-resolve | Re-check the staged digest before finishing; if it changed, re-resolve for it too (invariant 6) | Slightly longer `add` |
-| Overlay stacking depth exceeded on a new kernel | Sysext won't merge | `nx-select` detects the merge failure and switches to the prefix backend for that boot | Notification + `nx doctor` detail |
+| Overlay stacking depth exceeded on a new kernel | Sysext won't merge | `nx-settle` (`nx select --after-merge`) detects that nothing merged and records the prefix backend until the next activation, which tries sysext again; a placeholder generation or a manifest that forces sysext is left alone | Journal warning (notification and `nx doctor` detail later) |
 
 ### Open questions for updates
 

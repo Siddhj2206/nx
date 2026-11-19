@@ -789,3 +789,38 @@ fn a_boot_that_did_not_merge_falls_back_to_prefix() -> Result<()> {
     assert_eq!(got.backend, Backend::Sysext);
     Ok(())
 }
+
+#[test]
+fn settling_leaves_placeholders_and_forced_sysext_alone() -> Result<()> {
+    let tmp = Tmp::new("settle-skip");
+    let l = layout(&tmp, false).map_err(|e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    })?;
+    activate(&l, &Fake::new(), 1, Some(Backend::Sysext), &only_uid())?;
+    let mut unmerged = Fake::new();
+    unmerged.merged = "[]";
+
+    let dir = l.state.root().join("generations/1");
+    let mut manifest = Manifest::default();
+    manifest.host.backend = Some(Backend::Sysext);
+    let io = |source| Error::Io {
+        path: dir.clone(),
+        source,
+    };
+    std::fs::write(
+        dir.join("manifest.toml"),
+        manifest.to_toml().unwrap_or_default(),
+    )
+    .map_err(io)?;
+    let got = settle_at_boot(&l, &unmerged)?;
+    assert!(matches!(got, Settled::ForcedAndUnmerged(_)), "{got:?}");
+    assert_eq!(l.state.backend()?, Some(Backend::Sysext));
+    assert!(std::fs::symlink_metadata(l.link()).is_ok(), "link kept");
+
+    let mut lock = Lock::new(None, "45", "x86_64");
+    lock.pending = true;
+    std::fs::write(dir.join("lock.toml"), lock.to_toml().unwrap_or_default()).map_err(io)?;
+    assert_eq!(settle_at_boot(&l, &unmerged)?, Settled::NothingToMerge);
+    Ok(())
+}

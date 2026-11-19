@@ -231,6 +231,9 @@ pub enum Settled {
     /// The boot-time merge didn't happen; the prefix backend is recorded
     /// and the link removed. The reason is what `systemd-sysext` says.
     FellBack(String),
+    /// Not merged, but the manifest forces sysext: nothing is changed, the
+    /// same error a forced activation gives.
+    ForcedAndUnmerged(String),
 }
 
 /// Run after `systemd-sysext` at boot: when a generation is linked but its
@@ -239,8 +242,16 @@ pub enum Settled {
 /// generation's `usr` instead of the system booting with a host tier that
 /// silently isn't there. The next activation tries sysext again.
 pub fn settle_at_boot(layout: &Layout, runner: &dyn Runner) -> Result<Settled> {
-    if layout.state.current_number()?.is_none() || std::fs::symlink_metadata(layout.link()).is_err()
-    {
+    let Some(number) = layout.state.current_number()? else {
+        return Ok(Settled::NothingToMerge);
+    };
+    if std::fs::symlink_metadata(layout.link()).is_err() {
+        return Ok(Settled::NothingToMerge);
+    }
+    // A placeholder generation has nothing to merge, so nothing to fall
+    // back for; a forced backend is the manifest's to decide.
+    let generation = nx_core::Generation::read(&layout.state, number)?;
+    if generation.lock.pending {
         return Ok(Settled::NothingToMerge);
     }
     let status = sysext_cmd(runner, &["status", "--json=short"])?;
@@ -255,13 +266,18 @@ pub fn settle_at_boot(layout: &Layout, runner: &dyn Runner) -> Result<Settled> {
     } else {
         detail(&status)
     };
+    if generation.manifest.host.backend == Some(Backend::Sysext) {
+        return Ok(Settled::ForcedAndUnmerged(why));
+    }
+    // The record first: a crash between the two leaves a link nothing
+    // merges, which the next settle finds again.
+    layout.state.set_backend(Backend::Prefix)?;
     let link = layout.link();
     std::fs::remove_file(&link).map_err(|source| Error::Io {
         path: link.clone(),
         source,
     })?;
     sync_dir(&layout.extensions)?;
-    layout.state.set_backend(Backend::Prefix)?;
     Ok(Settled::FellBack(why))
 }
 

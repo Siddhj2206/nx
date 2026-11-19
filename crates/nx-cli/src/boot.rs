@@ -52,6 +52,9 @@ pub fn settle(ui: &mut Ui) -> Result<()> {
         nx_activate::Settled::FellBack(why) => ui.warn(format_args!(
             "the host tier didn't merge at boot ({why}); using the prefix backend until the next change"
         )),
+        nx_activate::Settled::ForcedAndUnmerged(why) => ui.warn(format_args!(
+            "the host tier didn't merge at boot ({why}), and the manifest forces the sysext backend"
+        )),
     }
     Ok(())
 }

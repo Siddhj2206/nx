@@ -12,6 +12,7 @@ ConditionPathExists=/var/lib/nx/generations
 Type=oneshot
 ExecStart=/usr/bin/nx select --after-merge
 UMask=0002
+TimeoutStartSec=30
 
 [Install]
 WantedBy=sysinit.target
