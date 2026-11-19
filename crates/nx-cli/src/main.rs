@@ -9,6 +9,7 @@ mod apply;
 mod boot;
 mod cache;
 mod compat;
+mod complete;
 mod converge;
 mod doctor;
 mod gc;
@@ -38,6 +39,7 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use nx_core::RpmOstree;
 
 use crate::ui::Ui;
@@ -62,7 +64,8 @@ enum Command {
     Add {
         /// names, commands (rg), provides (pkgconfig(xkbcommon)) or files
         /// (/usr/bin/rg); name@repo takes it from that repo only
-        #[arg(value_name = "package", required = true)]
+        #[arg(value_name = "package", required = true,
+              add = ArgValueCompleter::new(complete::packages))]
         packages: Vec<String>,
         /// resolve and list what would be added; change nothing
         #[arg(long)]
@@ -89,7 +92,8 @@ enum Command {
     /// remove packages and what only they needed, live
     Remove {
         /// what `nx list` shows, as it was added
-        #[arg(value_name = "package", required = true)]
+        #[arg(value_name = "package", required = true,
+              add = ArgValueCandidates::new(complete::installed))]
         packages: Vec<String>,
         /// list what would be removed; change nothing
         #[arg(long)]
@@ -205,6 +209,9 @@ enum Command {
     /// in the session: notify about what nx's background jobs couldn't do
     #[command(hide = true)]
     Notify,
+    /// write nx's man pages into a directory (for packaging)
+    #[command(hide = true)]
+    Manpages { dir: std::path::PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -227,7 +234,7 @@ enum RepoAction {
     List,
     /// remove a repo nx added
     Remove {
-        #[arg(value_name = "repo")]
+        #[arg(value_name = "repo", add = ArgValueCandidates::new(complete::repos))]
         name: String,
     },
 }
@@ -246,7 +253,7 @@ enum CacheAction {
     List,
     /// stop trusting a cache nx added
     Remove {
-        #[arg(value_name = "url")]
+        #[arg(value_name = "url", add = ArgValueCandidates::new(complete::caches))]
         url: String,
     },
 }
@@ -304,6 +311,7 @@ fn machine() -> anyhow::Result<host::Machine> {
 }
 
 fn main() -> ExitCode {
+    complete::answer();
     let mut ui = Ui::new();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -431,6 +439,7 @@ fn main() -> ExitCode {
                 },
             )
         }
+        Command::Manpages { dir } => complete::manpages(&dir),
         Command::Migrate { dry_run } => match legacy() {
             Some(l) => {
                 machine().and_then(|m| migrate::run(&mut ui, &m, &l, &nx_nix::System, dry_run))

@@ -52,6 +52,14 @@ pub fn main(s: &mut Stream) {
         "  {} nx <command> [args]\n",
         st.bold("Usage:")
     ));
+    // One column for every description: the longest usage, plus two.
+    let width = cli
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set())
+        .map(|c| c.get_name().len() + usage_args(c).len() + 2)
+        .max()
+        .unwrap_or(0)
+        .max(22);
     for heading in GROUPS {
         let commands: Vec<_> = cli
             .get_subcommands()
@@ -66,7 +74,7 @@ pub fn main(s: &mut Stream) {
             let args = usage_args(c);
             let left = format!("{}{}", st.cyan(name), args);
             let about = c.get_about().map(ToString::to_string).unwrap_or_default();
-            s.raw(format_args!("    {}{about}\n", pad(&left, 22)));
+            s.raw(format_args!("    {}{about}\n", pad(&left, width)));
         }
     }
     s.raw(format_args!(
