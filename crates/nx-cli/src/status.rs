@@ -56,7 +56,10 @@ pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, root: &Path, sysroot: &Pa
         };
         s.row(key, &value);
     }
-    s.row("Host tier", &st.dim("resolves (nx add --dry-run); installs from M3"));
+    s.row(
+        "Host tier",
+        &st.dim("resolves (nx add --dry-run); installs from M3"),
+    );
     s.row("Tool tier", &st.dim("not built yet (M6)"));
     s.blank();
     Ok(())

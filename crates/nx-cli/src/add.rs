@@ -1,62 +1,110 @@
-//! `nx add`: M1 resolves only (`--dry-run`); unpacking and activation come
-//! with M2 and M3.
+//! `nx add`: resolves only (`--dry-run`) until the store (M2) and
+//! activation (M3) land.
 
 use anyhow::{Result, bail};
-use nx_rpm::{Plan, Universe};
+use nx_rpm::{Package, Plan, Universe};
 
-use crate::ui::{self, Ui};
+use crate::ui::{self, Stream, Ui};
 
-pub fn run(ui: &mut Ui, universe: &mut Universe, specs: &[String], dry_run: bool) -> Result<()> {
+/// Refuses before anything is loaded: only `--dry-run` works yet.
+pub fn check(dry_run: bool) -> Result<()> {
     if !dry_run {
-        bail!("nx add can only plan for now: run nx add --dry-run (installing lands in M3)");
+        bail!("nx add can only plan for now: run nx add --dry-run");
     }
+    Ok(())
+}
+
+pub fn run(ui: &mut Ui, universe: &mut Universe, specs: &[String]) -> Result<()> {
     let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
-    let packages = match universe.plan(&specs)? {
-        Plan::Install(p) => p,
-        Plan::Problems(mut problems) => {
-            // A missing repo, not a missing package, is the likelier cause.
-            if !universe.skipped.is_empty() {
-                let repos: Vec<&str> = universe.skipped.iter().map(|s| s.repo.as_str()).collect();
-                problems.push(format!(
-                    "{} could not be loaded (see above); try again",
-                    repos.join(", ")
-                ));
-            }
-            bail!("can't add {}\n{}", specs.join(" "), problems.join("\n"));
+    match universe.plan(&specs)? {
+        Plan::Install(packages) => {
+            render(&mut ui.out, &specs, &packages);
+            Ok(())
         }
-    };
-    let s = &mut ui.out;
-    let st = s.style;
+        Plan::Problems(problems) => {
+            bail!("can't add {}\n{}", specs.join(" "), problems.join("\n"))
+        }
+    }
+}
+
+/// Lists what adding `specs` installs, in columns.
+fn render(out: &mut Stream, specs: &[&str], packages: &[Package]) {
+    let style = out.style;
     if packages.is_empty() {
-        s.line(format_args!(
+        out.line(format_args!(
             "{} {} already in the image",
-            st.green(ui::SYM_DONE),
+            style.green(ui::SYM_DONE),
             specs.join(", ")
         ));
-        return Ok(());
+        return;
     }
-    s.blank();
-    let name_w = packages.iter().map(|p| p.name.len()).max().unwrap_or(0) + 2;
-    let evr_w = packages.iter().map(|p| p.evr.len()).max().unwrap_or(0) + 2;
+    let column =
+        |f: fn(&Package) -> &str| packages.iter().map(|p| f(p).len()).max().unwrap_or(0) + 2;
+    let (name_w, evr_w, repo_w) = (column(|p| &p.name), column(|p| &p.evr), column(|p| &p.repo));
+    out.blank();
     let (mut download, mut installed) = (0, 0);
-    for p in &packages {
+    for p in packages {
         download += p.download_size;
         installed += p.install_size;
-        s.line(format_args!(
-            "{} {}{}{}  {}",
-            st.green(ui::SYM_ADDED),
+        out.line(format_args!(
+            "{} {}{}{}{}",
+            style.green(ui::SYM_ADDED),
             ui::pad(&p.name, name_w),
-            st.dim(&ui::pad(&p.evr, evr_w)),
-            st.dim(&ui::pad(&p.repo, 10)),
-            st.dim(&ui::size(p.download_size)),
+            style.dim(&ui::pad(&p.evr, evr_w)),
+            style.dim(&ui::pad(&p.repo, repo_w)),
+            style.dim(&ui::size(p.download_size)),
         ));
     }
-    s.blank();
-    s.line(st.dim(&format!(
+    out.blank();
+    out.line(style.dim(&format!(
         "{} · {} download, {} installed · dry run, nothing changed",
         ui::plural(packages.len(), "package"),
         ui::size(download),
         ui::size(installed)
     )));
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::SharedBuf;
+
+    fn text(specs: &[&str], packages: &[Package]) -> String {
+        let buf = SharedBuf::default();
+        let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
+        render(&mut ui.out, specs, packages);
+        buf.text()
+    }
+
+    fn package(name: &str, evr: &str, repo: &str, kib: u64) -> Package {
+        Package {
+            name: name.into(),
+            evr: evr.into(),
+            repo: repo.into(),
+            download_size: kib * 1024,
+            install_size: 4 * kib * 1024,
+            ..Package::default()
+        }
+    }
+
+    #[test]
+    fn lists_packages_in_columns_with_totals() {
+        let plan = [
+            package("libxkbcommon-devel", "1.11.0-1.fc45", "fedora", 60),
+            package("pkgconf", "2.4-1.fc45", "updates-archive", 40),
+        ];
+        assert_eq!(
+            text(&["libxkbcommon-devel"], &plan),
+            "\n\
+             \x20 + libxkbcommon-devel  1.11.0-1.fc45  fedora           60 KiB\n\
+             \x20 + pkgconf             2.4-1.fc45     updates-archive  40 KiB\n\
+             \n\
+             \x20 2 packages · 100 KiB download, 400 KiB installed · dry run, nothing changed\n"
+        );
+    }
+
+    #[test]
+    fn nothing_to_add() {
+        assert_eq!(text(&["glibc"], &[]), "  ✓ glibc already in the image\n");
+    }
 }

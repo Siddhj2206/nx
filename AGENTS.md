@@ -81,8 +81,14 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   where an image relative's exact build is found when `updates` has moved
   on.
 - Image relatives are enforced by hiding other builds of an image
-  package's source from the solver (`Universe::hidden`), and the installed
-  repo is locked, so a solve can only add packages.
+  package's source (`Universe::hidden`) from the solver, search and info
+  alike, and the installed repo is locked, so a solve can only add
+  packages. Filter by `Universe`'s arch, never a hardcoded one.
+- Commands load metadata with `Refresh::IfMissing`: a read never waits on
+  the network for a repo that has a cache. Expired or unreachable metadata
+  is reported through `Synced::freshness`, not hidden.
+- Command output is tested through a `render` that takes plain data
+  (`Package`s), so tests need no rpmdb or network.
 - A deployment's digest is `container-image-reference-digest`; the
   `checksum` field is the ostree commit, which is not what generations are
   keyed by.

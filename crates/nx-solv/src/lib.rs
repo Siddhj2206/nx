@@ -44,11 +44,11 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub struct RepoId(usize);
 
 /// A package in a [`Pool`], by libsolv's solvable id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct SolvableId(sys::Id);
 
 /// What nx needs to know about one package.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Package {
     pub id: SolvableId,
     pub name: String,

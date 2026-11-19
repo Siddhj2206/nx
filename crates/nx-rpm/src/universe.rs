@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use nx_solv::{Package, Pool, RepoId, Solution, SolvableId};
 
-use crate::fetch::{Http, Refresh, Synced, sync};
+use crate::fetch::{Freshness, Http, Refresh, Synced, sync};
 use crate::repo::{self, Repo, Vars};
 use crate::{Error, Result};
 
@@ -46,13 +46,16 @@ pub struct Skipped {
 
 /// The installed set and the enabled repos, ready to resolve.
 pub struct Universe {
-    pub pool: Pool,
+    pool: Pool,
+    /// The machine's arch; packages of other arches (`i686`, `src`) are
+    /// left out of search and info.
+    arch: String,
     pub repos: Vec<Loaded>,
     pub skipped: Vec<Skipped>,
-    /// Packages hidden from the solver because they come from the same
-    /// source as an image package but are a different build (image
-    /// relatives must be the image's exact build).
-    pub hidden: Vec<SolvableId>,
+    /// Packages no command offers because they come from the same source
+    /// as an image package but are a different build (image relatives must
+    /// be the image's exact build).
+    hidden: HashSet<SolvableId>,
 }
 
 /// What `nx add` would do.
@@ -92,14 +95,37 @@ impl Universe {
                 }),
             }
         }
+        Ok(Self::assemble(pool, &opts.arch, loaded, skipped))
+    }
+
+    /// Finishes a pool whose installed set and repos are loaded.
+    fn assemble(mut pool: Pool, arch: &str, repos: Vec<Loaded>, skipped: Vec<Skipped>) -> Self {
         pool.prepare();
-        let hidden = other_builds_of_image_sources(&pool);
-        Ok(Self {
+        let hidden = other_builds_of_image_sources(&pool).into_iter().collect();
+        Self {
             pool,
-            repos: loaded,
+            arch: arch.to_owned(),
+            repos,
             skipped,
             hidden,
-        })
+        }
+    }
+
+    /// Repos past their `metadata_expire` or that could not be refreshed.
+    pub fn stale(&self) -> impl Iterator<Item = &Loaded> {
+        self.repos
+            .iter()
+            .filter(|l| !matches!(l.synced.freshness, Freshness::Fetched | Freshness::Cached))
+    }
+
+    /// A package's long description.
+    pub fn description(&self, p: &Package) -> String {
+        self.pool.description(p.id)
+    }
+
+    /// Whether a package runs here: the machine's arch or `noarch`.
+    fn native(&self, p: &Package) -> bool {
+        p.arch == self.arch || p.arch == "noarch"
     }
 
     /// Packages whose name or summary contains `term` (case-insensitive),
@@ -109,8 +135,11 @@ impl Universe {
         let needle = term.to_lowercase();
         let mut best: HashMap<String, Package> = HashMap::new();
         for id in self.pool.all() {
+            if self.hidden.contains(&id) {
+                continue;
+            }
             let p = self.pool.package(id);
-            if p.arch == "src" || p.arch == "i686" {
+            if !self.native(&p) {
                 continue;
             }
             if !p.name.to_lowercase().contains(&needle)
@@ -138,25 +167,36 @@ impl Universe {
     /// The package a name means: the image's copy if installed, else the
     /// newest available build that the image allows.
     pub fn info(&self, spec: &str) -> Result<Option<Package>> {
-        let hidden: HashSet<_> = self.hidden.iter().copied().collect();
         let mut best: HashMap<String, Package> = HashMap::new();
         for id in self.pool.select(spec)? {
-            if hidden.contains(&id) {
+            if self.hidden.contains(&id) {
                 continue;
             }
             self.keep_best(&mut best, self.pool.package(id));
         }
         let mut found: Vec<Package> = best.into_values().collect();
         // Prefer the exact name asked for, then the native arch.
-        found.sort_by_key(|p| (p.name != spec, p.arch != "x86_64" && p.arch != "noarch"));
+        found.sort_by_key(|p| (p.name != spec, !self.native(p)));
         Ok(found.into_iter().next())
     }
 
-    /// What installing `specs` would add.
+    /// What installing `specs` would add. When it can't be solved and a
+    /// repo failed to load, the problems say so: a missing repo, not a
+    /// missing package, is the likelier cause.
     pub fn plan(&mut self, specs: &[&str]) -> Result<Plan> {
-        Ok(match self.pool.install(specs, &self.hidden)? {
+        let hidden: Vec<SolvableId> = self.hidden.iter().copied().collect();
+        Ok(match self.pool.install(specs, &hidden)? {
             Solution::Install(p) => Plan::Install(p),
-            Solution::Problems(p) => Plan::Problems(p),
+            Solution::Problems(mut problems) => {
+                if !self.skipped.is_empty() {
+                    let repos: Vec<&str> = self.skipped.iter().map(|s| s.repo.as_str()).collect();
+                    problems.push(format!(
+                        "{} could not be loaded (see above); try again",
+                        repos.join(", ")
+                    ));
+                }
+                Plan::Problems(problems)
+            }
         })
     }
 
@@ -260,5 +300,100 @@ fn remove_matching(dir: &Path, prefix: &str) {
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkg(name: &str, ver: &str, arch: &str, src: &str) -> String {
+        format!(
+            r#"<package type="rpm"><name>{name}</name><arch>{arch}</arch>
+<version epoch="0" ver="{ver}" rel="1.fc45"/><summary>{name} summary</summary>
+<location href="Packages/{name}.rpm"/>
+<format><rpm:sourcerpm>{src}-{ver}-1.fc45.src.rpm</rpm:sourcerpm>
+<rpm:provides><rpm:entry name="{name}" flags="EQ" epoch="0" ver="{ver}" rel="1.fc45"/></rpm:provides>
+</format></package>"#
+        )
+    }
+
+    /// An image with wayland 1.24 and a repo that has moved on to 1.25,
+    /// plus an i686 build and an unrelated package.
+    fn universe(tag: &str) -> Result<Universe> {
+        let dir = std::env::temp_dir().join(format!("nx-universe-{tag}-{}", std::process::id()));
+        create_dir(&dir)?;
+        let repos = [
+            ("@image", vec![pkg("wayland", "1.24", "x86_64", "wayland")]),
+            (
+                "updates",
+                vec![
+                    pkg("wayland-devel", "1.24", "x86_64", "wayland"),
+                    pkg("wayland-devel", "1.25", "x86_64", "wayland"),
+                    pkg("wayland-devel", "1.25", "i686", "wayland"),
+                    pkg("weston", "14", "x86_64", "weston"),
+                ],
+            ),
+        ];
+        let mut pool = Pool::new("x86_64")?;
+        for (name, pkgs) in repos {
+            let path = dir.join(format!("{name}.xml"));
+            let xml = format!(
+                r#"<?xml version="1.0"?><metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="{}">{}</metadata>"#,
+                pkgs.len(),
+                pkgs.concat()
+            );
+            std::fs::write(&path, xml).map_err(|source| Error::Write {
+                path: path.clone(),
+                source,
+            })?;
+            let id = pool.load_rpmmd(name, &path, 99)?;
+            if name == "@image" {
+                pool.set_installed(id);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(Universe::assemble(pool, "x86_64", Vec::new(), Vec::new()))
+    }
+
+    fn nevras(pkgs: &[Package]) -> Vec<String> {
+        pkgs.iter().map(Package::nevra).collect()
+    }
+
+    #[test]
+    fn search_offers_what_add_installs() -> Result<()> {
+        let mut u = universe("search")?;
+        let found = u.search("wayland-devel");
+        assert_eq!(nevras(&found), vec!["wayland-devel-1.24-1.fc45.x86_64"]);
+        let Plan::Install(plan) = u.plan(&["wayland-devel"])? else {
+            panic!("wayland-devel should resolve");
+        };
+        assert_eq!(nevras(&plan), nevras(&found));
+        Ok(())
+    }
+
+    #[test]
+    fn info_skips_other_builds_and_arches() -> Result<()> {
+        let u = universe("info")?;
+        let p = u.info("wayland-devel")?.map(|p| p.nevra());
+        assert_eq!(p.as_deref(), Some("wayland-devel-1.24-1.fc45.x86_64"));
+        Ok(())
+    }
+
+    #[test]
+    fn problems_blame_skipped_repos() -> Result<()> {
+        let mut u = universe("skipped")?;
+        u.skipped.push(Skipped {
+            repo: "fedora".into(),
+            error: Error::Invalid("offline".into()),
+        });
+        let Plan::Problems(p) = u.plan(&["nope"])? else {
+            panic!("nope should not resolve");
+        };
+        assert_eq!(
+            p.last().map(String::as_str),
+            Some("fedora could not be loaded (see above); try again")
+        );
+        Ok(())
     }
 }

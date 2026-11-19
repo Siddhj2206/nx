@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use nx_core::RpmOstree;
 
 use crate::ui::Ui;
@@ -34,7 +34,7 @@ struct Cli {
 }
 
 /// One variant per command. The doc comment is the line in `nx help`; the
-/// group comes from [`help::group`].
+/// group is in `help::PLACEMENT`.
 #[derive(Subcommand)]
 enum Command {
     /// add packages (for now, --dry-run only: what would be installed)
@@ -45,19 +45,46 @@ enum Command {
         /// resolve and list what would be added; change nothing
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        metadata: Metadata,
     },
     /// find packages by name or summary
     Search {
         #[arg(value_name = "term", required = true)]
         terms: Vec<String>,
+        #[command(flatten)]
+        metadata: Metadata,
     },
     /// show one package: version, repo, source, size
     Info {
         #[arg(value_name = "package")]
         package: String,
+        #[command(flatten)]
+        metadata: Metadata,
     },
     /// the image nx resolves against: booted, staged and rollback
     Status,
+}
+
+/// How the host-tier commands treat cached repo metadata.
+#[derive(Args)]
+struct Metadata {
+    /// download fresh repo metadata first
+    #[arg(long)]
+    refresh: bool,
+}
+
+impl Metadata {
+    /// Commands answer from the cache; only a repo with nothing cached, or
+    /// `--refresh`, waits on the network.
+    fn load(&self, ui: &mut Ui) -> anyhow::Result<nx_rpm::Universe> {
+        let refresh = if self.refresh {
+            nx_rpm::Refresh::Always
+        } else {
+            nx_rpm::Refresh::IfMissing
+        };
+        host::load(ui, refresh)
+    }
 }
 
 fn main() -> ExitCode {
@@ -71,11 +98,18 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let result = match command {
-        Command::Add { packages, dry_run } => host::load(&mut ui, nx_rpm::Refresh::IfStale)
-            .and_then(|mut u| add::run(&mut ui, &mut u, &packages, dry_run)),
-        Command::Search { terms } => host::load(&mut ui, nx_rpm::Refresh::IfStale)
-            .and_then(|u| search::run(&mut ui, &u, &terms)),
-        Command::Info { package } => host::load(&mut ui, nx_rpm::Refresh::IfStale)
+        Command::Add {
+            packages,
+            dry_run,
+            metadata,
+        } => add::check(dry_run)
+            .and_then(|()| metadata.load(&mut ui))
+            .and_then(|mut u| add::run(&mut ui, &mut u, &packages)),
+        Command::Search { terms, metadata } => metadata
+            .load(&mut ui)
+            .map(|u| search::run(&mut ui, &u, &terms)),
+        Command::Info { package, metadata } => metadata
+            .load(&mut ui)
             .and_then(|u| info::run(&mut ui, &u, &package)),
         Command::Status => status::run(&mut ui, &RpmOstree, Path::new("/"), Path::new("/sysroot")),
     };

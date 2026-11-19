@@ -200,13 +200,19 @@ pub fn size(n: u64) -> String {
     }
 }
 
-/// `plural(1, "package")` is "1 package", `plural(2, "package")` "2 packages".
+/// `plural(1, "package")` is "1 package", `plural(2, "match")` "2 matches".
 pub fn plural(n: usize, word: &str) -> String {
-    if n == 1 {
-        format!("{n} {word}")
-    } else {
-        format!("{n} {word}s")
-    }
+    let suffix = match n {
+        1 => "",
+        _ if ["s", "x", "ch", "sh"].iter().any(|e| word.ends_with(e)) => "es",
+        _ => "s",
+    };
+    format!("{n} {word}{suffix}")
+}
+
+/// The mark on a package the image already has.
+pub fn in_image(style: Style) -> String {
+    style.green(&format!("{SYM_DONE} in the image"))
 }
 
 /// Cuts plain text to `w` columns with an ellipsis.
@@ -276,6 +282,7 @@ mod tests {
         assert_eq!(size(3 * 1024 * 1024 / 2), "1.5 MiB");
         assert_eq!(plural(1, "package"), "1 package");
         assert_eq!(plural(3, "package"), "3 packages");
+        assert_eq!(plural(2, "match"), "2 matches");
         assert_eq!(truncate("abcdef", 4), "abc…");
     }
 

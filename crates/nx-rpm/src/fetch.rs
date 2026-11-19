@@ -1,9 +1,9 @@
 //! Downloads a repo's metadata into a local cache and keeps it fresh.
 //!
 //! The cache holds, per repo, `repomd.xml` and the files it names, each
-//! verified against its checksum. Within the repo's `metadata_expire` nothing
-//! touches the network, which is what keeps a warm `nx add --dry-run` under
-//! a second.
+//! verified against its checksum. Commands read the cache and go to the
+//! network only for what is missing or when asked (`--refresh`); metadata
+//! past its `metadata_expire` is used and reported as [`Freshness::Expired`].
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -100,8 +100,21 @@ pub struct Synced {
     pub primary: PathBuf,
     /// Base URL the metadata came from, for downloading packages later.
     pub base: String,
-    /// Whether this call went to the network.
-    pub fetched: bool,
+    /// Where it came from, and whether it is still current.
+    pub freshness: Freshness,
+}
+
+/// How current a repo's metadata is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Freshness {
+    /// Downloaded by this call.
+    Fetched,
+    /// From the cache, within the repo's `metadata_expire`.
+    Cached,
+    /// From the cache, past the repo's `metadata_expire`.
+    Expired,
+    /// From the cache because every mirror failed; the error says why.
+    Unreachable(String),
 }
 
 impl Synced {
@@ -114,12 +127,14 @@ impl Synced {
 /// When to go to the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
-    /// Only when the cache is older than the repo's `metadata_expire`.
+    /// Only for repos with nothing cached. What commands do: they never
+    /// wait on a download the cache could have answered.
+    IfMissing,
+    /// When the cache is older than the repo's `metadata_expire` (the
+    /// background refresh).
     IfStale,
-    /// Always check for new metadata.
+    /// Always check for new metadata (`--refresh`).
     Always,
-    /// Never; fail if nothing is cached.
-    Never,
 }
 
 /// Makes sure `repo`'s metadata is in `cache/<id>/` and returns it.
@@ -133,37 +148,49 @@ pub fn sync(
     on_fetch: &mut dyn FnMut(),
 ) -> Result<Synced> {
     let dir = cache.join(&repo.id);
-    let cached = read_cached(&dir);
-    if let Some(synced) = &cached {
-        let fresh = match refresh {
-            Refresh::Never => true,
+    let mut cached = read_cached(&dir);
+    if let Some(synced) = &mut cached {
+        let expired = repo
+            .metadata_expire
+            .is_some_and(|expire| age(&dir.join("repomd.xml")).is_none_or(|age| age >= expire));
+        if expired {
+            synced.freshness = Freshness::Expired;
+        }
+        let use_cache = match refresh {
+            Refresh::IfMissing => true,
+            Refresh::IfStale => !expired,
             Refresh::Always => false,
-            Refresh::IfStale => repo
-                .metadata_expire
-                .is_none_or(|expire| age(&dir.join("repomd.xml")).is_some_and(|age| age < expire)),
         };
-        if fresh {
+        if use_cache {
             return Ok(synced.clone());
         }
-    } else if refresh == Refresh::Never {
-        return Err(Error::Invalid(format!(
-            "no cached metadata for {}",
-            repo.id
-        )));
     }
 
     on_fetch();
+    let err = match fetch(repo, http, &dir, cached.as_ref()) {
+        Ok(synced) => return Ok(synced),
+        Err(e) => e,
+    };
+    // Old metadata beats none: nx can still resolve, and the caller tells
+    // the user why it is old.
+    match cached {
+        Some(mut synced) => {
+            synced.freshness = Freshness::Unreachable(err.to_string());
+            Ok(synced)
+        }
+        None => Err(err),
+    }
+}
+
+/// Tries each mirror in turn.
+fn fetch(repo: &Repo, http: &dyn Http, dir: &Path, cached: Option<&Synced>) -> Result<Synced> {
     let (bases, accepted) = mirrors(repo, http)?;
     let mut last_err = None;
     for base in &bases {
-        match fetch_from(base, &accepted, http, &dir, cached.as_ref()) {
+        match fetch_from(base, &accepted, http, dir, cached) {
             Ok(synced) => return Ok(synced),
             Err(e) => last_err = Some(e),
         }
-    }
-    // Stale metadata beats none: nx can still resolve, and says so.
-    if let Some(synced) = cached {
-        return Ok(synced);
     }
     Err(last_err.unwrap_or_else(|| Error::Invalid(format!("{} has no mirrors", repo.id))))
 }
@@ -233,7 +260,7 @@ fn fetch_from(
         repomd,
         primary: primary_path,
         base: base.to_owned(),
-        fetched: true,
+        freshness: Freshness::Fetched,
     })
 }
 
@@ -250,7 +277,7 @@ fn read_cached(dir: &Path) -> Option<Synced> {
         repomd,
         primary,
         base,
-        fetched: false,
+        freshness: Freshness::Cached,
     })
 }
 
@@ -396,13 +423,13 @@ mod tests {
         let cache = temp("mirror");
         let (repo, http) = fake_repo(true);
         let first = sync(&repo, &http, &cache, Refresh::IfStale, &mut || {})?;
-        assert!(first.fetched);
+        assert_eq!(first.freshness, Freshness::Fetched);
         assert_eq!(first.base, "https://good/");
         assert_eq!(std::fs::read(&first.primary).ok().as_deref(), Some(PRIMARY));
 
         http.hits.borrow_mut().clear();
         let second = sync(&repo, &http, &cache, Refresh::IfStale, &mut || {})?;
-        assert!(!second.fetched);
+        assert_eq!(second.freshness, Freshness::Cached);
         assert!(http.hits.borrow().is_empty(), "fresh cache must not fetch");
         let _ = std::fs::remove_dir_all(&cache);
         Ok(())
@@ -415,15 +442,29 @@ mod tests {
         sync(&repo, &http, &cache, Refresh::IfStale, &mut || {})?;
         let (_, broken) = fake_repo(false);
         let again = sync(&repo, &broken, &cache, Refresh::Always, &mut || {})?;
-        assert!(!again.fetched);
+        assert!(
+            matches!(again.freshness, Freshness::Unreachable(_)),
+            "{:?}",
+            again.freshness
+        );
         let _ = std::fs::remove_dir_all(&cache);
         Ok(())
     }
 
     #[test]
-    fn never_refresh_without_cache_fails() {
-        let (repo, http) = fake_repo(true);
-        assert!(sync(&repo, &http, &temp("never"), Refresh::Never, &mut || {}).is_err());
-        assert!(http.hits.borrow().is_empty());
+    fn if_missing_fetches_once_then_reports_expiry() -> Result<()> {
+        let cache = temp("missing");
+        let (mut repo, http) = fake_repo(true);
+        let first = sync(&repo, &http, &cache, Refresh::IfMissing, &mut || {})?;
+        assert_eq!(first.freshness, Freshness::Fetched);
+
+        // Expired, yet IfMissing still answers from the cache.
+        repo.metadata_expire = Some(std::time::Duration::ZERO);
+        http.hits.borrow_mut().clear();
+        let second = sync(&repo, &http, &cache, Refresh::IfMissing, &mut || {})?;
+        assert_eq!(second.freshness, Freshness::Expired);
+        assert!(http.hits.borrow().is_empty(), "IfMissing must not fetch");
+        let _ = std::fs::remove_dir_all(&cache);
+        Ok(())
     }
 }

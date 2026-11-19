@@ -6,7 +6,7 @@ pub mod repo;
 pub mod repomd;
 pub mod universe;
 
-pub use fetch::{Http, Refresh, Synced, Ureq, sync};
+pub use fetch::{Freshness, Http, Refresh, Synced, Ureq, sync};
 pub use nx_solv::Package;
 pub use repo::{Repo, Vars};
 pub use repomd::{Checksum, DataFile, Metalink, Repomd};
