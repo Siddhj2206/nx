@@ -97,6 +97,9 @@ impl Fixture {
         for d in ["usr/lib", "etc/yum.repos.d", "etc/pki/rpm-gpg"] {
             std::fs::create_dir_all(root.join(d))?;
         }
+        // As tmpfiles makes it: a dry run takes no lock and creates nothing,
+        // and without it would share the user's own cache with other tests.
+        std::fs::create_dir_all(dir.join("state"))?;
         std::fs::write(
             root.join("usr/lib/os-release"),
             "ID=fedora\nVERSION_ID=45\n",

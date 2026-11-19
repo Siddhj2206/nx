@@ -493,14 +493,15 @@ pub fn expose(
 
 /// Refuses what a change would expose badly, and warns about the rest:
 /// a package just added (`fresh`) must not lose a command to another tool
-/// package without `--override`, and must expose something.
+/// package without `--override`, nor one the image or the host tier has
+/// unless it is in `without` (`--without`), and must expose something.
 pub fn check(
     ui: &mut Ui,
     tool: &LockedTool,
     exposure: &Exposure,
     fresh: &[String],
     previous: Option<&LockedTool>,
-    overrides: &[String],
+    without: &[String],
 ) -> Result<()> {
     let mut problems = Vec::new();
     for (name, kept, refused) in &exposure.clashes {
@@ -516,8 +517,8 @@ pub fn check(
         }
     }
     // A new package whose command the image or the host tier has is
-    // refused (design, *Name ownership*) unless every such name is
-    // overridden: then it is added without them, since what comes first on
+    // refused (design, *Name ownership*) unless every such name is in
+    // `without`: then it is added without them, since what comes first on
     // PATH would run anyway.
     for attr in fresh {
         let Some(package) = tool.package(attr) else {
@@ -532,7 +533,7 @@ pub fn check(
         let owned: Vec<&str> = hidden
             .iter()
             .copied()
-            .filter(|n| !overrides.iter().any(|o| o == n))
+            .filter(|n| !without.iter().any(|o| o == n))
             .collect();
         // The tool tier exposes commands and nothing else.
         let lost = exposure.clashes.iter().any(|(_, _, r)| r == attr);
@@ -556,10 +557,10 @@ pub fn check(
         } else {
             problems.push(format!(
                 "{attr} has {}, which the image or the host tier already has (it comes first on \
-                 PATH, so nx can't expose {}); nx add {attr} --override {} adds it without {}",
+                 PATH, so nx can't expose {}); nx add {attr} --without {} adds it without {}",
                 owned.join(", "),
                 if owned.len() == 1 { "it" } else { "them" },
-                owned.join(" --override "),
+                owned.join(" --without "),
                 if owned.len() == 1 { "it" } else { "them" },
             ));
         }
@@ -834,7 +835,7 @@ mod tests {
             buf.text(),
             "  ! tig and gitFull both have scalar; gitFull's is exposed\n"
         );
-        // One of its commands is the image's: refused, unless overridden.
+        // One of its commands is the image's: refused, unless --without.
         let err = check(&mut ui, &tool, &e, &["gitFull".into()], None, &[])
             .err()
             .map(|e| e.to_string())
@@ -842,7 +843,7 @@ mod tests {
         assert_eq!(
             err,
             "gitFull has git, which the image or the host tier already has (it comes first on \
-             PATH, so nx can't expose it); nx add gitFull --override git adds it without it"
+             PATH, so nx can't expose it); nx add gitFull --without git adds it without it"
         );
         assert!(
             check(

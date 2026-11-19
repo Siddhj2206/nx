@@ -215,18 +215,30 @@ impl Default for Gc {
     }
 }
 
-/// Command names a tool-tier package may expose although something else
-/// has them (`nx add --override`): the image and the host tier keep theirs
-/// (they come first on `PATH`), another tool package's is replaced.
+/// How tool-tier packages share command names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overrides {
+    /// Names a later tool package takes from an earlier one (`nx add
+    /// --override`).
     #[serde(default)]
     pub names: Vec<String>,
+    /// Names the image or the host tier has that a tool package is added
+    /// without (`nx add --without`): they come first on `PATH`, so the tool
+    /// package's copy is never exposed. Before 1.0, `names` said this too,
+    /// and still does for those entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub without: Vec<String>,
 }
 
 impl Overrides {
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
+        self.names.is_empty() && self.without.is_empty()
+    }
+
+    /// Every name a package may go without: `without`, and the older
+    /// `names` entries that said the same.
+    pub fn may_lack(&self) -> Vec<String> {
+        self.without.iter().chain(&self.names).cloned().collect()
     }
 }
 

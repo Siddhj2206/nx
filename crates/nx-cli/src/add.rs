@@ -24,6 +24,7 @@ pub struct Options {
     pub forced: Option<Forced>,
     pub allow_unfree: bool,
     pub overrides: Vec<String>,
+    pub without: Vec<String>,
 }
 
 /// A tool-tier package the command adds.
@@ -63,6 +64,11 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         for o in &opts.overrides {
             if !m.overrides.names.contains(o) {
                 m.overrides.names.push(o.clone());
+            }
+        }
+        for w in &opts.without {
+            if !m.overrides.without.contains(w) {
+                m.overrides.without.push(w.clone());
             }
         }
         Ok(())

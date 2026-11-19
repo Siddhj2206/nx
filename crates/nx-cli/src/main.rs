@@ -82,9 +82,12 @@ enum Command {
         /// allow these nixpkgs packages despite an unfree license
         #[arg(long)]
         allow_unfree: bool,
-        /// let this package have a command another one has
+        /// let this package have a command another tool package has
         #[arg(long = "override", value_name = "command")]
         overrides: Vec<String>,
+        /// add it without a command the image or the host tier already has
+        #[arg(long, value_name = "command")]
+        without: Vec<String>,
         /// install despite scriptlets nx can't translate, after you reviewed
         /// them: package=digest, as the refusal prints it
         #[arg(long, value_name = "package=digest")]
@@ -332,6 +335,7 @@ fn main() -> ExitCode {
             tool,
             allow_unfree,
             overrides,
+            without,
             allow_scriptlets,
             metadata,
         } => {
@@ -346,6 +350,7 @@ fn main() -> ExitCode {
                 },
                 allow_unfree,
                 overrides,
+                without,
             };
             machine().and_then(|m| add::run(&mut ui, &m, &packages, &opts))
         }
