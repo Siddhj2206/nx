@@ -16,9 +16,9 @@ jobs:
     steps:
       - run: >-
           dnf -y install --setopt=install_weak_deps=False
-          rust cargo clippy rustfmt gcc libsolv-devel ShellCheck git-core
+          rust cargo clippy rustfmt gcc libsolv-devel rpm-devel ShellCheck git-core
       - uses: actions/checkout@v5
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-      - run: shellcheck spike/*.sh crates/nx-solv/generate.sh dev/run
+      - run: shellcheck spike/*.sh crates/nx-solv/generate.sh crates/nx-librpm/generate.sh dev/run
