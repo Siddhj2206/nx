@@ -291,3 +291,14 @@ fn finds_image_owners_of_a_file() -> Result<()> {
     assert!(names("/usr/bin/fd")?.is_empty(), "fd is not in the image");
     Ok(())
 }
+
+#[test]
+fn a_repo_suffix_selects_from_one_repo() -> Result<()> {
+    let fedora = vec![pkg("ripgrep", "14.1", "1.fc45", "")];
+    let f = fixture("pin", &image(), &fedora)?;
+    assert_eq!(f.pool.select("ripgrep@fedora")?.len(), 1);
+    assert!(f.pool.select("ripgrep@image")?.is_empty());
+    assert_eq!(split_repo("/usr/lib/systemd/system/getty@.service"), None);
+    assert_eq!(split_repo("a@copr:o:p"), Some(("a", "copr:o:p")));
+    Ok(())
+}

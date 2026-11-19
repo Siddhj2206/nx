@@ -196,6 +196,12 @@ pub struct Added<'a> {
     pub priority: Option<i32>,
 }
 
+/// An added repo's id: its name with `/` made `:` (`copr:owner:project`),
+/// as used in the pool, the cache, pinned keys and the lockfile.
+pub fn id_of(name: &str) -> String {
+    name.replace('/', ":")
+}
+
 impl Repo {
     /// A repo from the manifest. `copr:owner/project` needs only its name.
     pub fn added(a: &Added, vars: &Vars) -> Result<Self> {
@@ -213,7 +219,7 @@ impl Repo {
             ),
         };
         Ok(Self {
-            id: a.name.replace('/', ":"),
+            id: id_of(a.name),
             name: a.name.to_owned(),
             baseurl,
             metalink: a.metalink.map(|m| vars.expand(m)),

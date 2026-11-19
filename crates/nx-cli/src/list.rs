@@ -1,35 +1,47 @@
 //! `nx list`: the host tier of the current generation, from its lockfile.
 //! Reads no repo metadata, so it is instant and works offline.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use nx_core::{Generation, LockedPackage};
 
 use crate::host;
 use crate::ui::{self, Stream, Ui};
 
 pub fn run(ui: &mut Ui) -> Result<()> {
-    let current = Generation::current(&host::state()).context("reading the current generation")?;
+    let current = host::readable(ui, &host::state())?;
     render(&mut ui.out, current.as_ref());
     Ok(())
 }
 
-/// What the user asked for first, then what it pulled in.
+/// What the user asked for first, then what it pulled in, then what the
+/// manifest asks for that the image provides.
 fn render(out: &mut Stream, current: Option<&Generation>) {
     let style = out.style;
-    let Some(g) = current.filter(|g| !g.lock.host.is_empty()) else {
+    let Some(g) = current.filter(|g| !g.manifest.host.packages.is_empty()) else {
         out.line(style.dim("Nothing added yet · nx add <name> adds a package"));
         return;
     };
     let asked = &g.manifest.host.packages;
     let (direct, deps): (Vec<&LockedPackage>, Vec<&LockedPackage>) =
         g.lock.host.iter().partition(|p| asked.contains(&p.name));
-    let width = g.lock.host.iter().map(|p| p.name.len()).max().unwrap_or(0) + 2;
+    let in_image: Vec<&String> = asked
+        .iter()
+        .filter(|s| !g.lock.host.iter().any(|p| p.requested.contains(s)))
+        .collect();
+    let width = g
+        .lock
+        .host
+        .iter()
+        .map(|p| p.name.len())
+        .chain(in_image.iter().map(|s| s.len()))
+        .max()
+        .unwrap_or(0)
+        + 2;
     let mut row = |p: &LockedPackage, note: String| {
-        let evr = version(p);
         out.line(format_args!(
             "{}{}{note}",
             ui::pad(&style.bold(&p.name), width),
-            style.dim(evr)
+            style.dim(p.evr())
         ));
     };
     for p in &direct {
@@ -38,22 +50,19 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
     for p in &deps {
         row(p, style.dim(&format!("  · for {}", p.requested.join(", "))));
     }
+    for spec in &in_image {
+        out.line(format_args!(
+            "{}{}",
+            ui::pad(&style.bold(spec), width),
+            ui::in_image(style)
+        ));
+    }
     out.blank();
     out.line(style.dim(&format!(
         "{} · generation {} · host tier",
         ui::plural(g.lock.host.len(), "package"),
         g.number
     )));
-}
-
-/// `pkgconf-2.4-1.fc45.x86_64` → `2.4-1.fc45`.
-pub fn version(p: &LockedPackage) -> &str {
-    let rest = p
-        .nevra
-        .strip_prefix(&p.name)
-        .and_then(|r| r.strip_prefix('-'))
-        .unwrap_or(&p.nevra);
-    rest.rsplit_once('.').map_or(rest, |(evr, _arch)| evr)
 }
 
 #[cfg(test)]
@@ -82,7 +91,7 @@ mod tests {
     #[test]
     fn lists_requested_then_dependencies() {
         let mut manifest = Manifest::default();
-        manifest.add_host(&["wayland-devel".into()]);
+        manifest.add_host(&["wayland-devel".into(), "glibc".into()]);
         let mut lock = Lock::new(None, "45", "x86_64");
         lock.host = vec![
             locked("libffi-devel", "3.5.1-2.fc45", &["wayland-devel"]),
@@ -98,6 +107,7 @@ mod tests {
             text(Some(&g)),
             "  wayland-devel  1.24.0-1.fc45\n\
              \x20 libffi-devel   3.5.1-2.fc45  · for wayland-devel\n\
+             \x20 glibc          ✓ in the image\n\
              \n\
              \x20 2 packages · generation 2 · host tier\n"
         );
@@ -109,10 +119,5 @@ mod tests {
             text(None),
             "  Nothing added yet · nx add <name> adds a package\n"
         );
-    }
-
-    #[test]
-    fn versions_drop_name_and_arch() {
-        assert_eq!(version(&locked("a-b", "1:2.0-1.fc45", &[])), "1:2.0-1.fc45");
     }
 }

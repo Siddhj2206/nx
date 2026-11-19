@@ -13,11 +13,18 @@ use crate::repo::Repo;
 use crate::universe::Loaded;
 use crate::{Error, Result};
 
-/// The keys `repo`'s packages must be signed with, and their fingerprints.
-/// `file://` keys are read from the image under `root`; any other URL
-/// must have been pinned by `nx repo add` into `pinned` (its file named by
-/// [`pinned_key`]). Never the system keyring.
-pub fn keyring(repo: &Repo, root: &Path, pinned: &Path) -> Result<(Keyring, Vec<String>)> {
+/// The keys a repo's packages must be signed with.
+pub struct RepoKeys {
+    pub keyring: Keyring,
+    /// Sorted, without duplicates.
+    pub fingerprints: Vec<String>,
+}
+
+/// The keys `repo`'s packages must be signed with. `file://` keys are read
+/// from the image under `root`; any other URL must have been pinned by
+/// `nx repo add` into `pinned` (its file named by [`pinned_key`]). Never
+/// the system keyring.
+pub fn keyring(repo: &Repo, root: &Path, pinned: &Path) -> Result<RepoKeys> {
     if repo.gpgkey.is_empty() {
         return Err(Error::Invalid(format!("{} names no gpgkey", repo.id)));
     }
@@ -36,7 +43,10 @@ pub fn keyring(repo: &Repo, root: &Path, pinned: &Path) -> Result<(Keyring, Vec<
     }
     fingerprints.sort();
     fingerprints.dedup();
-    Ok((keyring, fingerprints))
+    Ok(RepoKeys {
+        keyring,
+        fingerprints,
+    })
 }
 
 /// The file name a repo's pinned key is kept under.
@@ -188,15 +198,10 @@ impl Relative {
 pub const KOJI: &str = "https://kojipkgs.fedoraproject.org/packages";
 
 /// Downloads `rel` from Koji's signed copies into `dir` and verifies it
-/// against `keyring`. Koji files a signed copy under the key's short ID,
-/// so each fingerprint is tried in turn.
-pub fn koji(
-    http: &dyn Http,
-    rel: &Relative,
-    keyring: &Keyring,
-    fingerprints: &[String],
-    dir: &Path,
-) -> Result<PathBuf> {
+/// against `keys`. Koji files a signed copy under the key's short ID, so
+/// each fingerprint is tried in turn.
+pub fn koji(http: &dyn Http, rel: &Relative, keys: &RepoKeys, dir: &Path) -> Result<PathBuf> {
+    let keyring = &keys.keyring;
     std::fs::create_dir_all(dir).map_err(|source| Error::Write {
         path: dir.to_owned(),
         source,
@@ -206,7 +211,7 @@ pub fn koji(
         return Ok(file);
     }
     let mut last = None;
-    for fp in fingerprints {
+    for fp in &keys.fingerprints {
         let short = fp.get(fp.len().saturating_sub(8)..).unwrap_or(fp);
         let url = format!(
             "{KOJI}/{}/{}/{}/data/signed/{}/{}/{}",
@@ -295,8 +300,8 @@ mod tests {
             &vars(),
         )
         .remove(0);
-        let (_, fps) = keyring(&fedora, &root, &tmp.0.join("pinned"))?;
-        assert_eq!(fps, [FEDORA_45]);
+        let keys = keyring(&fedora, &root, &tmp.0.join("pinned"))?;
+        assert_eq!(keys.fingerprints, [FEDORA_45]);
 
         let copr = parse(
             "[copr:a:b]\nbaseurl=https://x/\ngpgkey=https://copr/pubkey.gpg\n",
@@ -312,8 +317,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&pinned);
         let copr_key = std::fs::read(testdata("copr-lilay-topgrade.gpg")).unwrap_or_default();
         let _ = std::fs::write(pinned.join(pinned_key("copr:a:b")), copr_key);
-        let (_, fps) = keyring(&copr, &root, &pinned)?;
-        assert_eq!(fps.len(), 1);
+        let keys = keyring(&copr, &root, &pinned)?;
+        assert_eq!(keys.fingerprints.len(), 1);
         Ok(())
     }
 
@@ -378,11 +383,15 @@ mod tests {
             format!("{KOJI}/libxkbcommon/1.13.1/4.fc45/data/signed/f577861e/x86_64/{RPM}"),
             rpm_bytes(),
         );
-        let mut keys = Keyring::new()?;
+        let mut keyring = Keyring::new()?;
         let text =
             std::fs::read_to_string(testdata("RPM-GPG-KEY-fedora-45-primary")).unwrap_or_default();
-        let fps = keys.add(&text)?;
-        let file = koji(&http, &rel, &keys, &fps, &tmp.0)?;
+        let fingerprints = keyring.add(&text)?;
+        let keys = RepoKeys {
+            keyring,
+            fingerprints: fingerprints.clone(),
+        };
+        let file = koji(&http, &rel, &keys, &tmp.0)?;
         assert_eq!(file.file_name().and_then(|f| f.to_str()), Some(RPM));
 
         // Signed by a key the repo doesn't use: refused and not kept.
@@ -390,7 +399,11 @@ mod tests {
         let mut other = Keyring::new()?;
         let copr = std::fs::read_to_string(testdata("copr-lilay-topgrade.gpg")).unwrap_or_default();
         other.add(&copr)?;
-        assert!(koji(&http, &rel, &other, &fps, &tmp.0).is_err());
+        let other = RepoKeys {
+            keyring: other,
+            fingerprints,
+        };
+        assert!(koji(&http, &rel, &other, &tmp.0).is_err());
         assert!(!file.exists());
         Ok(())
     }

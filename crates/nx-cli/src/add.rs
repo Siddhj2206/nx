@@ -8,41 +8,44 @@ use anyhow::Result;
 use nx_rpm::{Package, Refresh};
 
 use crate::apply::Session;
+use crate::host::Machine;
 use crate::ui::{self, Stream, Ui};
 
-pub fn run(ui: &mut Ui, specs: &[String], dry_run: bool, refresh: Refresh) -> Result<()> {
+pub fn run(
+    ui: &mut Ui,
+    machine: &Machine,
+    specs: &[String],
+    dry_run: bool,
+    refresh: Refresh,
+) -> Result<()> {
     let started = Instant::now();
-    let mut session = Session::open(ui, refresh, dry_run, None)?;
-    let mut manifest = session.manifest();
-    let mut all = manifest.host.packages.clone();
-    for spec in specs {
-        if !all.contains(spec) {
-            all.push(spec.clone());
-        }
-    }
-    let resolved = session.resolve(ui, &all)?;
-
-    // A new spec nothing was resolved for is already in the image; it is
-    // left out of the manifest, as there is nothing to keep.
-    let fresh: Vec<&String> = specs
+    let mut session = Session::open(ui, machine, refresh, dry_run, |_| Ok(()))?;
+    let mut manifest = session.manifest.clone();
+    let fresh: Vec<String> = specs
         .iter()
         .filter(|s| !manifest.host.packages.contains(s))
+        .cloned()
         .collect();
-    let (wanted, in_image): (Vec<&String>, Vec<&String>) = fresh
-        .into_iter()
-        .partition(|s| resolved.all.iter().any(|p| p.requested.contains(s)));
-    let in_image: Vec<&str> = in_image.iter().map(|s| s.as_str()).collect();
+    manifest.add_host(&fresh);
+    let resolved = session.resolve(ui, &manifest.host.packages)?;
+
+    // A new spec nothing was resolved for is in the image already. It stays
+    // in the manifest all the same (design invariant 8): intent, so it comes
+    // back if the image drops it.
+    let in_image: Vec<&str> = fresh
+        .iter()
+        .filter(|s| !resolved.all.iter().any(|p| p.requested.contains(s)))
+        .map(String::as_str)
+        .collect();
 
     if dry_run {
         render_plan(&mut ui.out, &in_image, &resolved.new);
         return Ok(());
     }
-    if resolved.new.is_empty() && wanted.is_empty() {
-        render_nothing(&mut ui.out, specs, &in_image);
+    if fresh.is_empty() {
+        render_nothing(&mut ui.out, specs, &[]);
         return Ok(());
     }
-    let wanted: Vec<String> = wanted.into_iter().cloned().collect();
-    manifest.add_host(&wanted);
     let built = session.install(ui, &manifest, &resolved.all)?;
     for nevra in &built.outside_usr {
         ui.warn(format_args!(
@@ -52,6 +55,7 @@ pub fn run(ui: &mut Ui, specs: &[String], dry_run: bool, refresh: Refresh) -> Re
     render_added(
         &mut ui.out,
         &resolved.new,
+        &in_image,
         built.generation.number,
         started.elapsed().as_secs_f64(),
     );
@@ -118,8 +122,15 @@ fn render_nothing(out: &mut Stream, specs: &[String], in_image: &[&str]) {
     }
 }
 
-/// After an install: one `+` line per new package, then the total.
-fn render_added(out: &mut Stream, packages: &[Package], generation: u32, secs: f64) {
+/// After an install: one `+` line per new package, a line for specs the
+/// image already provides, then the total.
+fn render_added(
+    out: &mut Stream,
+    packages: &[Package],
+    in_image: &[&str],
+    generation: u32,
+    secs: f64,
+) {
     let style = out.style;
     let size: u64 = packages.iter().map(|p| p.download_size).sum();
     for p in packages {
@@ -129,6 +140,21 @@ fn render_added(out: &mut Stream, packages: &[Package], generation: u32, secs: f
             p.name,
             style.dim(&p.evr)
         ));
+    }
+    if !in_image.is_empty() {
+        out.line(format_args!(
+            "{} {} {}",
+            style.green(ui::SYM_DONE),
+            in_image.join(", "),
+            style.dim("already in the image · kept in the manifest in case the image drops it")
+        ));
+    }
+    if packages.is_empty() {
+        out.line(format_args!(
+            "{} manifest updated · generation {generation} in {secs:.1}s",
+            style.green(ui::SYM_DONE)
+        ));
+        return;
     }
     out.line(format_args!(
         "{} {} · generation {generation} · {} in {secs:.1}s",
@@ -194,9 +220,14 @@ mod tests {
     fn reports_what_was_added() {
         let added = [package("libxkbcommon-devel", "1.13.1-4.fc45", "koji", 74)];
         assert_eq!(
-            text(|out| render_added(out, &added, 3, 1.24)),
+            text(|out| render_added(out, &added, &[], 3, 1.24)),
             "  + libxkbcommon-devel 1.13.1-4.fc45\n\
              \x20 ✓ 1 package added · generation 3 · 74 KiB in 1.2s\n"
+        );
+        assert_eq!(
+            text(|out| render_added(out, &[], &["glibc"], 4, 0.5)),
+            "  ✓ glibc already in the image · kept in the manifest in case the image drops it\n\
+             \x20 ✓ manifest updated · generation 4 in 0.5s\n"
         );
     }
 }

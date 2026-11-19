@@ -14,7 +14,7 @@ pub mod os_release;
 pub mod state;
 
 pub use deployment::{Deployment, DeploymentSource, Deployments, RpmOstree};
-pub use generation::{Built, Generation};
+pub use generation::{Built, Generation, Readable};
 pub use lockfile::{Lock, LockedPackage, LockedRepo};
 pub use manifest::{Manifest, RepoEntry};
 pub use os_release::OsRelease;
@@ -65,6 +65,8 @@ pub enum Error {
     },
     #[error("{0}")]
     Conflict(String),
+    #[error("serializing {what}: {message}")]
+    Serialize { what: &'static str, message: String },
     #[error("{0}")]
     Invalid(String),
 }

@@ -9,7 +9,7 @@ pub mod universe;
 
 pub use fetch::{Freshness, Http, Refresh, Synced, Ureq, sync};
 pub use nx_solv::Package;
-pub use packages::{Relative, download, download_all, keyring, koji};
+pub use packages::{Relative, RepoKeys, download, download_all, keyring, koji};
 pub use repo::{Repo, Vars};
 pub use repomd::{Checksum, DataFile, Metalink, Repomd};
 pub use universe::{Options, Plan, Planned, Universe};

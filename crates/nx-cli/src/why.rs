@@ -4,11 +4,10 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nx_core::{Generation, LockedPackage, RpmOstree, State};
+use nx_core::{Generation, LockedPackage, State};
 use nx_rpm::{Package, Refresh, Universe};
 
-use crate::host;
-use crate::list::version;
+use crate::host::{self, Machine};
 use crate::ui::{self, Stream, Ui};
 
 /// Who provides the thing asked about.
@@ -24,16 +23,16 @@ enum Owner {
     Image(Package),
 }
 
-pub fn run(ui: &mut Ui, what: &str) -> Result<()> {
+pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
     let state = host::state();
-    let current = Generation::current(&state).context("reading the current generation")?;
+    let current = host::readable(ui, &state)?;
     if let Some(g) = &current
         && let Some(found) = in_generation(&state, g, what)?
     {
         render(&mut ui.out, what, &found);
         return Ok(());
     }
-    let opts = host::options(Path::new("/"), &RpmOstree, Refresh::IfMissing)?;
+    let opts = machine.options(Refresh::IfMissing)?;
     let image = Universe::load_image(&opts).context("reading the image's packages")?;
     let found = if what.contains('/') {
         image.image_owners(what)?.into_iter().next()
@@ -120,7 +119,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             out.line(format_args!(
                 "{} {}",
                 style.bold(&package.name),
-                style.dim(version(package))
+                style.dim(package.evr())
             ));
             out.blank();
             if what != package.name {

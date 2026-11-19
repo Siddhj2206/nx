@@ -32,7 +32,8 @@ impl Generation {
         })
     }
 
-    /// The generation `current` points at, if any.
+    /// The generation `current` points at, if any. Fails when a newer nx
+    /// wrote it: a change built on top would lose what that nx recorded.
     pub fn current(state: &State) -> Result<Option<Self>> {
         state
             .current_number()?
@@ -40,10 +41,45 @@ impl Generation {
             .transpose()
     }
 
+    /// What a read-only command shows (design invariant 9): the current
+    /// generation or, when a newer nx wrote it, the newest one this nx can
+    /// read.
+    pub fn readable(state: &State) -> Result<Readable> {
+        let Some(current) = state.current_number()? else {
+            return Ok(Readable::default());
+        };
+        match Self::read(state, current) {
+            Ok(g) => Ok(Readable {
+                generation: Some(g),
+                newer: None,
+            }),
+            Err(Error::Newer { .. }) => {
+                let generation = state
+                    .generations()?
+                    .into_iter()
+                    .rev()
+                    .find_map(|n| Self::read(state, n).ok());
+                Ok(Readable {
+                    generation,
+                    newer: Some(current),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// The extension tree: what would appear under `/`.
     pub fn sysext(&self) -> PathBuf {
         self.dir.join("sysext")
     }
+}
+
+/// What [`Generation::readable`] found.
+#[derive(Debug, Default)]
+pub struct Readable {
+    pub generation: Option<Generation>,
+    /// Set when `current` is this generation, written by a newer nx.
+    pub newer: Option<u32>,
 }
 
 /// What to put in a new generation.
@@ -69,10 +105,10 @@ pub struct Built {
 /// Where the extension declares which OS it extends.
 pub const EXTENSION_RELEASE: &str = "usr/lib/extension-release.d/extension-release.nx";
 
-/// Builds generation N+1 from packages already in the store and points
-/// `current` at it. Refuses, leaving `current` alone, when two packages
-/// disagree about a path or a package would shadow a file of the image
-/// (design invariant 1).
+/// Builds generation N+1 from packages already in the store, checks what
+/// it wrote, and points `current` at it. Refuses, leaving `current` alone,
+/// when two packages disagree about a path or a package would shadow a
+/// file of the image (design invariant 1).
 pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     let number = state.generations()?.last().map_or(1, |n| n + 1);
     let dir = state.generations_dir();
@@ -94,19 +130,34 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
         }
         tree.add(&root, Path::new("usr"), &p.nevra)?;
     }
+    let tree = tree.follow_image_links(spec.image_root)?;
     tree.check_image(spec.image_root)?;
     tree.write(&sysext)?;
+    tree.verify(&sysext)?;
 
     let release = sysext.join(EXTENSION_RELEASE);
     write(
         &release,
         &format!("ID={}\nVERSION_ID={}\n", spec.os_id, spec.lock.release),
     )?;
-    write(&tmp.join("manifest.toml"), &spec.manifest.to_toml())?;
-    write(&tmp.join("lock.toml"), &spec.lock.to_toml())?;
+    let manifest_path = tmp.join("manifest.toml");
+    let lock_path = tmp.join("lock.toml");
+    write(&manifest_path, &spec.manifest.to_toml()?)?;
+    write(&lock_path, &spec.lock.to_toml()?)?;
+    // What a later command will read back must be what was asked for.
+    let readback = Manifest::parse(&read(&manifest_path)?, &manifest_path)? == *spec.manifest
+        && Lock::parse(&read(&lock_path)?, &lock_path)? == *spec.lock;
+    if !readback {
+        return Err(Error::Invalid(format!(
+            "{} does not read back as written",
+            tmp.display()
+        )));
+    }
 
+    state::sync_fs(&dir)?;
     let final_dir = dir.join(number.to_string());
-    rename(&tmp, &final_dir)?;
+    state::rename(&tmp, &final_dir)?;
+    state::sync_dir(&dir)?;
     swap_current(state, number)?;
     Ok(Built {
         generation: Generation::read(state, number)?,
@@ -125,7 +176,8 @@ fn swap_current(state: &State, number: u32) -> Result<()> {
             source,
         }
     })?;
-    rename(&tmp, &link)
+    state::rename(&tmp, &link)?;
+    state::sync_dir(state.root())
 }
 
 /// One path in the extension and where it comes from.
@@ -208,6 +260,30 @@ impl Tree {
         )))
     }
 
+    /// Moves paths under a directory the image has as a symlink to where
+    /// that symlink leads, as rpm would when installing onto the image:
+    /// with `/usr/sbin -> bin`, a package's `/usr/sbin/foo` becomes
+    /// `/usr/bin/foo`. A real `usr/sbin` in the extension would hide the
+    /// image's symlink.
+    fn follow_image_links(self, image_root: &Path) -> Result<Tree> {
+        let mut out = Tree::default();
+        // A package directory → the image directory it lands in.
+        let mut moved: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+        // Parents sort before their children, so a directory's move is
+        // known before anything under it.
+        for (rel, node) in self.0 {
+            let rel = moved_path(&moved, &rel);
+            if matches!(node, Node::Dir { .. })
+                && let Some(to) = image_dir_link(image_root, &rel)
+            {
+                moved.insert(rel, to);
+                continue;
+            }
+            out.insert(&rel, node)?;
+        }
+        Ok(out)
+    }
+
     /// Design invariant 1: no file of the extension may hide one of the
     /// image's. Directories merge; anything else is refused.
     fn check_image(&self, image_root: &Path) -> Result<()> {
@@ -234,6 +310,32 @@ impl Tree {
             msg.push_str(&format!(" and {more} more"));
         }
         Err(Error::Conflict(msg))
+    }
+
+    /// Checks that `dest` holds exactly what [`Tree::write`] was to put
+    /// there.
+    fn verify(&self, dest: &Path) -> Result<()> {
+        for (rel, node) in &self.0 {
+            let path = dest.join(rel);
+            let meta = std::fs::symlink_metadata(&path).map_err(|source| Error::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let ok = match node {
+                Node::Dir { .. } => meta.is_dir(),
+                Node::File { source, .. } => {
+                    meta.is_file() && std::fs::metadata(source).is_ok_and(|s| s.len() == meta.len())
+                }
+                Node::Link { target, .. } => std::fs::read_link(&path).is_ok_and(|t| t == *target),
+            };
+            if !ok {
+                return Err(Error::Invalid(format!(
+                    "{} was not written as planned",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Hardlinks files from the store (copies across filesystems).
@@ -273,6 +375,64 @@ impl Tree {
         }
         Ok(())
     }
+}
+
+/// `rel` under the directory moves made so far.
+fn moved_path(moved: &BTreeMap<PathBuf, PathBuf>, rel: &Path) -> PathBuf {
+    for dir in rel.ancestors() {
+        if let Some(to) = moved.get(dir) {
+            let rest = rel.strip_prefix(dir).unwrap_or(Path::new(""));
+            return to.join(rest);
+        }
+    }
+    rel.to_owned()
+}
+
+/// Where the image's symlink at `rel` leads, when it is a symlink to a
+/// directory inside `/usr`, followed through further symlinks.
+fn image_dir_link(image_root: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut at = rel.to_owned();
+    let mut followed = false;
+    for _ in 0..8 {
+        let full = image_root.join(&at);
+        let meta = std::fs::symlink_metadata(&full).ok()?;
+        if meta.is_dir() {
+            return followed.then_some(at);
+        }
+        if !meta.file_type().is_symlink() {
+            return None;
+        }
+        let target = std::fs::read_link(&full).ok()?;
+        let joined = if target.is_absolute() {
+            target
+        } else {
+            Path::new("/").join(at.parent()?).join(target)
+        };
+        at = normalize(&joined)?;
+        if !at.starts_with("usr") {
+            return None;
+        }
+        followed = true;
+    }
+    None
+}
+
+/// `/usr/lib/../bin` → `usr/bin`; `None` if it climbs above the root.
+fn normalize(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Normal(p) => out.push(p),
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    Some(out)
 }
 
 fn owner(node: &Node) -> &str {
@@ -317,13 +477,6 @@ fn write(path: &Path, text: &str) -> Result<()> {
     }
     std::fs::write(path, text).map_err(|source| Error::Write {
         path: path.to_owned(),
-        source,
-    })
-}
-
-fn rename(from: &Path, to: &Path) -> Result<()> {
-    std::fs::rename(from, to).map_err(|source| Error::Write {
-        path: to.to_owned(),
         source,
     })
 }
@@ -454,6 +607,53 @@ mod tests {
         );
         assert_eq!(state.current_number()?, None);
         assert_eq!(state.generations()?, Vec::<u32>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn follows_the_images_directory_symlinks() -> Result<()> {
+        let tmp = TempDir::new("sbin");
+        let (state, lock) = setup(
+            &tmp,
+            &[("tool", &[("usr/sbin/tool", "t"), ("usr/sbin/sub/x", "x")])],
+        )?;
+        let root = image(&tmp, &["usr/bin/other"])?;
+        std::os::unix::fs::symlink("bin", root.join("usr/sbin")).map_err(|source| {
+            Error::Write {
+                path: root.clone(),
+                source,
+            }
+        })?;
+        let manifest = Manifest::default();
+        let guard = state.lock()?;
+        let built = build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        let sysext = built.generation.sysext();
+        assert!(sysext.join("usr/bin/tool").is_file());
+        assert!(sysext.join("usr/bin/sub/x").is_file());
+        assert!(!sysext.join("usr/sbin").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reads_the_newest_generation_it_understands() -> Result<()> {
+        let tmp = TempDir::new("newer");
+        let (state, lock) = setup(&tmp, &[])?;
+        let root = image(&tmp, &[])?;
+        let manifest = Manifest::default();
+        let guard = state.lock()?;
+        build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        // A newer nx wrote generation 2.
+        let path = state.generations_dir().join("2/lock.toml");
+        let text = read(&path)?.replace("version = 1", "version = 99");
+        write(&path, &text)?;
+        assert!(matches!(
+            Generation::current(&state),
+            Err(Error::Newer { version: 99, .. })
+        ));
+        let snap = Generation::readable(&state)?;
+        assert_eq!(snap.newer, Some(2));
+        assert_eq!(snap.generation.map(|g| g.number), Some(1));
         Ok(())
     }
 

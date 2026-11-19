@@ -18,6 +18,7 @@ use std::io::{self, IsTerminal, Write};
 
 pub const SYM_STEP: &str = "›";
 pub const SYM_ADDED: &str = "+";
+pub const SYM_REMOVED: &str = "-";
 pub const SYM_FETCH: &str = "↓";
 pub const SYM_DONE: &str = "✓";
 pub const SYM_WARN: &str = "!";
@@ -132,8 +133,8 @@ impl Ui {
         }
     }
 
-    /// Announces something about to take a while.
-    #[expect(dead_code)] // first used by add/upgrade (M1)
+    /// Announces something about to take a while, or a fact to check
+    /// before anything changes.
     pub fn step(&mut self, msg: impl Display) {
         let sym = self.err.style.cyan(SYM_STEP);
         self.err.line(format_args!("{sym} {msg}"));

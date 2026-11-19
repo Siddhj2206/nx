@@ -293,8 +293,34 @@ impl Pool {
 
     /// Packages a user's word matches, the way dnf matches `install` args:
     /// names, provides (`pkgconfig(xkbcommon)`, `/usr/bin/rg`), globs,
-    /// `name.arch` and `name = version`.
+    /// `name.arch` and `name = version`. `spec@repo` matches only that
+    /// repo's packages.
     pub fn select(&self, spec: &str) -> Result<Vec<SolvableId>> {
+        if let Some((spec, repo)) = split_repo(spec) {
+            return Ok(self
+                .select_any(spec)?
+                .into_iter()
+                .filter(|id| self.repo_name(*id) == repo)
+                .collect());
+        }
+        self.select_any(spec)
+    }
+
+    /// The name of the repo `id` belongs to.
+    fn repo_name(&self, id: SolvableId) -> String {
+        // SAFETY: ids come from this pool, so they index its solvables; the
+        // name is copied before any other libsolv call.
+        unsafe {
+            let s = (*self.p()).solvables.add(id.0 as usize);
+            if (*s).repo.is_null() {
+                String::new()
+            } else {
+                owned((*(*s).repo).name)
+            }
+        }
+    }
+
+    fn select_any(&self, spec: &str) -> Result<Vec<SolvableId>> {
         let spec = cstr(spec)?;
         let flags = sys::SELECTION_NAME
             | sys::SELECTION_PROVIDES
@@ -702,6 +728,17 @@ impl Drop for File {
             unsafe { libc::fclose(self.0) };
         }
     }
+}
+
+/// `foo@copr:owner:project` → (`foo`, `copr:owner:project`). Paths
+/// (`/usr/lib/systemd/system/getty@.service`) and rich provides never name
+/// a repo.
+pub fn split_repo(spec: &str) -> Option<(&str, &str)> {
+    if spec.starts_with('/') || spec.contains('(') {
+        return None;
+    }
+    let (name, repo) = spec.rsplit_once('@')?;
+    (!name.is_empty() && !repo.is_empty()).then_some((name, repo))
 }
 
 fn cstr(s: &str) -> Result<CString> {

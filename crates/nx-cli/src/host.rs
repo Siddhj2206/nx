@@ -4,12 +4,92 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use nx_core::{DeploymentSource, Manifest, OsRelease, RpmOstree, State};
+use anyhow::{Context, Result, bail};
+use nx_core::{DeploymentSource, Deployments, Generation, Manifest, OsRelease, RepoEntry, State};
 use nx_rpm::repo::{Added, Repo};
 use nx_rpm::{Freshness, Options, Refresh, Universe, Ureq, Vars};
 
 use crate::ui::Ui;
+
+/// The running system as the host tier reads it, once per command: its
+/// root, the image's os-release, the deployments and the architecture.
+/// Commands read `/`; tests build one from a fixture root.
+pub struct Machine {
+    pub root: PathBuf,
+    pub release: OsRelease,
+    /// `None` off a bootc system.
+    deployments: Option<Deployments>,
+    pub arch: String,
+}
+
+impl Machine {
+    /// Reads the system under `root`. On a bootc system (ostree's
+    /// `run/ostree-booted` marker) the deployments must be readable: a
+    /// lockfile without the image digest could not be bound to the image.
+    pub fn read(root: &Path, source: &dyn DeploymentSource) -> Result<Self> {
+        let release = OsRelease::read(root).context("reading the image's os-release")?;
+        let deployments = if root.join("run/ostree-booted").exists() {
+            Some(
+                source
+                    .deployments()
+                    .context("reading the image's deployments")?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            root: root.to_owned(),
+            release,
+            deployments,
+            arch: std::env::consts::ARCH.to_owned(),
+        })
+    }
+
+    /// The booted image's digest; `None` off a bootc system. Outside one,
+    /// the installed set is read from the rpmdb each time instead of from a
+    /// cache.
+    pub fn digest(&self) -> Option<String> {
+        self.deployments.as_ref()?.booted()?.image_digest.clone()
+    }
+
+    /// The booted image's own root, for checking what the image ships: the
+    /// deployment's tree under `/sysroot`, which no extension overlays, or
+    /// the root itself off a bootc system. Never `/` on a bootc system,
+    /// where `/usr` shows the merged extension too.
+    pub fn image_root(&self) -> Result<PathBuf> {
+        let Some(deployments) = &self.deployments else {
+            return Ok(self.root.clone());
+        };
+        let booted = deployments
+            .booted()
+            .context("rpm-ostree reports no booted deployment")?;
+        let root = booted.root(&self.root.join("sysroot"));
+        if !root.join("usr").is_dir() {
+            bail!("can't read the booted deployment at {}", root.display());
+        }
+        Ok(root)
+    }
+
+    pub fn vars(&self) -> Vars {
+        Vars {
+            releasever: self.release.version_id.clone(),
+            basearch: self.arch.clone(),
+        }
+    }
+
+    /// Resolver options for this machine.
+    pub fn options(&self, refresh: Refresh) -> Result<Options> {
+        Ok(Options {
+            root: self.root.clone(),
+            cache: cache_dir()?,
+            image_digest: self.digest(),
+            vars: self.vars(),
+            arch: self.arch.clone(),
+            refresh,
+            extra: Vec::new(),
+        })
+    }
+}
 
 /// nx's cache for unprivileged commands: `$XDG_CACHE_HOME/nx`, else
 /// `~/.cache/nx`. nxd keeps its own under `/var/lib/nx/cache` (M3).
@@ -39,16 +119,34 @@ pub fn keys_dir(state: &State) -> PathBuf {
     state.root().join("keys")
 }
 
-/// The booted image's own root, for checking what the image ships: the
-/// deployment's tree under `/sysroot`, which no extension overlays, or `/`
-/// off a bootc system.
-pub fn image_root(source: &dyn DeploymentSource) -> PathBuf {
-    source
-        .deployments()
-        .ok()
-        .and_then(|d| d.booted().map(|b| b.root(Path::new("/sysroot"))))
-        .filter(|r| r.join("usr").is_dir())
-        .unwrap_or_else(|| PathBuf::from("/"))
+/// The generation read-only commands show (design invariant 9): the
+/// current one or, when a newer nx wrote it, the newest one this nx reads,
+/// with a warning.
+pub fn readable(ui: &mut Ui, state: &State) -> Result<Option<Generation>> {
+    let snap = Generation::readable(state).context("reading the current generation")?;
+    if let Some(n) = snap.newer {
+        match &snap.generation {
+            Some(g) => ui.warn(format_args!(
+                "generation {n} was written by a newer nx; showing generation {}",
+                g.number
+            )),
+            None => ui.warn(format_args!(
+                "generation {n} was written by a newer nx, and no older one is readable"
+            )),
+        }
+    }
+    Ok(snap.generation)
+}
+
+/// A manifest entry as the repo loader takes it.
+pub fn added(e: &RepoEntry) -> Added<'_> {
+    Added {
+        name: &e.name,
+        baseurl: e.baseurl.as_deref(),
+        metalink: e.metalink.as_deref(),
+        gpgkey: e.gpgkey.as_deref(),
+        priority: e.priority,
+    }
 }
 
 /// The repos a manifest adds.
@@ -57,50 +155,21 @@ pub fn added_repos(manifest: &Manifest, vars: &Vars) -> Result<Vec<Repo>> {
         .repos
         .iter()
         .map(|r| {
-            Repo::added(
-                &Added {
-                    name: &r.name,
-                    baseurl: r.baseurl.as_deref(),
-                    metalink: r.metalink.as_deref(),
-                    gpgkey: r.gpgkey.as_deref(),
-                    priority: r.priority,
-                },
-                vars,
-            )
-            .with_context(|| format!("repo {} in the manifest", r.name))
+            Repo::added(&added(r), vars).with_context(|| format!("repo {} in the manifest", r.name))
         })
         .collect()
 }
 
-/// Resolver options for the booted system under `root`.
-pub fn options(root: &Path, source: &dyn DeploymentSource, refresh: Refresh) -> Result<Options> {
-    let release = OsRelease::read(root).context("reading the image's os-release")?;
-    // Outside a bootc system there is no digest; the installed set is then
-    // read from the rpmdb each time instead of from a cache.
-    let image_digest = source
-        .deployments()
-        .ok()
-        .and_then(|d| d.booted().and_then(|b| b.image_digest.clone()));
-    let arch = std::env::consts::ARCH.to_owned();
-    Ok(Options {
-        root: root.to_owned(),
-        cache: cache_dir()?,
-        image_digest,
-        vars: Vars {
-            releasever: release.version_id.clone(),
-            basearch: arch.clone(),
-        },
-        arch,
-        refresh,
-        extra: Vec::new(),
-    })
-}
-
-/// Loads the universe for the running system and the repos `manifest`
-/// adds, telling the user about downloads, out-of-date metadata and repos
-/// that could not be loaded.
-pub fn load(ui: &mut Ui, refresh: Refresh, manifest: &Manifest) -> Result<Universe> {
-    let mut opts = options(Path::new("/"), &RpmOstree, refresh)?;
+/// Loads the universe for `machine` and the repos `manifest` adds,
+/// telling the user about downloads, out-of-date metadata and repos that
+/// could not be loaded.
+pub fn load(
+    ui: &mut Ui,
+    machine: &Machine,
+    refresh: Refresh,
+    manifest: &Manifest,
+) -> Result<Universe> {
+    let mut opts = machine.options(refresh)?;
     opts.extra = added_repos(manifest, &opts.vars)?;
     let err = &mut ui.err;
     let universe = Universe::load(&opts, &Ureq::new(), &mut |repo| {
@@ -133,10 +202,48 @@ pub fn load(ui: &mut Ui, refresh: Refresh, manifest: &Manifest) -> Result<Univer
     Ok(universe)
 }
 
-/// The current generation's manifest, or an empty one.
-pub fn current_manifest(state: &State) -> Result<Manifest> {
-    Ok(nx_core::Generation::current(state)
-        .context("reading the current generation")?
-        .map(|g| g.manifest)
-        .unwrap_or_default())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(tag: &str, bootc: bool) -> std::io::Result<PathBuf> {
+        let root = std::env::temp_dir().join(format!("nx-host-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("usr/lib"))?;
+        std::fs::write(
+            root.join("usr/lib/os-release"),
+            "ID=fedora\nVERSION_ID=45\n",
+        )?;
+        if bootc {
+            std::fs::create_dir_all(root.join("run"))?;
+            std::fs::write(root.join("run/ostree-booted"), "")?;
+        }
+        Ok(root)
+    }
+
+    struct Failing;
+    impl DeploymentSource for Failing {
+        fn deployments(&self) -> nx_core::Result<Deployments> {
+            Err(nx_core::Error::Invalid("rpm-ostree is broken".into()))
+        }
+    }
+
+    #[test]
+    fn off_bootc_the_root_is_the_image() -> Result<()> {
+        let root = fixture("plain", false)?;
+        let m = Machine::read(&root, &Failing)?;
+        assert_eq!(m.digest(), None);
+        assert_eq!(m.image_root()?, root);
+        assert_eq!(m.vars().releasever, "45");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn on_bootc_the_deployments_must_be_readable() -> Result<()> {
+        let root = fixture("bootc", true)?;
+        assert!(Machine::read(&root, &Failing).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 }

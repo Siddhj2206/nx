@@ -8,8 +8,9 @@
 //! lock                     held by any command that changes state
 //! ```
 //!
-//! Everything is written beside its final name and renamed into place, so a
-//! crash leaves either the old state or the new one.
+//! Everything is written beside its final name, flushed to disk, and only
+//! then renamed into place, so a crash leaves either the old state or the
+//! new one, never a name over half-written data.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -128,14 +129,15 @@ impl Store {
         self.path(sha256).is_dir()
     }
 
-    /// Adds a package: `fill` writes its tree into an empty directory,
-    /// which is then renamed into place. Needs the state lock.
-    pub fn insert<E>(
+    /// Unpacks a package beside the store: `fill` writes its tree into an
+    /// empty directory, which [`Store::commit`] later moves in. `None` when
+    /// the store has it already. Needs the state lock.
+    pub fn stage<E>(
         &self,
         _lock: &Lock,
         sha256: &str,
         fill: impl FnOnce(&Path) -> Result<(), E>,
-    ) -> Result<PathBuf, E>
+    ) -> Result<Option<Staged>, E>
     where
         E: From<Error>,
     {
@@ -145,18 +147,108 @@ impl Store {
         }
         let dest = self.path(sha256);
         if dest.is_dir() {
-            return Ok(dest);
+            return Ok(None);
         }
         let tmp = self.dir.join(format!(".{sha256}.part"));
         remove_tree(&tmp)?;
         create_dir(&tmp)?;
-        fill(&tmp)?;
-        std::fs::rename(&tmp, &dest).map_err(|source| Error::Write {
-            path: dest.clone(),
-            source,
-        })?;
-        Ok(dest)
+        if let Err(e) = fill(&tmp) {
+            let _ = remove_tree(&tmp);
+            return Err(e);
+        }
+        Ok(Some(Staged { tmp, dest }))
     }
+
+    /// Moves staged packages into the store, once their data is on disk:
+    /// one filesystem sync for all of them, then a rename each.
+    pub fn commit(&self, _lock: &Lock, staged: Vec<Staged>) -> Result<()> {
+        if staged.is_empty() {
+            return Ok(());
+        }
+        sync_fs(&self.dir)?;
+        for s in staged {
+            rename(&s.tmp, &s.dest)?;
+        }
+        sync_dir(&self.dir)
+    }
+
+    /// [`Store::stage`] and [`Store::commit`] for one package.
+    pub fn insert<E>(
+        &self,
+        lock: &Lock,
+        sha256: &str,
+        fill: impl FnOnce(&Path) -> Result<(), E>,
+    ) -> Result<PathBuf, E>
+    where
+        E: From<Error>,
+    {
+        let staged = self.stage(lock, sha256, fill)?;
+        self.commit(lock, staged.into_iter().collect())?;
+        Ok(self.path(sha256))
+    }
+}
+
+/// A package unpacked beside the store, waiting for [`Store::commit`].
+#[derive(Debug)]
+pub struct Staged {
+    tmp: PathBuf,
+    dest: PathBuf,
+}
+
+/// Bytes free to an unprivileged writer on the filesystem holding `path`
+/// (or its nearest existing parent).
+pub fn free_space(path: &Path) -> Result<u64> {
+    let mut at = path;
+    while !at.exists() {
+        match at.parent() {
+            Some(p) => at = p,
+            None => break,
+        }
+    }
+    let st = rustix::fs::statvfs(at).map_err(|e| Error::Read {
+        path: at.to_owned(),
+        source: e.into(),
+    })?;
+    Ok(st.f_bavail.saturating_mul(st.f_frsize))
+}
+
+/// Whether two existing paths are on the same filesystem.
+pub fn same_filesystem(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev(),
+        _ => false,
+    }
+}
+
+/// Flushes everything written to the filesystem holding `dir`. One
+/// `syncfs` costs far less than an `fsync` per unpacked file.
+pub(crate) fn sync_fs(dir: &Path) -> Result<()> {
+    let f = File::open(dir).map_err(|source| Error::Read {
+        path: dir.to_owned(),
+        source,
+    })?;
+    rustix::fs::syncfs(&f).map_err(|e| Error::Write {
+        path: dir.to_owned(),
+        source: e.into(),
+    })
+}
+
+/// Makes renames inside `dir` durable.
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
+    File::open(dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|source| Error::Write {
+            path: dir.to_owned(),
+            source,
+        })
+}
+
+pub(crate) fn rename(from: &Path, to: &Path) -> Result<()> {
+    std::fs::rename(from, to).map_err(|source| Error::Write {
+        path: to.to_owned(),
+        source,
+    })
 }
 
 pub(crate) fn create_dir(dir: &Path) -> Result<()> {
@@ -244,6 +336,21 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn staged_packages_appear_only_on_commit() -> Result<()> {
+        let tmp = TempDir::new("stage");
+        let state = State::new(&tmp.0);
+        let lock = state.lock()?;
+        let store = state.store();
+        let staged = store.stage(&lock, SHA, |_| Ok::<(), Error>(()))?;
+        assert!(staged.is_some() && !store.contains(SHA));
+        store.commit(&lock, staged.into_iter().collect())?;
+        assert!(store.contains(SHA));
+        assert!(store.stage(&lock, SHA, |_| Ok::<(), Error>(()))?.is_none());
+        assert!(free_space(&tmp.0.join("not/yet"))? > 0);
+        Ok(())
+    }
+
+    #[test]
     fn a_failed_fill_leaves_nothing() -> Result<()> {
         let tmp = TempDir::new("fail");
         let state = State::new(&tmp.0);
@@ -251,6 +358,7 @@ pub(crate) mod tests {
         let store = state.store();
         let r = store.insert(&lock, SHA, |_| Err(Error::Invalid("bad package".into())));
         assert!(r.is_err() && !store.contains(SHA));
+        assert!(!store.dir.join(format!(".{SHA}.part")).exists());
         Ok(())
     }
 }

@@ -2,38 +2,45 @@
 //! manifest with their key pinned. Adding or removing one builds a new
 //! generation, as any manifest change does.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nx_core::{Generation, Manifest, RepoEntry, RpmOstree};
-use nx_rpm::repo::{self, Added, Repo, Vars};
+use nx_core::{Generation, Manifest, RepoEntry};
+use nx_rpm::repo::{self, Repo, Vars, id_of};
 use nx_rpm::{Http, Refresh, Ureq};
 
 use crate::apply::Session;
-use crate::host;
+use crate::host::{self, Machine};
 use crate::ui::{self, Stream, Ui};
 
-/// A repo the user named, its manifest entry, and its key file's text.
-struct New {
+/// A repo the user named: its manifest entry and its key.
+struct Fetched {
     entry: RepoEntry,
     key: String,
     fingerprints: Vec<String>,
 }
 
-pub fn add(ui: &mut Ui, source: &str, key: Option<&str>, priority: Option<i32>) -> Result<()> {
-    let opts = host::options(Path::new("/"), &RpmOstree, Refresh::IfMissing)?;
-    let image_ids: Vec<String> = repo::load(&opts.root, &opts.vars)?
+/// `nx repo add`. With `new_key`, replaces the pinned key of a repo added
+/// before, once the user has checked the new fingerprint.
+pub fn add(
+    ui: &mut Ui,
+    machine: &Machine,
+    source: &str,
+    key: Option<&str>,
+    priority: Option<i32>,
+    new_key: bool,
+) -> Result<()> {
+    let vars = machine.vars();
+    let image_ids: Vec<String> = repo::load(&machine.root, &vars)?
         .into_iter()
         .map(|r| r.id)
         .collect();
     let http = Ureq::new();
-    let entries = entries(&http, source, key, priority)?;
-    let mut manifest = host::current_manifest(&host::state())?;
-    let mut new = Vec::new();
-    for entry in entries {
-        let repo = Repo::added(&added(&entry), &opts.vars)?;
-        if image_ids.contains(&repo.id) || manifest.repo(&entry.name).is_some() {
-            bail!("repo {} is already enabled", entry.name);
+    let mut fetched = Vec::new();
+    for entry in entries(&http, &vars, source, key, priority)? {
+        let repo = Repo::added(&host::added(&entry), &vars)?;
+        if image_ids.contains(&repo.id) {
+            bail!("{} is one of the image's repos", entry.name);
         }
         let url = repo
             .gpgkey
@@ -45,49 +52,111 @@ pub fn add(ui: &mut Ui, source: &str, key: Option<&str>, priority: Option<i32>) 
         let key = String::from_utf8_lossy(&http.get(url)?).into_owned();
         let fingerprints =
             nx_librpm::fingerprints(&key).with_context(|| format!("reading the key at {url}"))?;
-        new.push(New {
+        // Shown before anything changes, so the user sees what they trust.
+        ui.step(format_args!(
+            "{} is signed with {}",
+            entry.name,
+            fingerprints.join(", ")
+        ));
+        fetched.push(Fetched {
             entry,
             key,
             fingerprints,
         });
     }
-    manifest.repos.extend(new.iter().map(|n| n.entry.clone()));
 
-    let mut session = Session::open(ui, Refresh::IfMissing, false, Some(&manifest))?;
-    let keys = host::keys_dir(&session.state);
-    std::fs::create_dir_all(&keys).with_context(|| format!("creating {}", keys.display()))?;
-    for n in &new {
-        let id = n.entry.name.replace('/', ":");
-        if let Some(s) = session.universe.skipped.iter().find(|s| s.repo == id) {
-            bail!("can't add {}: {}", n.entry.name, s.error);
+    let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
+        for f in &fetched {
+            let name = &f.entry.name;
+            match (m.repo(name).is_some(), new_key) {
+                (true, false) => {
+                    bail!("repo {name} is already added (--new-key replaces its key)")
+                }
+                (false, true) => bail!("repo {name} is not added yet; drop --new-key"),
+                (false, false) => m.repos.push(f.entry.clone()),
+                (true, true) => {}
+            }
         }
-        let path = keys.join(nx_rpm::packages::pinned_key(&id));
-        std::fs::write(&path, &n.key).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    })?;
+    let ids: Vec<String> = fetched.iter().map(|f| id_of(&f.entry.name)).collect();
+    if new_key {
+        session.trust(&ids);
     }
-    let specs = manifest.host.packages.clone();
-    let resolved = session.resolve(ui, &specs)?;
-    let built = session.install(ui, &manifest, &resolved.all)?;
+    for (f, id) in fetched.iter().zip(&ids) {
+        if let Some(s) = session.universe.skipped.iter().find(|s| s.repo == *id) {
+            bail!("can't add {}: {}", f.entry.name, s.error);
+        }
+    }
+    let pins = Pins::write(&host::keys_dir(&session.state), &fetched)?;
+    let built = (|| {
+        let manifest = session.manifest.clone();
+        let resolved = session.resolve(ui, &manifest.host.packages)?;
+        session.install(ui, &manifest, &resolved.all)
+    })();
+    let built = match built {
+        Ok(b) => b,
+        Err(e) => {
+            pins.undo();
+            return Err(e);
+        }
+    };
     let st = ui.out.style;
-    for n in &new {
+    for f in &fetched {
         ui.out.line(format_args!(
             "{} {} {}",
             st.green(ui::SYM_ADDED),
-            n.entry.name,
-            st.dim(&format!("· key {}", n.fingerprints.join(", ")))
+            f.entry.name,
+            st.dim(&format!("· key {}", f.fingerprints.join(", ")))
         ));
     }
+    let what = if new_key {
+        format!("{} replaced", ui::plural(fetched.len(), "key"))
+    } else {
+        format!("{} added", ui::plural(fetched.len(), "repo"))
+    };
     ui.done(format_args!(
-        "{} added · generation {}",
-        ui::plural(new.len(), "repo"),
+        "{what} · generation {}",
         built.generation.number
     ));
     Ok(())
+}
+
+/// Key files written for a change, and what they replaced, so a change
+/// that fails leaves the keys as they were.
+struct Pins(Vec<(PathBuf, Option<String>)>);
+
+impl Pins {
+    fn write(dir: &Path, fetched: &[Fetched]) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        let mut pins = Self(Vec::new());
+        for f in fetched {
+            let path = dir.join(nx_rpm::packages::pinned_key(&id_of(&f.entry.name)));
+            let before = std::fs::read_to_string(&path).ok();
+            if let Err(e) = std::fs::write(&path, &f.key) {
+                pins.undo();
+                return Err(e).with_context(|| format!("writing {}", path.display()));
+            }
+            pins.0.push((path, before));
+        }
+        Ok(pins)
+    }
+
+    fn undo(self) {
+        for (path, before) in self.0 {
+            let _ = match before {
+                Some(text) => std::fs::write(&path, text),
+                None => std::fs::remove_file(&path),
+            };
+        }
+    }
 }
 
 /// What `source` names: `copr:owner/project`, a `.repo` file's URL, or a
 /// repo's base URL (which needs `--key`).
 fn entries(
     http: &dyn Http,
+    vars: &Vars,
     source: &str,
     key: Option<&str>,
     priority: Option<i32>,
@@ -101,11 +170,7 @@ fn entries(
     };
     if source.starts_with("copr:") {
         // Checked again by Repo::added; here for a clear message.
-        let vars = Vars {
-            releasever: "45".into(),
-            basearch: "x86_64".into(),
-        };
-        if repo::copr(source, &vars).is_none() {
+        if repo::copr(source, vars).is_none() {
             bail!("{source} is not copr:owner/project");
         }
         return Ok(vec![entry(source)]);
@@ -149,34 +214,25 @@ fn entries(
     }])
 }
 
-fn added(e: &RepoEntry) -> Added<'_> {
-    Added {
-        name: &e.name,
-        baseurl: e.baseurl.as_deref(),
-        metalink: e.metalink.as_deref(),
-        gpgkey: e.gpgkey.as_deref(),
-        priority: e.priority,
-    }
-}
-
-pub fn remove(ui: &mut Ui, name: &str) -> Result<()> {
-    let mut manifest = host::current_manifest(&host::state())?;
-    if manifest.repo(name).is_none() {
-        bail!("{name} was not added with nx repo add (nx repo list shows the repos)");
-    }
-    manifest.repos.retain(|r| r.name != name);
-    let mut session = Session::open(ui, Refresh::IfMissing, false, Some(&manifest))?;
-    let specs = manifest.host.packages.clone();
+pub fn remove(ui: &mut Ui, machine: &Machine, name: &str) -> Result<()> {
+    let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
+        if m.repo(name).is_none() {
+            bail!("{name} was not added with nx repo add (nx repo list shows the repos)");
+        }
+        m.repos.retain(|r| r.name != name);
+        Ok(())
+    })?;
+    let manifest = session.manifest.clone();
     let resolved = session
-        .resolve(ui, &specs)
+        .resolve(ui, &manifest.host.packages)
         .with_context(|| format!("packages still need {name}"))?;
     let built = session.install(ui, &manifest, &resolved.all)?;
-    let id = name.replace('/', ":");
     let _ = std::fs::remove_file(
-        host::keys_dir(&session.state).join(nx_rpm::packages::pinned_key(&id)),
+        host::keys_dir(&session.state).join(nx_rpm::packages::pinned_key(&id_of(name))),
     );
     let st = ui.out.style;
-    ui.out.line(format_args!("{} {name}", st.red("-")));
+    ui.out
+        .line(format_args!("{} {name}", st.red(ui::SYM_REMOVED)));
     ui.done(format_args!(
         "repo removed · generation {}",
         built.generation.number
@@ -192,15 +248,13 @@ struct Listed {
     keys: Vec<String>,
 }
 
-pub fn list(ui: &mut Ui) -> Result<()> {
-    let opts = host::options(Path::new("/"), &RpmOstree, Refresh::IfMissing)?;
-    let state = host::state();
-    let current = Generation::current(&state)?;
+pub fn list(ui: &mut Ui, machine: &Machine) -> Result<()> {
+    let current = host::readable(ui, &host::state())?;
     let manifest = current
         .as_ref()
         .map(|g| g.manifest.clone())
         .unwrap_or_default();
-    let mut rows: Vec<Listed> = repo::load(&opts.root, &opts.vars)?
+    let mut rows: Vec<Listed> = repo::load(&machine.root, &machine.vars())?
         .into_iter()
         .filter(|r| r.enabled)
         .map(|r| Listed {
@@ -220,13 +274,13 @@ fn added_rows(manifest: &Manifest, current: Option<&Generation>) -> Vec<Listed> 
         .repos
         .iter()
         .map(|r| {
-            let id = r.name.replace('/', ":");
+            let id = id_of(&r.name);
             Listed {
                 name: r.name.clone(),
                 added: true,
                 priority: r.priority.unwrap_or(repo::ADDED_PRIORITY),
                 keys: current
-                    .and_then(|g| g.lock.repos.iter().find(|l| l.id == id))
+                    .and_then(|g| g.lock.repo(&id))
                     .map(|l| l.keys.clone())
                     .unwrap_or_default(),
             }
@@ -276,13 +330,17 @@ mod tests {
     #[test]
     fn reads_what_a_source_names() -> Result<()> {
         let none = Canned("");
-        let copr = entries(&none, "copr:atim/lazygit", None, Some(50))?;
+        let vars = Vars {
+            releasever: "45".into(),
+            basearch: "x86_64".into(),
+        };
+        let copr = entries(&none, &vars, "copr:atim/lazygit", None, Some(50))?;
         assert_eq!(copr[0].name, "copr:atim/lazygit");
         assert_eq!(copr[0].priority, Some(50));
-        assert!(entries(&none, "copr:../x", None, None).is_err());
-        assert!(entries(&none, "http://x/", Some("https://k"), None).is_err());
+        assert!(entries(&none, &vars, "copr:../x", None, None).is_err());
+        assert!(entries(&none, &vars, "http://x/", Some("https://k"), None).is_err());
         assert!(
-            entries(&none, "https://x/repo/", None, None).is_err(),
+            entries(&none, &vars, "https://x/repo/", None, None).is_err(),
             "needs --key"
         );
 
@@ -291,6 +349,7 @@ mod tests {
         );
         let code = entries(
             &file,
+            &vars,
             "https://packages.microsoft.com/yumrepos/vscode.repo",
             None,
             None,

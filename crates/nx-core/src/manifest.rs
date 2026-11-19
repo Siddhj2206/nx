@@ -76,20 +76,20 @@ impl Manifest {
         Ok(m)
     }
 
-    pub fn to_toml(&self) -> String {
-        // Serializing plain data into TOML cannot fail.
-        toml::to_string(self).unwrap_or_default()
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string(self).map_err(|e| Error::Serialize {
+            what: "manifest.toml",
+            message: e.to_string(),
+        })
     }
 
-    /// Adds `specs` not already listed; returns whether anything changed.
-    pub fn add_host(&mut self, specs: &[String]) -> bool {
-        let before = self.host.packages.len();
+    /// Adds `specs` not already listed.
+    pub fn add_host(&mut self, specs: &[String]) {
         for spec in specs {
             if !self.host.packages.contains(spec) {
                 self.host.packages.push(spec.clone());
             }
         }
-        self.host.packages.len() != before
     }
 
     pub fn repo(&self, name: &str) -> Option<&RepoEntry> {
@@ -116,11 +116,11 @@ priority = 50
 "#;
         let mut m = Manifest::parse(text, Path::new("m"))?;
         assert_eq!(m.version, FORMAT);
-        assert!(m.add_host(&["libxkbcommon-devel".into(), "wayland-devel".into()]));
+        m.add_host(&["libxkbcommon-devel".into(), "wayland-devel".into()]);
         assert_eq!(m.host.packages, ["wayland-devel", "libxkbcommon-devel"]);
-        let again = Manifest::parse(&m.to_toml(), Path::new("m"))?;
-        assert_eq!(again, m);
-        assert!(m.to_toml().contains("[tool]"), "{}", m.to_toml());
+        let text = m.to_toml()?;
+        assert_eq!(Manifest::parse(&text, Path::new("m"))?, m);
+        assert!(text.contains("[tool]"), "{text}");
         assert_eq!(
             m.repo("copr:atim/lazygit").and_then(|r| r.priority),
             Some(50)

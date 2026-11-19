@@ -72,7 +72,8 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   (`generation.rs`), `manifest.toml` and `lock.toml`.
 - `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
   verify, unpack, assemble), shared by every command that changes the
-  manifest.
+  manifest. `host.rs` holds `Machine`, the system as one value (root,
+  os-release, deployments, arch): commands read `/`, tests a fixture.
 - `spike/`: throwaway scripts that answer a design question (M0). Their
   results go into `docs/design.md`; the script can go once they have.
 - `testdata/`: nx 0.x's recorded Nix internal-json logs, kept for the M6
@@ -111,6 +112,23 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   user that owns the state directory, as nxd's `nx` user will.
 - A generation's extension directory must be named `nx` when merged: its
   release file is `extension-release.nx`.
+- A manifest change goes through `Session::open`'s `change` closure, which
+  runs under the state lock. Reading the manifest before taking the lock
+  loses a concurrent command's change.
+- Unpacking checks every parent directory with `symlink_metadata`: a
+  package that ships `usr/x -> /etc` and then `usr/x/f` would otherwise
+  write outside the store. Files are created with `create_new` (`O_EXCL`
+  never follows a symlink).
+- Nothing gets its final name before its data is on disk: the store stages
+  packages and commits them after one `syncfs`, and a generation is synced
+  before its rename. An `fsync` per unpacked file is far slower.
+- Fedora 42 and later have `/usr/sbin -> bin`. A package's `usr/sbin/foo`
+  goes to `usr/bin/foo` in the extension; a real `usr/sbin` directory would
+  hide the image's symlink.
+- `/` on a bootc system shows the merged extension too. Invariant 1 checks
+  against the booted deployment's tree under `/sysroot`
+  (`Machine::image_root`), and a bootc system is recognised by
+  `/run/ostree-booted`, never by whether rpm-ostree answers.
 - A deployment's digest is `container-image-reference-digest`; the
   `checksum` field is the ostree commit, which is not what generations are
   keyed by.

@@ -103,3 +103,33 @@ fn paths_stay_inside() {
     assert_eq!(relative("/usr/../etc/passwd"), None);
     assert_eq!(relative("/"), None);
 }
+
+#[test]
+fn never_writes_through_a_symlink() -> std::io::Result<()> {
+    let tmp = TempDir::new("escape");
+    let dest = tmp.0.join("dest");
+    let outside = tmp.0.join("outside");
+    std::fs::create_dir_all(dest.join("usr"))?;
+    std::fs::create_dir_all(&outside)?;
+    // What a package's `usr/x -> <outside>` entry would leave behind.
+    std::os::unix::fs::symlink(&outside, dest.join("usr/x"))?;
+    std::fs::write(dest.join("usr/file"), "f")?;
+
+    let mut real = HashSet::new();
+    assert!(!real_dirs(&dest, Path::new("usr/x/y"), &mut real)?);
+    assert!(!real_dirs(&dest, Path::new("usr/x"), &mut real)?);
+    assert!(!real_dirs(&dest, Path::new("usr/file/y"), &mut real)?);
+    assert!(
+        std::fs::read_dir(&outside)?.next().is_none(),
+        "wrote outside"
+    );
+
+    assert!(real_dirs(
+        &dest,
+        Path::new("usr/lib64/pkgconfig"),
+        &mut real
+    )?);
+    assert!(dest.join("usr/lib64/pkgconfig").is_dir());
+    assert!(real.contains(Path::new("usr/lib64")));
+    Ok(())
+}

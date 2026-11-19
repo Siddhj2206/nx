@@ -71,6 +71,13 @@ The nixpkgs revision the tool tier comes from. Every tool-tier package comes
 from it.
 _Avoid_: lock, channel (the channel is where pins come from)
 
+**pinned key**:
+An added repo's signing key, saved by `nx repo add` under
+`/var/lib/nx/keys` and recorded by fingerprint in `lock.toml`. The repo's
+packages must verify against it; a changed one blocks the repo until
+`nx repo add <repo> --new-key`.
+_Avoid_: pin (that is the nixpkgs revision)
+
 **channel release**:
 One published state of nixpkgs-unstable: a revision Hydra has built, with its
 packages.json.

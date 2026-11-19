@@ -17,7 +17,7 @@
 )]
 mod sys;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -301,6 +301,7 @@ impl Package {
                     sys::RPMFI_KEEPHEADER as _,
                 )
             },
+            // SAFETY: f came from rpmfilesNew above and is freed once.
             |f| unsafe {
                 sys::rpmfilesFree(f);
             },
@@ -314,6 +315,8 @@ impl Package {
                     sys::RPMFI_ITER_READ_ARCHIVE_CONTENT_FIRST as _,
                 )
             },
+            // SAFETY: f came from rpmfiNewArchiveReader above and is freed
+            // once, before the file set it reads (guards drop in reverse).
             |f| unsafe {
                 sys::rpmfiFree(f);
             },
@@ -322,9 +325,7 @@ impl Package {
             return Err(self.payload(last_message()));
         }
 
-        let mut out = Unpacked::default();
-        let mut written: HashMap<i32, PathBuf> = HashMap::new();
-        let mut dirs: Vec<(PathBuf, u32)> = Vec::new();
+        let mut tree = Written::default();
         loop {
             // SAFETY: fi is a live archive reader.
             let rc = unsafe { sys::rpmfiNext(fi.0) };
@@ -334,7 +335,7 @@ impl Package {
             if rc < 0 {
                 return Err(self.payload(format!("archive error {rc}")));
             }
-            self.entry(fi.0, dest, &mut out, &mut written, &mut dirs)?;
+            self.entry(fi.0, dest, &mut tree)?;
         }
         // SAFETY: fi is live.
         if unsafe { sys::rpmfiArchiveClose(fi.0) } > 0 {
@@ -342,22 +343,15 @@ impl Package {
         }
         // Directory modes last, so a read-only directory (0555) is filled
         // first; deepest first, so a parent's mode never blocks a child.
-        dirs.sort_by(|a, b| b.0.cmp(&a.0));
-        for (dir, mode) in dirs {
-            set_mode(&dir, mode)?;
+        tree.dirs.sort_by(|a, b| b.0.cmp(&a.0));
+        for (dir, mode) in &tree.dirs {
+            set_mode(dir, *mode)?;
         }
-        Ok(out)
+        Ok(tree.out)
     }
 
     /// Writes the archive entry `fi` is at.
-    fn entry(
-        &self,
-        fi: sys::rpmfi,
-        dest: &Path,
-        out: &mut Unpacked,
-        written: &mut HashMap<i32, PathBuf>,
-        dirs: &mut Vec<(PathBuf, u32)>,
-    ) -> Result<()> {
+    fn entry(&self, fi: sys::rpmfi, dest: &Path, tree: &mut Written) -> Result<()> {
         // SAFETY: fi is positioned on a file; strings are copied at once.
         let (name, mode, caps, mtime, fx) = unsafe {
             (
@@ -373,20 +367,29 @@ impl Package {
             file: name.clone(),
             why,
         };
-        let target = dest.join(relative(&name).ok_or_else(|| refuse("leaves the package root"))?);
+        let rel = relative(&name).ok_or_else(|| refuse("leaves the package root"))?;
+        let target = dest.join(&rel);
         if mode & 0o6000 != 0 {
             return Err(refuse("is setuid or setgid"));
         }
         if !caps.is_empty() {
             return Err(refuse("has file capabilities"));
         }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| write_err(parent, e))?;
+        let is_dir = mode & libc::S_IFMT == libc::S_IFDIR;
+        // A directory is made with its parents; anything else needs only
+        // its parents, and is created with O_EXCL (which never follows a
+        // symlink) below.
+        let dirs = if is_dir {
+            rel.as_path()
+        } else {
+            rel.parent().unwrap_or(Path::new(""))
+        };
+        if !real_dirs(dest, dirs, &mut tree.real).map_err(|e| write_err(&dest.join(dirs), e))? {
+            return Err(refuse("goes through a symlink or a file"));
         }
         match mode & libc::S_IFMT {
             libc::S_IFDIR => {
-                std::fs::create_dir_all(&target).map_err(|e| write_err(&target, e))?;
-                dirs.push((target, mode & 0o7777));
+                tree.dirs.push((target, mode & 0o7777));
                 return Ok(());
             }
             libc::S_IFLNK => {
@@ -397,20 +400,20 @@ impl Package {
             libc::S_IFREG => {
                 // SAFETY: fi is positioned on a regular file.
                 if unsafe { sys::rpmfiArchiveHasContent(fi) } != 0 {
-                    out.bytes += self.write_file(fi, &target, &name, mtime)?;
+                    tree.out.bytes += self.write_file(fi, &target, &name, mtime)?;
                     set_mode(&target, mode & 0o7777)?;
-                    written.insert(fx, target.clone());
+                    tree.files.insert(fx, target.clone());
                 } else {
                     let first = hardlink_peers(fi)
                         .into_iter()
-                        .find_map(|i| written.get(&i))
+                        .find_map(|i| tree.files.get(&i))
                         .ok_or_else(|| refuse("is a hard link with no content"))?;
                     std::fs::hard_link(first, &target).map_err(|e| write_err(&target, e))?;
                 }
             }
             _ => return Err(refuse("is a device node or fifo")),
         }
-        out.files += 1;
+        tree.out.files += 1;
         Ok(())
     }
 
@@ -520,6 +523,42 @@ fn hardlink_peers(fi: sys::rpmfi) -> Vec<i32> {
         }
         std::slice::from_raw_parts(peers, n as usize).to_vec()
     }
+}
+
+/// What an unpack has written so far.
+#[derive(Default)]
+struct Written {
+    out: Unpacked,
+    /// File index → where its content went, for hard links.
+    files: HashMap<i32, PathBuf>,
+    /// Directories and their modes, applied last.
+    dirs: Vec<(PathBuf, u32)>,
+    /// Paths under the destination known to be real directories.
+    real: HashSet<PathBuf>,
+}
+
+/// Makes `rel` and every directory above it under `dest` a real
+/// directory, creating what is missing. `false` when one of them is a
+/// symlink or a file: a package that ships `usr/x -> /etc` and then
+/// `usr/x/f` would otherwise write outside `dest`.
+fn real_dirs(dest: &Path, rel: &Path, real: &mut HashSet<PathBuf>) -> std::io::Result<bool> {
+    let mut path = PathBuf::new();
+    for part in rel.components() {
+        path.push(part);
+        if real.contains(&path) {
+            continue;
+        }
+        let full = dest.join(&path);
+        match std::fs::symlink_metadata(&full) {
+            // symlink_metadata never follows, so a symlink is not a dir.
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&full)?,
+            Err(e) => return Err(e),
+        }
+        real.insert(path.clone());
+    }
+    Ok(true)
 }
 
 /// `/usr/bin/rg` → `usr/bin/rg`; `None` for anything that could leave the

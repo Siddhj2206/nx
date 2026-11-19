@@ -43,7 +43,8 @@ struct Cli {
 enum Command {
     /// add packages to a new generation (not activated yet)
     Add {
-        /// names, provides (pkgconfig(xkbcommon)) or files (/usr/bin/rg)
+        /// names, provides (pkgconfig(xkbcommon)) or files (/usr/bin/rg);
+        /// name@repo takes it from that repo only
         #[arg(value_name = "package", required = true)]
         packages: Vec<String>,
         /// resolve and list what would be added; change nothing
@@ -96,6 +97,9 @@ enum RepoAction {
         /// dnf priority, lower wins; Fedora's repos are 99, added ones 100
         #[arg(long)]
         priority: Option<i32>,
+        /// replace the pinned key of a repo added before, once checked
+        #[arg(long)]
+        new_key: bool,
     },
     /// the image's repos and the ones nx added
     List,
@@ -125,11 +129,18 @@ impl Metadata {
         }
     }
 
+    /// The universe for the repos of the generation nx can read.
     fn load(&self, ui: &mut Ui) -> anyhow::Result<nx_rpm::Universe> {
-        let refresh = self.refresh();
-        let manifest = host::current_manifest(&host::state())?;
-        host::load(ui, refresh, &manifest)
+        let machine = machine()?;
+        let manifest = host::readable(ui, &host::state())?
+            .map(|g| g.manifest)
+            .unwrap_or_default();
+        host::load(ui, &machine, self.refresh(), &manifest)
     }
+}
+
+fn machine() -> anyhow::Result<host::Machine> {
+    host::Machine::read(Path::new("/"), &RpmOstree)
 }
 
 fn main() -> ExitCode {
@@ -147,17 +158,19 @@ fn main() -> ExitCode {
             packages,
             dry_run,
             metadata,
-        } => add::run(&mut ui, &packages, dry_run, metadata.refresh()),
+        } => machine().and_then(|m| add::run(&mut ui, &m, &packages, dry_run, metadata.refresh())),
         Command::List => list::run(&mut ui),
-        Command::Why { what } => why::run(&mut ui, &what),
+        Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {
             RepoAction::Add {
                 source,
                 key,
                 priority,
-            } => repo::add(&mut ui, &source, key.as_deref(), priority),
-            RepoAction::List => repo::list(&mut ui),
-            RepoAction::Remove { name } => repo::remove(&mut ui, &name),
+                new_key,
+            } => machine()
+                .and_then(|m| repo::add(&mut ui, &m, &source, key.as_deref(), priority, new_key)),
+            RepoAction::List => machine().and_then(|m| repo::list(&mut ui, &m)),
+            RepoAction::Remove { name } => machine().and_then(|m| repo::remove(&mut ui, &m, &name)),
         },
         Command::Search { terms, metadata } => metadata
             .load(&mut ui)

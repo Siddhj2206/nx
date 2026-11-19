@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, FORMAT, Result};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lock {
     pub version: u32,
     /// The image digest it was resolved for; `None` off a bootc system.
@@ -55,7 +55,8 @@ impl Lock {
             image,
             release: release.to_owned(),
             arch: arch.to_owned(),
-            ..Self::default()
+            repos: Vec::new(),
+            host: Vec::new(),
         }
     }
 
@@ -73,12 +74,31 @@ impl Lock {
         Ok(lock)
     }
 
-    pub fn to_toml(&self) -> String {
-        toml::to_string(self).unwrap_or_default()
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string(self).map_err(|e| Error::Serialize {
+            what: "lock.toml",
+            message: e.to_string(),
+        })
     }
 
     pub fn package(&self, name: &str) -> Option<&LockedPackage> {
         self.host.iter().find(|p| p.name == name)
+    }
+
+    pub fn repo(&self, id: &str) -> Option<&LockedRepo> {
+        self.repos.iter().find(|r| r.id == id)
+    }
+}
+
+impl LockedPackage {
+    /// `pkgconf-2.4-1.fc45.x86_64` → `2.4-1.fc45`.
+    pub fn evr(&self) -> &str {
+        let rest = self
+            .nevra
+            .strip_prefix(&self.name)
+            .and_then(|r| r.strip_prefix('-'))
+            .unwrap_or(&self.nevra);
+        rest.rsplit_once('.').map_or(rest, |(evr, _arch)| evr)
     }
 }
 
@@ -102,13 +122,15 @@ mod tests {
             sha256: "ef".into(),
             requested: vec!["libxkbcommon-devel".into()],
         });
-        let text = lock.to_toml();
+        let text = lock.to_toml()?;
         assert!(text.contains("[[host]]"), "{text}");
         assert_eq!(Lock::parse(&text, Path::new("l"))?, lock);
         assert_eq!(
             lock.package("pkgconf").map(|p| p.sha256.as_str()),
             Some("ef")
         );
+        assert_eq!(lock.host[0].evr(), "2.4-1.fc45");
+        assert_eq!(lock.repo("fedora").map(|r| r.primary.as_str()), Some("cd"));
         Ok(())
     }
 }

@@ -152,6 +152,11 @@ impl Universe {
         }
     }
 
+    /// The architecture packages are resolved for.
+    pub fn arch(&self) -> &str {
+        &self.arch
+    }
+
     /// The loaded repo a package comes from.
     pub fn repo(&self, id: &str) -> Option<&Loaded> {
         self.repos.iter().find(|l| l.repo.id == id)
@@ -249,13 +254,19 @@ impl Universe {
         locked: &[String],
         koji: &mut dyn FnMut(&Relative, &Package) -> Result<PathBuf>,
     ) -> Result<Plan> {
+        let mut for_pool = Vec::new();
+        for spec in specs {
+            for_pool.push(self.for_pool(spec)?);
+        }
+        let solv: Vec<&str> = for_pool.iter().map(String::as_str).collect();
         let favored = self.locked_ids(locked)?;
         let mut problems = Vec::new();
         for _ in 0..=KOJI_ROUNDS {
             let hidden: Vec<SolvableId> = self.hidden.iter().copied().collect();
-            let involved = match self.pool.install(specs, &hidden, &favored)? {
+            let involved = match self.pool.install(&solv, &hidden, &favored)? {
                 Solution::Install(p) => {
-                    return Ok(Plan::Install(self.attribute(specs, p, &hidden, &favored)?));
+                    let planned = self.attribute(specs, &solv, p, &hidden, &favored)?;
+                    return Ok(Plan::Install(planned));
                 }
                 Solution::Problems(p) => {
                     problems = p.messages;
@@ -280,6 +291,21 @@ impl Universe {
             self.pool.prepare();
         }
         Ok(Plan::Problems(self.blame_skipped(problems)))
+    }
+
+    /// A spec as the pool reads it: `foo@copr:owner/project` names the repo
+    /// by its id (`foo@copr:owner:project`), which must be loaded.
+    fn for_pool(&self, spec: &str) -> Result<String> {
+        let Some((name, repo)) = nx_solv::split_repo(spec) else {
+            return Ok(spec.to_owned());
+        };
+        let id = repo::id_of(repo);
+        if self.repo(&id).is_none() {
+            return Err(Error::Invalid(format!(
+                "{spec}: no repo {repo} (nx repo list shows the repos)"
+            )));
+        }
+        Ok(format!("{name}@{id}"))
     }
 
     /// Fetches the image's exact build of `stand_in`'s name and adds it.
@@ -349,17 +375,19 @@ impl Universe {
     }
 
     /// Which specs pull in each package: each spec solved on its own.
+    /// `specs` are as the user wrote them, `solv` as the pool reads them.
     fn attribute(
         &mut self,
         specs: &[&str],
+        solv: &[&str],
         packages: Vec<Package>,
         hidden: &[SolvableId],
         favored: &[SolvableId],
     ) -> Result<Vec<Planned>> {
         let mut wanted: Vec<(String, HashSet<String>)> = Vec::new();
         if specs.len() > 1 {
-            for spec in specs {
-                let names = match self.pool.install(&[spec], hidden, favored)? {
+            for (spec, solv) in specs.iter().zip(solv) {
+                let names = match self.pool.install(&[solv], hidden, favored)? {
                     Solution::Install(p) => p.into_iter().map(|p| p.name).collect(),
                     Solution::Problems(_) => HashSet::new(),
                 };
@@ -651,6 +679,17 @@ mod tests {
             panic!("should resolve");
         };
         assert_eq!(planned(&plan), ["weston-15-1.fc45.x86_64"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_repo_suffix_names_a_loaded_repo() -> Result<()> {
+        let mut u = universe("pin")?;
+        let err = u.plan(&["weston@copr:o/p"], &[], &mut no_koji);
+        assert!(
+            matches!(&err, Err(Error::Invalid(m)) if m.contains("no repo copr:o/p")),
+            "{err:?}"
+        );
         Ok(())
     }
 
