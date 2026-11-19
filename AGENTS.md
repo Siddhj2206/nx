@@ -82,6 +82,14 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   files an image installs; `dev/vm-install` puts them in the test VM.
 - `crates/nx-cli/src/sync.rs`, `boot.rs`, `compat.rs`, `gc.rs`: the image
   lifecycle (`nx sync`, `nx select`, the invariant 2 check, `nx gc`).
+  `notify.rs` (`nx notify`, run by the user unit `nx-notify.path`) shows
+  what the root services recorded; `doctor.rs`, `converge.rs` (`nx
+  apply`), `migrate.rs` (nx 0.x's profile, read by `nx_nix::profile`) and
+  `complete.rs` (completions, man pages) are the 1.0 additions.
+- Releases: a `v*` tag runs `.github/workflows/release.yml`, which builds
+  `dev/dist`'s tarball (the tree an image unpacks at `/`) per architecture
+  in `fedora:45`. `dev/dist` checks `nx --version` against the tag, so bump
+  the workspace version first.
 - `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
   verify, unpack, expose the tool tier, assemble), shared by every command
   that changes the manifest. `tool.rs` drives the tool tier (pin, catalog,

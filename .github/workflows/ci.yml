@@ -21,4 +21,4 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-      - run: shellcheck spike/*.sh crates/nx-solv/generate.sh crates/nx-librpm/generate.sh dev/run dev/vm-install
+      - run: shellcheck spike/*.sh crates/nx-solv/generate.sh crates/nx-librpm/generate.sh dev/run dev/vm-install dev/dist tests/vm/*.sh

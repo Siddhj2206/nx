@@ -92,7 +92,11 @@ fn matching(catalog: &nx_nix::Catalog, typed: &str) -> Vec<CompletionCandidate> 
 /// page per visible command.
 pub fn manpages(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut cmd = Cli::command();
+    // clap's `help` subcommands would each get a page; `nx help` is ours.
+    fn no_help(cmd: clap::Command) -> clap::Command {
+        cmd.disable_help_subcommand(true).mut_subcommands(no_help)
+    }
+    let mut cmd = no_help(Cli::command());
     cmd.build();
     clap_mangen::generate_to(cmd, dir).with_context(|| format!("writing to {}", dir.display()))
 }
@@ -132,10 +136,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         manpages(&dir)?;
         let exists = |name: &str| dir.join(name).exists();
-        let (top, add, select) = (exists("nx.1"), exists("nx-add.1"), exists("nx-select.1"));
+        let (top, add, repo_add) = (exists("nx.1"), exists("nx-add.1"), exists("nx-repo-add.1"));
+        let (select, help) = (exists("nx-select.1"), exists("nx-help.1"));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(top && add, "nx.1 and nx-add.1");
-        assert!(!select, "no page for a hidden command");
+        assert!(top && add && repo_add, "nx.1, nx-add.1 and nx-repo-add.1");
+        assert!(
+            !select && !help,
+            "no page for a hidden command or clap's help"
+        );
         Ok(())
     }
 }

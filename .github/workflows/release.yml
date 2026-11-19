@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    # One tarball per Fedora release and architecture: nx links the image's
+    # libsolv and librpm (design, M7 Packaging).
+    container: quay.io/fedora/fedora:45
+    steps:
+      - run: >-
+          dnf -y install --setopt=install_weak_deps=False
+          rust cargo clippy rustfmt gcc libsolv-devel rpm-devel gzip tar git-core
+      - uses: actions/checkout@v5
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: dev/dist "${GITHUB_REF_NAME}" dist
+      - run: mv dist/SHA256SUMS "dist/SHA256SUMS.$(uname -m)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.runner }}
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cat dist/SHA256SUMS.* | sort -k2 > dist/SHA256SUMS && rm dist/SHA256SUMS.*
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes \
+            dist/*.tar.gz dist/SHA256SUMS

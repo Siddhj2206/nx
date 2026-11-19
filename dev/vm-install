@@ -24,6 +24,7 @@ podman run --rm --security-opt label=disable -v nx-dev-target:/target:ro -v "$ou
 install -m755 nx nxd /usr/local/bin/
 install -Dm755 nx-shim /usr/local/libexec/nx/nx-shim
 install -m644 nx.sh /etc/profile.d/nx.sh
+install -Dm644 60-nx.conf /etc/environment.d/60-nx.conf
 # The units name /usr/bin; the VM keeps the binaries in /usr/local/bin.
 sed "s|/usr/bin/nxd|/usr/local/bin/nxd|" nxd@.service > /etc/systemd/system/nxd@.service
 install -m644 nxd.socket /etc/systemd/system/
