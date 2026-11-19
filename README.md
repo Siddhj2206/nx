@@ -17,9 +17,18 @@ nx sorts every package by whose libraries it loads:
   with its own sealed libraries, exposed through small shims that never leak
   Nix's environment into host programs.
 
-Working today:
+Working today: `nx status`, and for the host tier `nx search`, `nx info`
+and `nx add --dry-run`, which resolve against the booted image with its own
+libsolv.
 
 ```
+$ nx add --dry-run libxkbcommon-devel wayland-devel
+
+  + libxkbcommon-devel  1.13.1-4.fc45  fedora      74 KiB
+  + wayland-devel       1.26.0-3.fc45  fedora      161 KiB
+
+  2 packages · 235 KiB download, 1.1 MiB installed · dry run, nothing changed
+
 $ nx status
 
   ghcr.io/siddhj2206/neptuno:latest 45.20261118
@@ -27,7 +36,7 @@ $ nx status
 
   Staged      none
   Rollback    45.20261117 from sha256:292ee1bfc6d4
-  Host tier   not built yet (M1)
+  Host tier   resolves (nx add --dry-run); installs from M3
   Tool tier   not built yet (M6)
 ```
 
@@ -36,7 +45,11 @@ The design, milestones and open questions are in
 
 ## Building
 
+nx links the image's libsolv, so it builds in a Fedora container of the
+image's release (`dev/Containerfile`); `dev/run` runs a command in it with
+this checkout mounted:
+
 ```
-cargo build --release      # target/release/nx
-cargo test
+dev/run cargo build --release   # in the container's /target/release/nx
+dev/run cargo test
 ```
