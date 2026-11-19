@@ -1,0 +1,18 @@
+[package]
+name = "nx-rpm"
+description = "RPM repositories for nx's host tier: repo files, metadata, mirrors"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nx-solv = { version = "1.0.0-alpha.0", path = "../nx-solv" }
+quick-xml = "0.42.0"
+sha2 = "0.11.1"
+thiserror = "2"
+ureq = { version = "3.5.2", default-features = false, features = ["rustls", "platform-verifier"] }

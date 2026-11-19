@@ -1,0 +1,16 @@
+[package]
+name = "nx-solv"
+description = "Safe bindings to the image's libsolv, for nx's host-tier resolver"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+links = "solv"
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2.191"
+thiserror = "2"

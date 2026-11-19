@@ -1,0 +1,591 @@
+//! A safe face on the image's libsolv (ADR-0007).
+//!
+//! [`Pool`] owns a libsolv pool: repos are loaded into it (the image's rpmdb
+//! as the installed set, repo metadata as the rest), then it answers
+//! lookups and solves install jobs. Everything `unsafe` in nx is in this
+//! crate; nothing here outlives the pool, and a pool never crosses threads.
+
+#![allow(unsafe_code)]
+
+#[allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    non_snake_case,
+    dead_code,
+    clippy::all
+)]
+mod sys;
+
+use std::ffi::{CStr, CString};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::ptr::NonNull;
+
+/// Errors from libsolv.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("opening {path}")]
+    Open { path: std::path::PathBuf },
+    #[error("loading {what}: {message}")]
+    Load { what: String, message: String },
+    #[error("writing {path}: {message}")]
+    Write {
+        path: std::path::PathBuf,
+        message: String,
+    },
+    #[error("invalid string for libsolv: {0:?}")]
+    Nul(String),
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// A repo loaded into a [`Pool`], by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RepoId(usize);
+
+/// A package in a [`Pool`], by libsolv's solvable id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SolvableId(sys::Id);
+
+/// What nx needs to know about one package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Package {
+    pub id: SolvableId,
+    pub name: String,
+    /// `[epoch:]version-release`.
+    pub evr: String,
+    pub arch: String,
+    /// The repo it comes from; the installed repo's name for image packages.
+    pub repo: String,
+    pub installed: bool,
+    pub summary: String,
+    /// `name-version-release.src.rpm`.
+    pub source: String,
+    pub license: String,
+    pub url: String,
+    /// Path relative to the repo base (`Packages/l/…rpm`).
+    pub location: String,
+    pub download_size: u64,
+    pub install_size: u64,
+}
+
+impl Package {
+    /// `name-evr.arch`, as dnf prints it.
+    pub fn nevra(&self) -> String {
+        format!("{}-{}.{}", self.name, self.evr, self.arch)
+    }
+
+    /// The source package's name: `wayland` for `wayland-devel`.
+    pub fn source_name(&self) -> &str {
+        source_name(&self.source)
+    }
+}
+
+/// `wayland-1.24.0-1.fc45.src.rpm` → `wayland`.
+pub fn source_name(source: &str) -> &str {
+    let stem = source
+        .strip_suffix(".src.rpm")
+        .or_else(|| source.strip_suffix(".nosrc.rpm"))
+        .unwrap_or(source);
+    let mut parts = stem.rsplitn(3, '-');
+    let (_release, _version) = (parts.next(), parts.next());
+    parts.next().unwrap_or(stem)
+}
+
+/// The outcome of a solve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Solution {
+    /// Packages to add, none of them in the image.
+    Install(Vec<Package>),
+    /// libsolv's explanation of each problem, one string per problem.
+    Problems(Vec<String>),
+}
+
+/// A libsolv pool.
+pub struct Pool {
+    raw: NonNull<sys::Pool>,
+    repos: Vec<NonNull<sys::Repo>>,
+    installed: Option<RepoId>,
+}
+
+impl Pool {
+    /// An empty pool resolving for `arch` (`x86_64`).
+    pub fn new(arch: &str) -> Result<Self> {
+        let arch = cstr(arch)?;
+        // SAFETY: pool_create returns a fresh pool or aborts on OOM.
+        let raw = unsafe { sys::pool_create() };
+        let raw = NonNull::new(raw).ok_or_else(|| Error::Load {
+            what: "pool".into(),
+            message: "pool_create returned null".into(),
+        })?;
+        // SAFETY: raw is a live pool; arch is a valid C string.
+        unsafe { sys::pool_setarch(raw.as_ptr(), arch.as_ptr()) };
+        Ok(Self {
+            raw,
+            repos: Vec::new(),
+            installed: None,
+        })
+    }
+
+    fn p(&self) -> *mut sys::Pool {
+        self.raw.as_ptr()
+    }
+
+    fn create_repo(&mut self, name: &str, priority: i32) -> Result<(RepoId, *mut sys::Repo)> {
+        let name = cstr(name)?;
+        // SAFETY: live pool; libsolv copies the name.
+        let repo = unsafe { sys::repo_create(self.p(), name.as_ptr()) };
+        let repo = NonNull::new(repo).ok_or_else(|| Error::Load {
+            what: "repo".into(),
+            message: "repo_create returned null".into(),
+        })?;
+        // libsolv: higher priority wins; dnf: lower wins.
+        // SAFETY: repo is live and owned by the pool.
+        unsafe { (*repo.as_ptr()).priority = -priority };
+        self.repos.push(repo);
+        Ok((RepoId(self.repos.len() - 1), repo.as_ptr()))
+    }
+
+    /// Loads the rpmdb under `root` (`/` or a deployment's root) as the
+    /// installed set.
+    pub fn load_rpmdb(&mut self, name: &str, root: &Path) -> Result<RepoId> {
+        let rootdir = cpath(root)?;
+        // SAFETY: live pool; libsolv copies rootdir.
+        unsafe { sys::pool_set_rootdir(self.p(), rootdir.as_ptr()) };
+        let (id, repo) = self.create_repo(name, 0)?;
+        // SAFETY: repo belongs to this pool; no reference repo.
+        let rc = unsafe { sys::repo_add_rpmdb(repo, std::ptr::null_mut(), 0) };
+        // SAFETY: as above; an empty rootdir resets it.
+        unsafe { sys::pool_set_rootdir(self.p(), std::ptr::null()) };
+        if rc != 0 {
+            return Err(self.error(format!("rpmdb under {}", root.display())));
+        }
+        self.set_installed(id);
+        Ok(id)
+    }
+
+    /// Loads repo metadata (`primary.xml`, compressed or not).
+    pub fn load_rpmmd(&mut self, name: &str, path: &Path, priority: i32) -> Result<RepoId> {
+        let fp = File::open(path)?;
+        let (id, repo) = self.create_repo(name, priority)?;
+        // SAFETY: repo is live; fp is an open FILE*.
+        let rc = unsafe { sys::repo_add_rpmmd(repo, fp.0, std::ptr::null(), 0) };
+        if rc != 0 {
+            return Err(self.error(path.display().to_string()));
+        }
+        Ok(id)
+    }
+
+    /// Loads a `.solv` file written by [`Pool::write_solv`].
+    pub fn load_solv(&mut self, name: &str, path: &Path, priority: i32) -> Result<RepoId> {
+        let fp = File::open(path)?;
+        let (id, repo) = self.create_repo(name, priority)?;
+        // SAFETY: repo is live; fp is an open FILE*.
+        let rc = unsafe { sys::repo_add_solv(repo, fp.0, 0) };
+        if rc != 0 {
+            return Err(self.error(path.display().to_string()));
+        }
+        Ok(id)
+    }
+
+    /// Writes a repo as a `.solv` file, which loads in a fraction of the
+    /// time its XML takes.
+    pub fn write_solv(&self, repo: RepoId, path: &Path) -> Result<()> {
+        let tmp = path.with_extension("solv.part");
+        let fp = File::create(&tmp)?;
+        // SAFETY: the repo belongs to this pool; fp is open for writing.
+        let rc = unsafe { sys::repo_write(self.repo_ptr(repo), fp.0) };
+        let closed = fp.close();
+        if rc != 0 || !closed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Write {
+                path: path.to_owned(),
+                message: self.last_error(),
+            });
+        }
+        std::fs::rename(&tmp, path).map_err(|e| Error::Write {
+            path: path.to_owned(),
+            message: e.to_string(),
+        })
+    }
+
+    /// Marks a repo as the installed set.
+    pub fn set_installed(&mut self, repo: RepoId) {
+        // SAFETY: both pointers are live and belong together.
+        unsafe { sys::pool_set_installed(self.p(), self.repo_ptr(repo)) };
+        self.installed = Some(repo);
+    }
+
+    /// Builds the lookup indexes. Call after loading every repo and before
+    /// [`Pool::select`] or [`Pool::install`].
+    pub fn prepare(&mut self) {
+        // SAFETY: live pool.
+        unsafe {
+            sys::pool_addfileprovides(self.p());
+            sys::pool_createwhatprovides(self.p());
+        }
+    }
+
+    fn repo_ptr(&self, repo: RepoId) -> *mut sys::Repo {
+        self.repos[repo.0].as_ptr()
+    }
+
+    /// Every package in every repo, installed ones included.
+    pub fn all(&self) -> impl Iterator<Item = SolvableId> + '_ {
+        let pool = self.p();
+        self.repos.iter().flat_map(move |repo| {
+            // SAFETY: repo is live; start..end bounds its solvables, and an
+            // id in that range whose repo pointer differs is a free slot.
+            let (start, end) = unsafe { ((*repo.as_ptr()).start, (*repo.as_ptr()).end) };
+            (start..end).filter_map(move |id| {
+                // SAFETY: id < pool.nsolvables because end <= nsolvables.
+                let s = unsafe { &*(*pool).solvables.add(id as usize) };
+                (s.repo == repo.as_ptr()).then_some(SolvableId(id))
+            })
+        })
+    }
+
+    /// Packages a user's word matches, the way dnf matches `install` args:
+    /// names, provides (`pkgconfig(xkbcommon)`, `/usr/bin/rg`), globs,
+    /// `name.arch` and `name = version`.
+    pub fn select(&self, spec: &str) -> Result<Vec<SolvableId>> {
+        let spec = cstr(spec)?;
+        let flags = sys::SELECTION_NAME
+            | sys::SELECTION_PROVIDES
+            | sys::SELECTION_GLOB
+            | sys::SELECTION_CANON
+            | sys::SELECTION_DOTARCH
+            | sys::SELECTION_REL;
+        let mut sel = Queue::new();
+        let mut pkgs = Queue::new();
+        // SAFETY: live pool, initialised queues, valid C string.
+        unsafe {
+            sys::selection_make(self.p(), &mut sel.0, spec.as_ptr(), flags as i32);
+            sys::selection_solvables(self.p(), &mut sel.0, &mut pkgs.0);
+        }
+        Ok(pkgs.ids().map(SolvableId).collect())
+    }
+
+    /// Reads a package's details.
+    pub fn package(&self, id: SolvableId) -> Package {
+        // SAFETY: ids come from this pool (all/select/solve), so they index
+        // its solvables array; lookups copy into owned Strings before any
+        // other libsolv call can reuse the temporary space.
+        unsafe {
+            let p = self.p();
+            let s = (*p).solvables.add(id.0 as usize);
+            let installed = !(*p).installed.is_null() && (*s).repo == (*p).installed;
+            let repo_name = if (*s).repo.is_null() {
+                String::new()
+            } else {
+                owned((*(*s).repo).name)
+            };
+            let mut medianr = 0;
+            Package {
+                id,
+                name: owned(sys::pool_id2str(p, (*s).name)),
+                evr: owned(sys::pool_id2str(p, (*s).evr)),
+                arch: owned(sys::pool_id2str(p, (*s).arch)),
+                repo: repo_name,
+                installed,
+                summary: owned(sys::solvable_lookup_str(s, sys::SOLVABLE_SUMMARY as i32)),
+                source: owned(sys::solvable_lookup_sourcepkg(s)),
+                license: owned(sys::solvable_lookup_str(s, sys::SOLVABLE_LICENSE as i32)),
+                url: owned(sys::solvable_lookup_str(s, sys::SOLVABLE_URL as i32)),
+                location: owned(sys::solvable_lookup_location(s, &mut medianr)),
+                download_size: sys::solvable_lookup_num(s, sys::SOLVABLE_DOWNLOADSIZE as i32, 0),
+                install_size: sys::solvable_lookup_num(s, sys::SOLVABLE_INSTALLSIZE as i32, 0),
+            }
+        }
+    }
+
+    /// The long description; separate from [`Pool::package`] because only
+    /// `nx info` wants it.
+    pub fn description(&self, id: SolvableId) -> String {
+        // SAFETY: as in package().
+        unsafe {
+            let s = (*self.p()).solvables.add(id.0 as usize);
+            owned(sys::solvable_lookup_str(
+                s,
+                sys::SOLVABLE_DESCRIPTION as i32,
+            ))
+        }
+    }
+
+    /// Compares two `[epoch:]version-release` strings the way rpm does.
+    pub fn evr_cmp(&self, a: &str, b: &str) -> std::cmp::Ordering {
+        let (Ok(a), Ok(b)) = (cstr(a), cstr(b)) else {
+            return std::cmp::Ordering::Equal;
+        };
+        // SAFETY: live pool, valid C strings.
+        let c = unsafe {
+            sys::pool_evrcmp_str(self.p(), a.as_ptr(), b.as_ptr(), sys::EVRCMP_COMPARE as i32)
+        };
+        c.cmp(&0)
+    }
+
+    /// Solves installing `specs` on top of the installed set, which stays
+    /// exactly as it is: nothing in it may be removed, upgraded or
+    /// replaced. `hidden` packages are treated as if absent from the repos.
+    /// Weak dependencies are not pulled in.
+    pub fn install(&mut self, specs: &[&str], hidden: &[SolvableId]) -> Result<Solution> {
+        let mut missing = Vec::new();
+        for spec in specs {
+            if self.select(spec)?.is_empty() {
+                missing.push(format!("no package matches {spec}"));
+            }
+        }
+        if !missing.is_empty() {
+            return Ok(Solution::Problems(missing));
+        }
+        let mut job = self.one_of_per_spec(specs)?;
+        if let Some(installed) = self.installed {
+            // SAFETY: the repo is live.
+            let repoid = unsafe { (*self.repo_ptr(installed)).repoid };
+            job.push2(
+                (sys::SOLVER_LOCK | sys::SOLVER_SOLVABLE_REPO) as i32,
+                repoid,
+            );
+        }
+        self.set_considered(hidden);
+
+        // SAFETY: live pool with whatprovides built (prepare); the solver
+        // and transaction are freed by their guards before returning.
+        unsafe {
+            let solver = Solver(sys::solver_create(self.p()));
+            sys::solver_set_flag(solver.0, sys::SOLVER_FLAG_IGNORE_RECOMMENDED as i32, 1);
+            sys::solver_set_flag(solver.0, sys::SOLVER_FLAG_ALLOW_UNINSTALL as i32, 0);
+            let nproblems = sys::solver_solve(solver.0, &mut job.0);
+            if nproblems > 0 {
+                let problems = (1..=nproblems)
+                    .map(|i| owned(sys::solver_problem2str(solver.0, i)))
+                    .collect();
+                return Ok(Solution::Problems(problems));
+            }
+            let trans = Transaction(sys::solver_create_transaction(solver.0));
+            let mut adds = Vec::new();
+            let mut changes = Vec::new();
+            let steps = &(*trans.0).steps;
+            for i in 0..steps.count {
+                let p = *steps.elements.add(i as usize);
+                let kind =
+                    sys::transaction_type(trans.0, p, sys::SOLVER_TRANSACTION_SHOW_ACTIVE as i32)
+                        as u32;
+                match kind {
+                    sys::SOLVER_TRANSACTION_INSTALL | sys::SOLVER_TRANSACTION_MULTIINSTALL => {
+                        adds.push(self.package(SolvableId(p)));
+                    }
+                    sys::SOLVER_TRANSACTION_IGNORE => {}
+                    _ => changes.push(self.package(SolvableId(p)).nevra()),
+                }
+            }
+            if !changes.is_empty() {
+                // The lock should make this impossible; refuse rather than
+                // trust it.
+                return Ok(Solution::Problems(
+                    changes
+                        .into_iter()
+                        .map(|n| format!("the solution would change {n}, which is in the image"))
+                        .collect(),
+                ));
+            }
+            adds.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(Solution::Install(adds))
+        }
+    }
+
+    /// One "one of" install job per spec, so `nx add foo` installs one of
+    /// its matches, not all of them.
+    fn one_of_per_spec(&self, specs: &[&str]) -> Result<Queue> {
+        let mut job = Queue::new();
+        for spec in specs {
+            let ids = self.select(spec)?;
+            if ids.is_empty() {
+                continue;
+            }
+            // SAFETY: live pool; the id list is a zero-terminated whatprovides
+            // entry libsolv copies.
+            let what = unsafe {
+                let mut q = Queue::new();
+                for id in &ids {
+                    q.push(id.0);
+                }
+                sys::pool_queuetowhatprovides(self.p(), &mut q.0)
+            };
+            job.push2(
+                (sys::SOLVER_INSTALL | sys::SOLVER_SOLVABLE_ONE_OF) as i32,
+                what as i32,
+            );
+        }
+        Ok(job)
+    }
+
+    /// Makes `hidden` packages invisible to the solver (pool->considered).
+    fn set_considered(&mut self, hidden: &[SolvableId]) {
+        // SAFETY: the map is allocated with libsolv's allocator so pool_free
+        // can release it; every index is < nsolvables.
+        unsafe {
+            let p = self.p();
+            if !(*p).considered.is_null() {
+                sys::map_free((*p).considered);
+                sys::solv_free((*p).considered.cast());
+                (*p).considered = std::ptr::null_mut();
+            }
+            if hidden.is_empty() {
+                return;
+            }
+            let n = (*p).nsolvables;
+            let map = sys::solv_calloc(1, std::mem::size_of::<sys::Map>()).cast::<sys::Map>();
+            sys::map_init(map, n);
+            let bytes = std::slice::from_raw_parts_mut((*map).map, (*map).size as usize);
+            bytes.fill(0xff);
+            for id in hidden {
+                let i = id.0 as usize;
+                if let Some(b) = bytes.get_mut(i >> 3) {
+                    *b &= !(1 << (i & 7));
+                }
+            }
+            (*p).considered = map;
+        }
+    }
+
+    fn last_error(&self) -> String {
+        // SAFETY: live pool; pool_errstr returns its own buffer.
+        unsafe { owned(sys::pool_errstr(self.p())) }
+    }
+
+    fn error(&self, what: String) -> Error {
+        Error::Load {
+            what,
+            message: self.last_error(),
+        }
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // SAFETY: the pool is live and frees its repos and maps with it.
+        unsafe { sys::pool_free(self.p()) };
+    }
+}
+
+/// A libsolv queue, freed on drop.
+struct Queue(sys::Queue);
+
+impl Queue {
+    fn new() -> Self {
+        let mut q = std::mem::MaybeUninit::<sys::Queue>::uninit();
+        // SAFETY: queue_init fully initialises the struct.
+        unsafe {
+            sys::queue_init(q.as_mut_ptr());
+            Self(q.assume_init())
+        }
+    }
+
+    fn push(&mut self, id: sys::Id) {
+        // SAFETY: initialised queue.
+        unsafe { sys::queue_insert(&mut self.0, self.0.count, id) };
+    }
+
+    fn push2(&mut self, a: sys::Id, b: sys::Id) {
+        // SAFETY: initialised queue.
+        unsafe { sys::queue_insert2(&mut self.0, self.0.count, a, b) };
+    }
+
+    fn ids(&self) -> impl Iterator<Item = sys::Id> + '_ {
+        // SAFETY: elements holds count initialised ids.
+        (0..self.0.count).map(|i| unsafe { *self.0.elements.add(i as usize) })
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        // SAFETY: initialised queue.
+        unsafe { sys::queue_free(&mut self.0) };
+    }
+}
+
+struct Solver(*mut sys::Solver);
+impl Drop for Solver {
+    fn drop(&mut self) {
+        // SAFETY: created by solver_create, freed once.
+        unsafe { sys::solver_free(self.0) };
+    }
+}
+
+struct Transaction(*mut sys::Transaction);
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        // SAFETY: created by solver_create_transaction, freed once.
+        unsafe { sys::transaction_free(self.0) };
+    }
+}
+
+/// A C `FILE*`, closed on drop.
+struct File(*mut sys::FILE);
+
+impl File {
+    /// Opens for reading, decompressing `.zst`, `.gz` and `.xz` on the fly.
+    fn open(path: &Path) -> Result<Self> {
+        let c = cpath(path)?;
+        // SAFETY: valid C strings.
+        let fp = unsafe { sys::solv_xfopen(c.as_ptr(), c"r".as_ptr()) };
+        if fp.is_null() {
+            return Err(Error::Open {
+                path: path.to_owned(),
+            });
+        }
+        Ok(Self(fp))
+    }
+
+    fn create(path: &Path) -> Result<Self> {
+        let c = cpath(path)?;
+        // SAFETY: valid C strings.
+        let fp = unsafe { libc::fopen(c.as_ptr(), c"w".as_ptr()) };
+        if fp.is_null() {
+            return Err(Error::Open {
+                path: path.to_owned(),
+            });
+        }
+        Ok(Self(fp))
+    }
+
+    /// Closes, reporting whether buffered writes reached the file.
+    fn close(mut self) -> bool {
+        let fp = std::mem::replace(&mut self.0, std::ptr::null_mut());
+        // SAFETY: fp is open and is not used again.
+        unsafe { libc::fclose(fp) == 0 }
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: fp is open and is not used again.
+            unsafe { libc::fclose(self.0) };
+        }
+    }
+}
+
+fn cstr(s: &str) -> Result<CString> {
+    CString::new(s).map_err(|_| Error::Nul(s.to_owned()))
+}
+
+fn cpath(p: &Path) -> Result<CString> {
+    CString::new(p.as_os_str().as_bytes()).map_err(|_| Error::Nul(p.display().to_string()))
+}
+
+/// Copies a C string libsolv returned; null is empty.
+///
+/// # Safety
+/// `s` is null or a valid NUL-terminated string.
+unsafe fn owned(s: *const std::os::raw::c_char) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    // SAFETY: per the contract above.
+    unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests;

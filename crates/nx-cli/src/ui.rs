@@ -16,8 +16,9 @@ use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
 
 pub const SYM_STEP: &str = "›";
+pub const SYM_ADDED: &str = "+";
+pub const SYM_FETCH: &str = "↓";
 pub const SYM_DONE: &str = "✓";
-#[expect(dead_code)] // first used by add (M3)
 pub const SYM_WARN: &str = "!";
 pub const SYM_ERROR: &str = "✗";
 
@@ -145,7 +146,6 @@ impl Ui {
     }
 
     /// Reports something odd that didn't stop the work.
-    #[expect(dead_code)] // first used by add (M3)
     pub fn warn(&mut self, msg: impl Display) {
         let sym = self.err.style.yellow(SYM_WARN);
         self.err.line(format_args!("{sym} {msg}"));
@@ -187,6 +187,47 @@ pub fn pad(s: &str, w: usize) -> String {
     format!("{s}{}", " ".repeat(w - n))
 }
 
+/// A byte count for people: `1.4 MiB`.
+pub fn size(n: u64) -> String {
+    const KIB: u64 = 1 << 10;
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+    match n {
+        n if n >= GIB => format!("{:.1} GiB", n as f64 / GIB as f64),
+        n if n >= MIB => format!("{:.1} MiB", n as f64 / MIB as f64),
+        n if n >= KIB => format!("{} KiB", n / KIB),
+        n => format!("{n} B"),
+    }
+}
+
+/// `plural(1, "package")` is "1 package", `plural(2, "package")` "2 packages".
+pub fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+/// Cuts plain text to `w` columns with an ellipsis.
+pub fn truncate(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(w.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// The terminal's width, from `COLUMNS`, else 100 as in nx 0.x.
+pub fn width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .filter(|&w| w > 20)
+        .unwrap_or(100)
+}
+
 /// A cloneable in-memory writer for tests.
 #[cfg(test)]
 #[derive(Clone, Default)]
@@ -226,6 +267,16 @@ mod tests {
         let s = Style { on: true };
         assert_eq!(visible_len(&pad(&s.dim("Booted"), 11)), 11);
         assert_eq!(pad("longer than this", 4), "longer than this");
+    }
+
+    #[test]
+    fn sizes_and_plurals() {
+        assert_eq!(size(512), "512 B");
+        assert_eq!(size(124 * 1024), "124 KiB");
+        assert_eq!(size(3 * 1024 * 1024 / 2), "1.5 MiB");
+        assert_eq!(plural(1, "package"), "1 package");
+        assert_eq!(plural(3, "package"), "3 packages");
+        assert_eq!(truncate("abcdef", 4), "abc…");
     }
 
     #[test]

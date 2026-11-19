@@ -12,7 +12,12 @@ const GROUPS: [&str; 3] = ["Packages", "Maintenance", "System"];
 
 /// Which group each command is listed under, in `nx help`'s order within a
 /// group. The test below fails for a command left out.
-const PLACEMENT: &[(&str, &str)] = &[("status", "System")];
+const PLACEMENT: &[(&str, &str)] = &[
+    ("add", "Packages"),
+    ("search", "Packages"),
+    ("info", "Packages"),
+    ("status", "System"),
+];
 
 pub fn group(name: &str) -> &'static str {
     PLACEMENT

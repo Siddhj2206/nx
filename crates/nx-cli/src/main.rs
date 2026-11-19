@@ -4,7 +4,11 @@
 //! every line looks like nx 0.x's: two-space indent, one symbol per kind,
 //! results on stdout, everything else on stderr.
 
+mod add;
 mod help;
+mod host;
+mod info;
+mod search;
 mod status;
 mod ui;
 
@@ -33,6 +37,25 @@ struct Cli {
 /// group comes from [`help::group`].
 #[derive(Subcommand)]
 enum Command {
+    /// add packages (for now, --dry-run only: what would be installed)
+    Add {
+        /// names, provides (pkgconfig(xkbcommon)) or files (/usr/bin/rg)
+        #[arg(value_name = "package", required = true)]
+        packages: Vec<String>,
+        /// resolve and list what would be added; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// find packages by name or summary
+    Search {
+        #[arg(value_name = "term", required = true)]
+        terms: Vec<String>,
+    },
+    /// show one package: version, repo, source, size
+    Info {
+        #[arg(value_name = "package")]
+        package: String,
+    },
     /// the image nx resolves against: booted, staged and rollback
     Status,
 }
@@ -48,6 +71,12 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let result = match command {
+        Command::Add { packages, dry_run } => host::load(&mut ui, nx_rpm::Refresh::IfStale)
+            .and_then(|mut u| add::run(&mut ui, &mut u, &packages, dry_run)),
+        Command::Search { terms } => host::load(&mut ui, nx_rpm::Refresh::IfStale)
+            .and_then(|u| search::run(&mut ui, &u, &terms)),
+        Command::Info { package } => host::load(&mut ui, nx_rpm::Refresh::IfStale)
+            .and_then(|u| info::run(&mut ui, &u, &package)),
         Command::Status => status::run(&mut ui, &RpmOstree, Path::new("/"), Path::new("/sysroot")),
     };
     match result {
