@@ -24,6 +24,15 @@ pub struct Rpm {
     pub plugs: Option<String>,
 }
 
+/// What the repos and the catalog say about a spec.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Found {
+    pub rpm: Option<Rpm>,
+    pub nix: Option<Nixpkg>,
+    /// Names close to it, when neither has it.
+    pub similar: Vec<String>,
+}
+
 /// What the nixpkgs catalog says about a spec.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Nixpkg {
@@ -87,14 +96,8 @@ pub fn host_only(spec: &str) -> bool {
 /// 7. a nixpkgs toolchain, or a package that needs allowing (unfree) or
 ///    can't build → refuse and say why;
 /// 8. nothing → refuse, with names that are close.
-pub fn decide(
-    spec: &str,
-    forced: Option<Forced>,
-    cli_tools: CliTools,
-    rpm: Option<&Rpm>,
-    nix: Option<&Nixpkg>,
-    similar: &[String],
-) -> Route {
+pub fn decide(spec: &str, forced: Option<Forced>, cli_tools: CliTools, found: &Found) -> Route {
+    let (rpm, nix, similar) = (found.rpm.as_ref(), found.nix.as_ref(), &found.similar[..]);
     if host_only(spec) {
         return Route::Host("a file, provide or repo".into());
     }
@@ -205,6 +208,14 @@ mod tests {
         }
     }
 
+    fn ask(rpm: Option<&Rpm>, nix: Option<&Nixpkg>, similar: &[String]) -> Found {
+        Found {
+            rpm: rpm.cloned(),
+            nix: nix.cloned(),
+            similar: similar.to_vec(),
+        }
+    }
+
     fn tool_route(attr: &str, reason: &str) -> Route {
         Route::Tool {
             attr: attr.into(),
@@ -220,14 +231,12 @@ mod tests {
                 "ripgrep",
                 None,
                 CliTools::Nix,
-                Some(&rpm(None)),
-                Some(&rg),
-                &[]
+                &ask(Some(&rpm(None)), Some(&rg), &[])
             ),
             tool_route("ripgrep", "a standalone tool")
         );
         assert_eq!(
-            decide("rg", None, CliTools::Nix, None, Some(&rg), &[]),
+            decide("rg", None, CliTools::Nix, &ask(None, Some(&rg), &[])),
             tool_route("ripgrep", "a standalone tool")
         );
         assert_eq!(
@@ -235,9 +244,7 @@ mod tests {
                 "ripgrep",
                 None,
                 CliTools::Fedora,
-                Some(&rpm(None)),
-                Some(&rg),
-                &[]
+                &ask(Some(&rpm(None)), Some(&rg), &[])
             ),
             Route::Host("a standalone tool; routing.cli_tools is fedora".into())
         );
@@ -247,9 +254,7 @@ mod tests {
                 "wayland-devel",
                 None,
                 CliTools::Nix,
-                Some(&devel),
-                Some(&nixpkg("wayland")),
-                &[]
+                &ask(Some(&devel), Some(&nixpkg("wayland")), &[])
             ),
             Route::Host("plugs into the system: a -devel package".into())
         );
@@ -258,9 +263,7 @@ mod tests {
                 "pkgconfig(x11)",
                 Some(Forced::Tool),
                 CliTools::Nix,
-                None,
-                None,
-                &[]
+                &ask(None, None, &[])
             ),
             Route::Host("a file, provide or repo".into())
         );
@@ -273,9 +276,7 @@ mod tests {
                 "git",
                 None,
                 CliTools::Nix,
-                Some(&image),
-                Some(&nixpkg("git")),
-                &[]
+                &ask(Some(&image), Some(&nixpkg("git")), &[])
             ),
             Route::Host("in the image".into())
         );
@@ -289,9 +290,7 @@ mod tests {
                 "jq",
                 Some(Forced::Host),
                 CliTools::Nix,
-                Some(&rpm(None)),
-                Some(&nixpkg("jq")),
-                &[]
+                &ask(Some(&rpm(None)), Some(&nixpkg("jq")), &[])
             ),
             Route::Host("--host".into())
         );
@@ -300,9 +299,7 @@ mod tests {
                 "zig",
                 Some(Forced::Tool),
                 CliTools::Nix,
-                Some(&devel),
-                Some(&nixpkg("zig")),
-                &[]
+                &ask(Some(&devel), Some(&nixpkg("zig")), &[])
             ),
             tool_route("zig", "--tool")
         );
@@ -311,9 +308,7 @@ mod tests {
                 "nope",
                 Some(Forced::Tool),
                 CliTools::Nix,
-                Some(&rpm(None)),
-                None,
-                &[]
+                &ask(Some(&rpm(None)), None, &[])
             ),
             Route::Refuse(_)
         ));
@@ -326,7 +321,7 @@ mod tests {
             ..nixpkg("ngrok")
         };
         assert_eq!(
-            decide("ngrok", None, CliTools::Nix, None, Some(&ngrok), &[]),
+            decide("ngrok", None, CliTools::Nix, &ask(None, Some(&ngrok), &[])),
             Route::Refuse(
                 "ngrok is unfree; if its license is fine with you: nx add --allow-unfree ngrok"
                     .into()
@@ -338,15 +333,13 @@ mod tests {
                 "ngrok",
                 None,
                 CliTools::Nix,
-                Some(&rpm(None)),
-                Some(&ngrok),
-                &[]
+                &ask(Some(&rpm(None)), Some(&ngrok), &[])
             ),
             Route::Host("a standalone tool nixpkgs doesn't have".into())
         );
         ngrok.allowed = true;
         assert_eq!(
-            decide("ngrok", None, CliTools::Nix, None, Some(&ngrok), &[]),
+            decide("ngrok", None, CliTools::Nix, &ask(None, Some(&ngrok), &[])),
             tool_route("ngrok", "a standalone tool; unfree, allowed")
         );
     }
@@ -362,11 +355,16 @@ mod tests {
             ..rpm(None)
         };
         assert!(matches!(
-            decide("go", None, CliTools::Nix, None, Some(&go), &[]),
+            decide("go", None, CliTools::Nix, &ask(None, Some(&go), &[])),
             Route::Refuse(m) if m.starts_with("go is a compiler")
         ));
         assert_eq!(
-            decide("go", None, CliTools::Nix, Some(&golang), Some(&go), &[]),
+            decide(
+                "go",
+                None,
+                CliTools::Nix,
+                &ask(Some(&golang), Some(&go), &[])
+            ),
             Route::Host("a compiler, linker or interpreter".into())
         );
         assert_eq!(
@@ -374,9 +372,7 @@ mod tests {
                 "go",
                 Some(Forced::Tool),
                 CliTools::Nix,
-                None,
-                Some(&go),
-                &[]
+                &ask(None, Some(&go), &[])
             ),
             tool_route("go", "--tool")
         );
@@ -389,9 +385,7 @@ mod tests {
                 "ripgrap",
                 None,
                 CliTools::Nix,
-                None,
-                None,
-                &["ripgrep".into()]
+                &ask(None, None, &["ripgrep".into()])
             ),
             Route::Refuse(
                 "no RPM or nixpkgs package is called ripgrap (did you mean ripgrep?)".into()

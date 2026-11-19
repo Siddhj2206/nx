@@ -789,6 +789,109 @@ fn removing_a_template_disables_its_enabled_instances() -> Result<()> {
 }
 
 #[test]
+fn a_template_is_preset_by_its_file_name() -> Result<()> {
+    let tmp = Tmp::new("template-preset");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, false).map_err(io)?;
+    with_service(&l, 2, "svc", "svc-1-1.fc45.x86_64", "svc@.service").map_err(io)?;
+    let path = l.state.root().join("generations/2/activation.toml");
+    let text = std::fs::read_to_string(&path).map_err(io)?;
+    std::fs::write(&path, text.replace("svc@.service", "svc@*.service")).map_err(io)?;
+    let run = Scripted::new(|_| None);
+    activate(&l, &run, 2, None, &only_uid())?;
+    let calls = run.calls();
+    // `svc@*.service` would enable an instance named `*`.
+    assert!(
+        calls.iter().any(|c| c == "systemctl preset svc@.service"),
+        "{calls:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_install_section_in_a_drop_in_counts() -> Result<()> {
+    let tmp = Tmp::new("drop-in");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, false).map_err(io)?;
+    with_service(&l, 2, "svc", "svc-1-1.fc45.x86_64", "svc.service").map_err(io)?;
+    let units = l
+        .state
+        .root()
+        .join("generations/2/sysext/usr/lib/systemd/system");
+    std::fs::write(
+        units.join("svc.service"),
+        "[Service]\nExecStart=/usr/bin/tool\n",
+    )
+    .map_err(io)?;
+    std::fs::create_dir_all(units.join("svc.service.d")).map_err(io)?;
+    std::fs::write(
+        units.join("svc.service.d/install.conf"),
+        "[Install]\nWantedBy=multi-user.target\n",
+    )
+    .map_err(io)?;
+    let run = Scripted::new(|_| None);
+    activate(&l, &run, 2, None, &only_uid())?;
+    let calls = run.calls();
+    assert!(
+        index(&calls, "systemctl preset svc.service").is_some(),
+        "{calls:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn removing_a_user_template_disables_its_enabled_instances() -> Result<()> {
+    let tmp = Tmp::new("user-template");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, false).map_err(io)?;
+    with_service(&l, 1, "svc", "svc-1-1.fc45.x86_64", "svc@.service").map_err(io)?;
+    let generation = l.state.root().join("generations/1");
+    let user = generation.join("sysext/usr/lib/systemd/user");
+    std::fs::create_dir_all(&user).map_err(io)?;
+    std::fs::rename(
+        generation.join("sysext/usr/lib/systemd/system/svc@.service"),
+        user.join("svc@.service"),
+    )
+    .map_err(io)?;
+    let path = generation.join("activation.toml");
+    let text = std::fs::read_to_string(&path).map_err(io)?;
+    let text = text
+        .replace("scope = \"system\"", "scope = \"user\"")
+        .replace(
+            "[[package.remove]]\nscope = \"user\"\nname = \"svc@.service\"",
+            "[[package.remove]]\nscope = \"user\"\nname = \"svc@*.service\"",
+        );
+    std::fs::write(&path, text).map_err(io)?;
+    let wants = l.root.join("etc/systemd/user/default.target.wants");
+    std::fs::create_dir_all(&wants).map_err(io)?;
+    std::os::unix::fs::symlink(
+        "/usr/lib/systemd/user/svc@.service",
+        wants.join("svc@a.service"),
+    )
+    .map_err(io)?;
+    activate(&l, &Scripted::new(|_| None), 1, None, &only_uid())?;
+    let run = Scripted::new(|_| None);
+    activate(&l, &run, 2, None, &only_uid())?;
+    let calls = run.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "systemctl --global disable --no-warn svc@a.service"),
+        "{calls:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_boot_that_did_not_merge_falls_back_to_prefix() -> Result<()> {
     let tmp = Tmp::new("settle");
     let l = layout(&tmp, false).map_err(|e| Error::Io {

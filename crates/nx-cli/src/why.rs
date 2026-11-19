@@ -52,26 +52,17 @@ pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
     }
     let opts = machine.options(Refresh::IfMissing)?;
     let image = Universe::load_image(&opts).context("reading the image's packages")?;
-    let found = if what.contains('/') {
-        image.image_owners(what)?.into_iter().next()
+    let mut found = if what.contains('/') {
+        None
     } else {
-        match image.info(what)? {
-            Some(p) => Some(p),
-            None => {
-                let mut owner = None;
-                for dir in nx_rpm::COMMAND_DIRS {
-                    owner = image
-                        .image_owners(&format!("/{dir}/{what}"))?
-                        .into_iter()
-                        .next();
-                    if owner.is_some() {
-                        break;
-                    }
-                }
-                owner
-            }
-        }
+        image.info(what)?
     };
+    for path in paths(what) {
+        if found.is_some() {
+            break;
+        }
+        found = image.image_owners(&path)?.into_iter().next();
+    }
     match found {
         Some(p) => {
             render(&mut ui.out, what, &Owner::Image(p));
@@ -81,18 +72,28 @@ pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
     }
 }
 
-/// The host-tier package that provides `what`: a package name, a path in
-/// the extension, or a command ([`nx_rpm::COMMAND_DIRS`]).
-fn in_generation(state: &State, g: &Generation, what: &str) -> Result<Option<Owner>> {
-    let found = if what.contains('/') {
-        owner_of_path(state, g, what)
+/// The paths `what` names: itself if it is a path, else the command in
+/// each of [`nx_rpm::COMMAND_DIRS`].
+fn paths(what: &str) -> Vec<String> {
+    if what.contains('/') {
+        vec![what.to_owned()]
     } else {
-        g.lock.package(what).cloned().or_else(|| {
-            nx_rpm::COMMAND_DIRS
-                .iter()
-                .find_map(|dir| owner_of_path(state, g, &format!("/{dir}/{what}")))
-        })
-    };
+        nx_rpm::COMMAND_DIRS
+            .iter()
+            .map(|dir| format!("/{dir}/{what}"))
+            .collect()
+    }
+}
+
+/// The host-tier package that provides `what`: a package name, a path in
+/// the extension, or a command.
+fn in_generation(state: &State, g: &Generation, what: &str) -> Result<Option<Owner>> {
+    let found = g
+        .lock
+        .package(what)
+        .filter(|_| !what.contains('/'))
+        .cloned()
+        .or_else(|| paths(what).iter().find_map(|p| owner_of_path(state, g, p)));
     let Some(package) = found else {
         return Ok(None);
     };
@@ -376,6 +377,14 @@ mod tests {
                  \n"
             )
         );
+    }
+
+    #[test]
+    fn a_name_is_looked_for_as_a_command() {
+        assert_eq!(paths("/usr/include/ffi.h"), ["/usr/include/ffi.h"]);
+        let rg = paths("rg");
+        assert!(rg.contains(&"/usr/bin/rg".to_owned()), "{rg:?}");
+        assert!(rg.iter().all(|p| p.ends_with("/rg")), "{rg:?}");
     }
 
     #[test]

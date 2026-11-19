@@ -95,15 +95,23 @@ pub struct GcPlan {
     pub drop: Vec<u32>,
 }
 
-/// Generations to keep: the current one, the newest for each deployed
-/// digest (booted, staged and rollback), and the `keep` newest (the
-/// manifest's `gc.keep`). Those a newer nx wrote are never dropped.
+/// Generations to keep: the current one and its parent (where `nx
+/// rollback` goes), the newest for each deployed digest (booted, staged
+/// and rollback), and the `keep` newest (the manifest's `gc.keep`). Those a
+/// newer nx wrote are never dropped.
 pub fn gc_plan(state: &State, deployed: &[String], keep_newest: usize) -> Result<GcPlan> {
     let all = locks(state)?;
     let mut keep: BTreeSet<u32> = state.generations()?.into_iter().collect();
     let readable: HashSet<u32> = all.iter().map(|(n, _)| *n).collect();
     keep.retain(|n| !readable.contains(n));
-    keep.extend(state.current_number()?);
+    if let Some(current) = state.current_number()? {
+        keep.insert(current);
+        keep.extend(
+            all.iter()
+                .find(|(n, _)| *n == current)
+                .and_then(|(_, lock)| lock.parent),
+        );
+    }
     for digest in deployed {
         keep.extend(
             all.iter()
@@ -235,6 +243,24 @@ mod tests {
         let plan = gc_plan(&state, &[], 5)?;
         assert!(plan.keep.contains(&1));
         assert!(!plan.drop.contains(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn gc_keeps_where_rollback_goes() -> Result<()> {
+        let tmp = TempDir::new("select-parent");
+        let state = State::new(&tmp.0);
+        for n in 1..=3 {
+            generation(&state, n, Some("sha256:x"), &[])?;
+        }
+        let path = state.generations_dir().join("3").join("lock.toml");
+        let mut lock = read_lock(&state, 3)?;
+        lock.parent = Some(1);
+        std::fs::write(&path, lock.to_toml()?).map_err(|source| Error::Write { path, source })?;
+        state.set_current(3)?;
+        let plan = gc_plan(&state, &["sha256:x".into()], 0)?;
+        assert_eq!(plan.keep, vec![1, 3]);
+        assert_eq!(plan.drop, vec![2]);
         Ok(())
     }
 

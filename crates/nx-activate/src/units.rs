@@ -140,24 +140,51 @@ fn shipped(ext: &Path, scope: Scope, want: &[UnitRef], s: &mut Services) -> Vec<
     out
 }
 
-/// The units among `names` whose file has an `[Install]` section: the
-/// ones `systemctl preset` can enable. An alias is read through to its
-/// unit in the same directory.
+/// The units among `names` with an `[Install]` section, in their file or a
+/// drop-in: the ones `systemctl preset` can enable, by file name. A
+/// template goes as `foo@.service` (its preset line names the instances):
+/// `foo@*.service` would enable an instance named `*`. An alias is read
+/// through to its unit within the extension; nothing else is followed.
 fn installable(ext: &Path, scope: Scope, names: Vec<String>) -> Vec<String> {
     let dir = ext.join(unit_dir(scope));
-    names
-        .into_iter()
-        .filter(|n| {
-            let mut path = dir.join(n.replace("@*", "@"));
-            if let Ok(target) = std::fs::read_link(&path)
-                && let Some(name) = target.file_name()
-            {
-                path = dir.join(name);
-            }
-            std::fs::read_to_string(&path)
+    // `[ Install ]` is not a section to systemd either.
+    let has_install = |p: &Path| {
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
+            && std::fs::read_to_string(p)
                 .is_ok_and(|text| text.lines().any(|l| l.trim() == "[Install]"))
-        })
-        .collect()
+    };
+    let drop_ins = |unit: &str| {
+        std::fs::read_dir(dir.join(format!("{unit}.d")))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".conf") && has_install(&e.path()))
+    };
+    let mut out: Vec<String> = Vec::new();
+    for file in names.into_iter().map(|n| n.replace("@*", "@")) {
+        let found = drop_ins(&file)
+            || match std::fs::read_link(dir.join(&file)) {
+                Err(_) => has_install(&dir.join(&file)),
+                Ok(target) => {
+                    let inside = !target
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir));
+                    let at = match target.strip_prefix("/") {
+                        Ok(rel) => ext.join(rel),
+                        Err(_) => dir.join(&target),
+                    };
+                    inside
+                        && (has_install(&at)
+                            || target
+                                .file_name()
+                                .is_some_and(|n| drop_ins(&n.to_string_lossy())))
+                }
+            };
+        if found && !out.contains(&file) {
+            out.push(file);
+        }
+    }
+    out
 }
 
 /// The uids with a running user manager.
@@ -187,11 +214,12 @@ fn logged_in(runner: &dyn Runner) -> Vec<String> {
         .collect()
 }
 
-/// The instances behind a `foo@*.service` pattern: those running now and
-/// those enabled by a link in `/etc/systemd/system/*.wants` (`systemctl
-/// disable` takes no glob, and a stop alone leaves the links dangling).
-/// A name without a glob stands for itself.
-fn expand(runner: &dyn Runner, root: &Path, name: &str) -> Vec<String> {
+/// The instances behind a `foo@*.service` pattern: for the system, those
+/// running now, and for either scope those enabled by a link in
+/// `/etc/systemd/<scope>/*.wants` (`systemctl disable` takes no glob, and
+/// a stop alone leaves the links dangling). A name without a glob stands
+/// for itself.
+fn expand(runner: &dyn Runner, root: &Path, scope: Scope, name: &str) -> Vec<String> {
     let Some((head, _)) = name.split_once('*') else {
         return vec![name.to_owned()];
     };
@@ -199,11 +227,13 @@ fn expand(runner: &dyn Runner, root: &Path, name: &str) -> Vec<String> {
     let matches =
         |n: &str| n.starts_with(head) && n.ends_with(tail) && valid_unit(n) && !n.contains('*');
     let mut found: Vec<String> = Vec::new();
-    if let Ok(out) = sh(
-        runner,
-        "systemctl",
-        &["list-units", name, "--plain", "--no-legend", "--no-pager"],
-    ) {
+    if scope == Scope::System
+        && let Ok(out) = sh(
+            runner,
+            "systemctl",
+            &["list-units", name, "--plain", "--no-legend", "--no-pager"],
+        )
+    {
         found.extend(
             out.stdout
                 .lines()
@@ -212,7 +242,11 @@ fn expand(runner: &dyn Runner, root: &Path, name: &str) -> Vec<String> {
                 .map(str::to_owned),
         );
     }
-    if let Ok(dirs) = std::fs::read_dir(root.join("etc/systemd/system")) {
+    let links = match scope {
+        Scope::System => "etc/systemd/system",
+        Scope::User => "etc/systemd/user",
+    };
+    if let Ok(dirs) = std::fs::read_dir(root.join(links)) {
         for dir in dirs.flatten() {
             let dir_name = dir.file_name().to_string_lossy().into_owned();
             if !dir_name.ends_with(".wants") && !dir_name.ends_with(".requires") {
@@ -249,7 +283,7 @@ pub(crate) fn stop(
         let _ = sh(runner, "systemctl", &stop_args);
         let mut names: Vec<String> = Vec::new();
         for n in &system {
-            names.extend(expand(runner, root, n));
+            names.extend(expand(runner, root, Scope::System, n));
         }
         if !names.is_empty() {
             let mut args = vec!["--no-reload", "disable", "--now", "--no-warn"];
@@ -262,21 +296,28 @@ pub(crate) fn stop(
     }
     let user = shipped(old_ext, Scope::User, &t.remove, s);
     if !user.is_empty() {
-        let mut args = vec!["--global", "disable", "--no-warn"];
-        args.extend(user.iter().map(String::as_str));
-        run(runner, "systemctl", &args, s);
+        let mut names: Vec<String> = Vec::new();
+        for n in &user {
+            names.extend(expand(runner, root, Scope::User, n));
+        }
+        if !names.is_empty() {
+            let mut args = vec!["--global", "disable", "--no-warn"];
+            args.extend(names.iter().map(String::as_str));
+            run(runner, "systemctl", &args, s);
+        }
         for uid in logged_in(runner) {
             let machine = format!("{uid}@");
-            let mut args = vec![
-                "--user",
-                "-M",
-                machine.as_str(),
-                "disable",
-                "--now",
-                "--no-warn",
-            ];
+            let user_args = ["--user", "-M", machine.as_str()];
+            let mut args = user_args.to_vec();
+            args.extend(["stop", "--no-block"]);
             args.extend(user.iter().map(String::as_str));
             let _ = sh(runner, "systemctl", &args);
+            if !names.is_empty() {
+                let mut args = user_args.to_vec();
+                args.extend(["disable", "--no-warn"]);
+                args.extend(names.iter().map(String::as_str));
+                let _ = sh(runner, "systemctl", &args);
+            }
         }
         s.events
             .push(format!("disabled {} for every user", user.join(", ")));

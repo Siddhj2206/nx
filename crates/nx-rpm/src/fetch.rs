@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use nx_http::ureq;
 use sha2::{Digest, Sha256};
 
 use crate::repo::Repo;
@@ -22,48 +21,25 @@ pub trait Http: Sync {
 }
 
 /// HTTP over ureq, with nx's agent and retry policy ([`nx_http`]).
-pub struct Ureq(ureq::Agent);
+#[derive(Default)]
+pub struct Ureq(nx_http::Client);
 
 impl Ureq {
     pub fn new() -> Self {
-        Self(nx_http::agent(true))
-    }
-
-    fn get_once(&self, url: &str) -> Result<Vec<u8>, ureq::Error> {
-        self.0
-            .get(url)
-            .call()?
-            .body_mut()
-            .with_config()
-            .limit(1 << 30)
-            .read_to_vec()
-    }
-}
-
-impl Default for Ureq {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 
 impl Http for Ureq {
     fn get(&self, url: &str) -> Result<Vec<u8>> {
-        let mut attempt = 1;
-        loop {
-            match self.get_once(url) {
-                Ok(body) => return Ok(body),
-                Err(e) if attempt < nx_http::ATTEMPTS && nx_http::transient(&e) => {
-                    nx_http::back_off(attempt);
-                    attempt += 1;
-                }
-                Err(e) => {
-                    return Err(Error::Fetch {
-                        url: url.to_owned(),
-                        reason: e.to_string(),
-                    });
-                }
-            }
-        }
+        self.0
+            .get(url, |mut r| {
+                r.body_mut().with_config().limit(1 << 30).read_to_vec()
+            })
+            .map_err(|e| Error::Fetch {
+                url: url.to_owned(),
+                reason: e.to_string(),
+            })
     }
 }
 

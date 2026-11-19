@@ -1,8 +1,8 @@
 //! `nx gc`: removes generations nothing needs and the store entries only
-//! they used. Kept: the current generation, the newest for each deployed
-//! image (booted, staged and rollback: design invariant 5) and the
-//! manifest's `gc.keep` newest (5 by default), so `nx rollback` has
-//! somewhere to go. Then `nix store gc`: a
+//! they used. Kept: the current generation and its parent, where `nx
+//! rollback` goes, the newest for each deployed image (booted, staged and
+//! rollback: design invariant 5) and the manifest's `gc.keep` newest (5 by
+//! default). Then `nix store gc`: a
 //! removed generation's GC roots went with it, so its Nix paths go too,
 //! after the kept generations that lack roots (one `nx select` made at
 //! boot, before the daemon ran) get theirs.

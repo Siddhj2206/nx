@@ -23,9 +23,13 @@ add)
 	bare rg --version | head -1
 	bare runuser -u tester -- rg --version >/dev/null || fail "rg does not run for tester"
 	[[ $(as tester "command -v rg") == "$bin/rg" ]] || fail "rg is not on a login shell's PATH"
-	root=$(readlink /var/lib/nx/current/gcroots/root) || fail "the generation has no GC root"
-	[[ $root == /nix/store/*ripgrep* ]] || fail "the GC root points at $root"
-	link="$(realpath /var/lib/nx/current)/gcroots/root"
+	# One root per tool package (root, root-1, ...); another tool may come
+	# first in the manifest.
+	link=""
+	for r in /var/lib/nx/current/gcroots/root*; do
+		[[ $(readlink "$r") == /nix/store/*ripgrep* ]] && link="$(realpath /var/lib/nx/current)/gcroots/${r##*/}"
+	done
+	[[ -n $link ]] || fail "no GC root points at ripgrep: $(ls -l /var/lib/nx/current/gcroots)"
 	found=""
 	for auto in /nix/var/nix/gcroots/auto/*; do
 		[[ $(readlink "$auto") == "$link" ]] && found=$auto

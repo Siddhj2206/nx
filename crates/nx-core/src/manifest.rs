@@ -99,9 +99,12 @@ pub struct CacheEntry {
 impl CacheEntry {
     /// Safe to write into the Nix daemon's configuration: an https URL
     /// and a `name:key`, neither with whitespace, so nothing a client wrote
-    /// can add a line of its own. `nx cache add` and nxd both check it.
+    /// can add a line of its own, nor `#`, which starts a comment there and
+    /// would drop the rest of the line. `nx cache add` and nxd both check it.
     pub fn acceptable(&self) -> bool {
         Https::parse(&self.url).is_some()
+            && !self.url.contains('#')
+            && !self.key.contains('#')
             && plain(&self.key)
             && self
                 .key
@@ -439,6 +442,9 @@ priority = 50
         };
         assert!(cache("https://x.org", "x.org-1:abc=").acceptable());
         assert!(!cache("https://x.org", "nokey").acceptable());
+        assert!(cache("https://x.org?priority=40", "x:y").acceptable());
+        assert!(!cache("https://x.org/#a", "x:y").acceptable());
+        assert!(!cache("https://x.org", "x:y#z").acceptable());
         assert!(!cache("https://x.org\ntrusted-users = *", "x:y").acceptable());
     }
 }

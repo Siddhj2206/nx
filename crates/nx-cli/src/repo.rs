@@ -68,6 +68,13 @@ pub fn add(
     let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
         for f in &fetched {
             let name = &f.entry.name;
+            if let Some(r) = same_id(m, name) {
+                bail!(
+                    "repo {name} would share its id with {}; nx repo remove {} first",
+                    r.name,
+                    r.name
+                );
+            }
             if let Some(r) = m.repo(name)
                 && (r.baseurl != f.entry.baseurl || r.metalink != f.entry.metalink)
             {
@@ -131,6 +138,15 @@ pub fn add(
         built.generation.number
     ));
     Ok(())
+}
+
+/// Another added repo with `name`'s id: `copr:a/b` and `copr:a:b` would
+/// share the pool's repo, the cache and the pinned key.
+fn same_id<'a>(m: &'a Manifest, name: &str) -> Option<&'a RepoEntry> {
+    let id = id_of(name);
+    m.repos
+        .iter()
+        .find(|r| r.name != name && id_of(&r.name) == id)
 }
 
 /// Key files written for a change, and what they replaced, so a change
@@ -373,6 +389,27 @@ mod tests {
             Some("https://packages.microsoft.com/keys/microsoft.asc")
         );
         Ok(())
+    }
+
+    #[test]
+    fn two_names_for_one_id_are_refused() {
+        let entry = |name: &str| RepoEntry {
+            name: name.into(),
+            baseurl: None,
+            metalink: None,
+            gpgkey: None,
+            priority: None,
+        };
+        let m = Manifest {
+            repos: vec![entry("copr:a/b")],
+            ..Manifest::default()
+        };
+        assert_eq!(
+            same_id(&m, "copr:a:b").map(|r| r.name.as_str()),
+            Some("copr:a/b")
+        );
+        assert!(same_id(&m, "copr:a/b").is_none(), "the same repo again");
+        assert!(same_id(&m, "copr:a/c").is_none());
     }
 
     #[test]

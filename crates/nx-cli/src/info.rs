@@ -7,7 +7,7 @@ use nx_nix::Catalog;
 use nx_nix::catalog::Package as Nixpkg;
 use nx_rpm::{Package, Universe};
 
-use crate::route::{self, Route, Rpm};
+use crate::route::{self, Found, Route, Rpm};
 use crate::ui::{self, Stream, Ui};
 
 pub fn run(
@@ -22,21 +22,17 @@ pub fn run(
         .filter(|_| !route::host_only(spec))
         .and_then(|c| c.find(spec));
     let toolchains = route::toolchains(&manifest.routing);
-    let route = route::decide(
-        spec,
-        None,
-        manifest.routing.cli_tools,
-        rpm.as_ref()
-            .map(|p| Rpm {
-                name: p.name.clone(),
-                installed: p.installed,
-                plugs: universe.plugs_in(p, &toolchains),
-            })
-            .as_ref(),
-        nix.map(|p| route::Nixpkg::new(p, manifest.tool.unfree.contains(&p.pname), &toolchains))
-            .as_ref(),
-        &[],
-    );
+    let found = Found {
+        rpm: rpm.as_ref().map(|p| Rpm {
+            name: p.name.clone(),
+            installed: p.installed,
+            plugs: universe.plugs_in(p, &toolchains),
+        }),
+        nix: nix
+            .map(|p| route::Nixpkg::new(p, manifest.tool.unfree.contains(&p.pname), &toolchains)),
+        similar: Vec::new(),
+    };
+    let route = route::decide(spec, None, manifest.routing.cli_tools, &found);
     let release = catalog.map(|c| c.release.clone()).unwrap_or_default();
     match (route, rpm, nix) {
         (Route::Tool { reason, .. }, _, Some(n)) => {

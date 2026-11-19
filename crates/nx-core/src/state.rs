@@ -493,7 +493,12 @@ pub(crate) fn discard(dir: &Path) -> Result<()> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let trash = dir.with_file_name(format!(".trash-{name}-{}", std::process::id()));
+            // A name nothing has: a rename onto an empty directory would
+            // replace it, onto a full one fail.
+            let trash = (0u32..)
+                .map(|i| dir.with_file_name(format!(".trash-{name}-{}-{i}", std::process::id())))
+                .find(|p| std::fs::symlink_metadata(p).is_err())
+                .unwrap_or_else(|| dir.with_file_name(format!(".trash-{name}")));
             rename(dir, &trash)
         }
         other => other,

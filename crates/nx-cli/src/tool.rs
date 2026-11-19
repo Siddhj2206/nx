@@ -470,23 +470,33 @@ pub fn check(
     // overridden: then it is added without them, since what comes first on
     // PATH would run anyway.
     for attr in fresh {
-        if tool.package(attr).is_none() {
+        let Some(package) = tool.package(attr) else {
             continue;
-        }
+        };
         let hidden: Vec<&str> = exposure
             .hidden
             .iter()
             .filter(|(_, a, _)| a == attr)
             .map(|(n, _, _)| n.as_str())
             .collect();
-        if hidden.is_empty() {
-            continue;
-        }
         let owned: Vec<&str> = hidden
             .iter()
             .copied()
             .filter(|n| !overrides.iter().any(|o| o == n))
             .collect();
+        // The tool tier exposes commands and nothing else. One the image
+        // has all of, overridden, still counts: it is exposed once the
+        // image drops them.
+        let lost = exposure.clashes.iter().any(|(_, _, r)| r == attr);
+        if package.bins.is_empty() && hidden.is_empty() && !lost {
+            problems.push(format!(
+                "{attr} has no commands, and the tool tier exposes only commands"
+            ));
+            continue;
+        }
+        if hidden.is_empty() {
+            continue;
+        }
         if owned.is_empty() {
             ui.warn(format_args!(
                 "{attr}: {} not exposed; the image or the host tier has {}, as you allowed",
@@ -805,6 +815,21 @@ mod tests {
         let e = expose(&mut tool, &image, &[], &only_git);
         assert!(check(&mut ui, &tool, &e, &["git".into()], None, &[]).is_err());
         assert!(check(&mut ui, &tool, &e, &["git".into()], None, &["git".into()]).is_ok());
+        // Nothing to expose at all.
+        let mut tool = LockedTool {
+            packages: vec![package("requests", &["/nix/store/e-requests"])],
+            ..LockedTool::default()
+        };
+        let e = expose(&mut tool, &image, &[], &|out: &str| bins(&[], out));
+        let err = check(&mut ui, &tool, &e, &["requests".into()], None, &[])
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            err,
+            "requests has no commands, and the tool tier exposes only commands"
+        );
+        assert!(check(&mut ui, &tool, &e, &[], None, &[]).is_ok());
     }
 
     #[test]

@@ -17,6 +17,10 @@ setfacl -R -m g:wheel:rwX,d:g:wheel:rwX /var/lib/nx
 as tester "nx add --host syncthing"
 [[ -x /usr/bin/syncthing ]] || fail "syncthing was not installed"
 systemctl cat syncthing@.service >/dev/null || fail "syncthing@.service is not visible"
+# The preset names the template; `syncthing@*.service` would enable an
+# instance called `*`.
+compgen -G '/etc/systemd/system/*.wants/syncthing@\\x2a.service' >/dev/null &&
+	fail "the preset enabled an instance named *"
 systemctl start syncthing@tester || fail "the instance would not start"
 sleep 2
 systemctl is-active --quiet syncthing@tester || fail "the instance is not running"

@@ -10,7 +10,7 @@ use nx_rpm::{Package, Refresh};
 
 use crate::apply::Session;
 use crate::host::Machine;
-use crate::route::{self, Forced, Nixpkg, Route, Rpm};
+use crate::route::{self, Forced, Found, Nixpkg, Route, Rpm};
 use crate::tool::{self, Tier};
 use crate::ui::{self, Stream, Ui};
 
@@ -77,38 +77,30 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         if manifest.has(spec) {
             continue;
         }
-        let rpm = if route::host_only(spec) {
-            None
-        } else {
-            session.universe.info(spec)?.map(|p| Rpm {
+        let mut found = Found::default();
+        if !route::host_only(spec) {
+            found.rpm = session.universe.info(spec)?.map(|p| Rpm {
                 plugs: session.universe.plugs_in(&p, &toolchains),
                 name: p.name,
                 installed: p.installed,
-            })
-        };
-        let (mut nix, mut similar) = (None, Vec::new());
+            });
+        }
         if use_tool && !route::host_only(spec) {
             let t = match tier.as_mut() {
                 Some(t) => t,
                 None => tier.insert(Tier::open(ui, session.tool.as_ref(), false)?),
             };
             let catalog = t.catalog(ui)?;
-            nix = catalog.find(spec).map(|p| {
+            found.nix = catalog.find(spec).map(|p| {
                 let allowed = opts.allow_unfree || manifest.tool.unfree.contains(&p.pname);
                 Nixpkg::new(p, allowed, &toolchains)
             });
-            if rpm.is_none() && nix.is_none() {
-                similar = catalog.similar(spec, 3);
+            if found.rpm.is_none() && found.nix.is_none() {
+                found.similar = catalog.similar(spec, 3);
             }
         }
-        let route = route::decide(
-            spec,
-            opts.forced,
-            manifest.routing.cli_tools,
-            rpm.as_ref(),
-            nix.as_ref(),
-            &similar,
-        );
+        let route = route::decide(spec, opts.forced, manifest.routing.cli_tools, &found);
+        let nix = found.nix;
         match route {
             // Without the catalog, the solver has the last word on a name.
             Route::Refuse(_) if !use_tool => {
