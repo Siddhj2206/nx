@@ -105,10 +105,11 @@ pub struct Built {
 /// Where the extension declares which OS it extends.
 pub const EXTENSION_RELEASE: &str = "usr/lib/extension-release.d/extension-release.nx";
 
-/// Builds generation N+1 from packages already in the store, checks what
-/// it wrote, and points `current` at it. Refuses, leaving `current` alone,
-/// when two packages disagree about a path or a package would shadow a
-/// file of the image (design invariant 1).
+/// Builds generation N+1 from packages already in the store and checks
+/// what it wrote. It does not activate it: `current` stays where it was
+/// until [`State::set_current`] (nxd, or the CLI when there is no nxd).
+/// Refuses when two packages disagree about a path or a package would
+/// shadow a file of the image (design invariant 1).
 pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     let number = state.generations()?.last().map_or(1, |n| n + 1);
     let dir = state.generations_dir();
@@ -158,26 +159,10 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
     let final_dir = dir.join(number.to_string());
     state::rename(&tmp, &final_dir)?;
     state::sync_dir(&dir)?;
-    swap_current(state, number)?;
     Ok(Built {
         generation: Generation::read(state, number)?,
         outside_usr,
     })
-}
-
-/// Points `current` at generation `number` with one rename.
-fn swap_current(state: &State, number: u32) -> Result<()> {
-    let link = state.current_link();
-    let tmp = link.with_file_name(".current.part");
-    let _ = std::fs::remove_file(&tmp);
-    std::os::unix::fs::symlink(format!("generations/{number}"), &tmp).map_err(|source| {
-        Error::Write {
-            path: tmp.clone(),
-            source,
-        }
-    })?;
-    state::rename(&tmp, &link)?;
-    state::sync_dir(state.root())
 }
 
 /// One path in the extension and where it comes from.
@@ -541,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn assembles_and_points_current_at_it() -> Result<()> {
+    fn assembles_without_activating() -> Result<()> {
         let tmp = TempDir::new("gen");
         let (state, lock) = setup(
             &tmp,
@@ -581,11 +566,13 @@ mod tests {
             Some("ID=fedora\nVERSION_ID=45\n".into())
         );
         assert_eq!(g.lock, lock);
+        assert_eq!(state.current_number()?, None);
+        state.set_current(1)?;
         assert_eq!(Generation::current(&state)?.map(|g| g.number), Some(1));
 
         let again = build(&state, &guard, &spec(&manifest, &lock, &root))?;
         assert_eq!(again.generation.number, 2);
-        assert_eq!(state.current_number()?, Some(2));
+        assert_eq!(state.current_number()?, Some(1));
         assert_eq!(state.generations()?, [1, 2]);
         Ok(())
     }
@@ -643,6 +630,7 @@ mod tests {
         let guard = state.lock()?;
         build(&state, &guard, &spec(&manifest, &lock, &root))?;
         build(&state, &guard, &spec(&manifest, &lock, &root))?;
+        state.set_current(2)?;
         // A newer nx wrote generation 2.
         let path = state.generations_dir().join("2/lock.toml");
         let text = read(&path)?.replace("version = 1", "version = 99");

@@ -1,6 +1,6 @@
 //! `nx add`: resolves the manifest plus the new packages, downloads and
-//! unpacks what the store lacks, and builds the next generation. Nothing
-//! is activated yet: that is nxd's job.
+//! unpacks what the store lacks, builds the next generation and makes it
+//! live through nxd.
 
 use std::time::Instant;
 
@@ -59,10 +59,6 @@ pub fn run(
         built.generation.number,
         started.elapsed().as_secs_f64(),
     );
-    ui.warn(format_args!(
-        "generation {} is built but not active: nx cannot activate generations yet",
-        built.generation.number
-    ));
     Ok(())
 }
 

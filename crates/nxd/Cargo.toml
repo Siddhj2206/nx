@@ -1,0 +1,18 @@
+[package]
+name = "nxd"
+description = "nx's root daemon: makes generations live on behalf of the unprivileged nx"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+nx-activate = { version = "1.0.0-alpha.0", path = "../nx-activate" }
+nx-core = { version = "1.0.0-alpha.0", path = "../nx-core" }
+nx-proto = { version = "1.0.0-alpha.0", path = "../nx-proto" }
+rustix = { version = "1", features = ["fs", "net"] }

@@ -160,6 +160,27 @@ impl Ui {
     }
 }
 
+/// `2026-11-19 07:53` (UTC) for seconds since the epoch.
+pub fn date(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Howard Hinnant's days-to-civil.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        rem / 3_600,
+        rem % 3_600 / 60
+    )
+}
+
 /// A string's width on screen, ignoring colour codes. Every char counts as
 /// one column.
 pub fn visible_len(s: &str) -> usize {
@@ -299,5 +320,12 @@ mod tests {
         let mut ui = Ui::plain(SharedBuf::default(), err.clone());
         ui.error("first\nsecond");
         assert_eq!(err.text(), "  ✗ first\n    second\n");
+    }
+
+    #[test]
+    fn formats_dates_in_utc() {
+        assert_eq!(date(0), "1970-01-01 00:00");
+        assert_eq!(date(951_782_400), "2000-02-29 00:00");
+        assert_eq!(date(1_795_076_040), "2026-11-19 08:14");
     }
 }

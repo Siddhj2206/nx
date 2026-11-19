@@ -70,6 +70,13 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   (`deployment.rs`), os-release (`os_release.rs`); and nx's state: the
   state directory, its lock and the store (`state.rs`), generations
   (`generation.rs`), `manifest.toml` and `lock.toml`.
+- `crates/nx-proto`: the CLI ↔ nxd protocol (one JSON line each way over
+  `/run/nxd.sock`); `crates/nx-activate`: what nxd runs as root (validate a
+  generation, label it, the sysext and prefix backends, behind `Layout` and
+  `Runner` so tests use a temp tree and a fake `systemd-sysext`);
+  `crates/nxd`: the daemon (authorization, one request per process).
+  `systemd/` and `polkit/` hold the units, sysusers, tmpfiles and polkit
+  files an image installs; `dev/vm-install` puts them in the test VM.
 - `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
   verify, unpack, assemble), shared by every command that changes the
   manifest. `host.rs` holds `Machine`, the system as one value (root,
@@ -107,12 +114,29 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   `-devel` requires its own newer library, which the locked image refuses.
 - libsolv selections honour `pool->considered`, so `Pool` clears it before
   selecting and on `prepare`; a stale map hides packages added since (Koji).
-- Changing state needs write access to `/var/lib/nx` until nxd exists;
-  `NX_STATE_DIR` points nx elsewhere. In the VM, run nx as an unprivileged
-  user that owns the state directory, as nxd's `nx` user will.
+- Changing state needs write access to `/var/lib/nx`: the `nx` user owns it
+  and wheel has an ACL (`systemd/nx.tmpfiles`); in the VM `tester` is in
+  wheel. `NX_STATE_DIR` points nx elsewhere, and then nothing is activated
+  (nxd serves only `/var/lib/nx`): `current` moves, nothing merges.
+- `nx add`, `remove` and `repo` build a generation and nxd activates it
+  (`Session::install`); `generation::build` never touches `current`. nxd
+  doesn't take the state lock the CLI holds while it asks.
+- The nxd unit must not use `ProtectSystem=`, `PrivateTmp=` or any
+  mount-namespace option: the merge would happen in the unit's own
+  namespace and nothing else would see it.
+- polkit reads actions only from `/usr/share/polkit-1/actions`, which is
+  read-only in the VM; `dev/vm-install` bind-mounts a copy (until reboot,
+  run it again). An ssh login is not a local, active session, so the wheel
+  rule can't allow it: the VM has a rule for `tester` (`dev/vm-test.rules`).
+- Run as root in the dev container, every file is root's, so a test of
+  "someone else owns it" can't run there.
 - `setfiles -r` fails with "Not a directory" on a path through the `current`
   symlink; pass `realpath`. systemd-sysext finds nx through the symlink
   `/var/lib/extensions/nx` (its boot-time search path), not `/run/extensions`.
+- `systemd-sysext status --json=short` lists `{"hierarchy","extensions"}`;
+  nxd checks `nx` under `/usr` after a refresh, since a refresh can succeed
+  and merge nothing. A forced sysext that doesn't merge is an error; an
+  unforced one falls back to prefix.
 - A generation's extension directory must be named `nx` when merged: its
   release file is `extension-release.nx`.
 - A manifest change goes through `Session::open`'s `change` closure, which

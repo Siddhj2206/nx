@@ -14,11 +14,15 @@ const GROUPS: [&str; 3] = ["Packages", "Maintenance", "System"];
 /// group. The test below fails for a command left out.
 const PLACEMENT: &[(&str, &str)] = &[
     ("add", "Packages"),
+    ("remove", "Packages"),
     ("list", "Packages"),
     ("search", "Packages"),
     ("info", "Packages"),
     ("why", "Packages"),
+    ("generations", "Maintenance"),
+    ("rollback", "Maintenance"),
     ("repo", "Maintenance"),
+    ("shell", "System"),
     ("status", "System"),
 ];
 
@@ -192,7 +196,7 @@ mod tests {
         main(&mut ui.out);
         let text = out.text();
         assert!(text.contains("  Usage: nx <command> [args]\n"));
-        assert!(text.contains("\n  System\n    status"));
+        assert!(text.contains("\n  System\n    shell"));
         assert!(text.contains("the image nx resolves against"));
     }
 

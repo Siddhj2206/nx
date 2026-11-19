@@ -114,6 +114,12 @@ pub fn state() -> State {
     State::new(root)
 }
 
+/// Whether `NX_STATE_DIR` points nx at another state directory. nxd only
+/// serves `/var/lib/nx`, so then nothing can be activated.
+pub fn state_overridden() -> bool {
+    std::env::var_os("NX_STATE_DIR").is_some_and(|d| !d.is_empty())
+}
+
 /// Where `nx repo add` pins third-party keys.
 pub fn keys_dir(state: &State) -> PathBuf {
     state.root().join("keys")

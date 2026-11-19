@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, FORMAT, Result};
+use crate::{Backend, Error, FORMAT, Result};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -43,6 +43,10 @@ pub struct Host {
     /// What the user typed: names, provides or paths.
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Forces the activation backend; unset, nxd probes and keeps the one
+    /// that works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<Backend>,
 }
 
 /// One added repo. `copr:owner/project` needs nothing else; any other repo
@@ -92,6 +96,17 @@ impl Manifest {
         }
     }
 
+    /// Drops `specs`; returns the ones that were not listed.
+    pub fn remove_host(&mut self, specs: &[String]) -> Vec<String> {
+        let missing = specs
+            .iter()
+            .filter(|s| !self.host.packages.contains(s))
+            .cloned()
+            .collect();
+        self.host.packages.retain(|p| !specs.contains(p));
+        missing
+    }
+
     pub fn repo(&self, name: &str) -> Option<&RepoEntry> {
         self.repos.iter().find(|r| r.name == name)
     }
@@ -106,6 +121,7 @@ mod tests {
         let text = r#"
 [host]
 packages = ["wayland-devel"]
+backend = "prefix"
 
 [tool]
 packages = ["ripgrep"]
@@ -116,8 +132,15 @@ priority = 50
 "#;
         let mut m = Manifest::parse(text, Path::new("m"))?;
         assert_eq!(m.version, FORMAT);
+        assert_eq!(m.host.backend, Some(Backend::Prefix));
         m.add_host(&["libxkbcommon-devel".into(), "wayland-devel".into()]);
         assert_eq!(m.host.packages, ["wayland-devel", "libxkbcommon-devel"]);
+        assert_eq!(
+            m.remove_host(&["wayland-devel".into(), "nope".into()]),
+            ["nope"]
+        );
+        assert_eq!(m.host.packages, ["libxkbcommon-devel"]);
+        m.add_host(&["wayland-devel".into()]);
         let text = m.to_toml()?;
         assert_eq!(Manifest::parse(&text, Path::new("m"))?, m);
         assert!(text.contains("[tool]"), "{text}");

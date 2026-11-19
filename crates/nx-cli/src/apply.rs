@@ -159,8 +159,9 @@ impl<'m> Session<'m> {
         Ok(Resolved { all, new })
     }
 
-    /// Downloads, verifies and unpacks what the store lacks, then builds the
-    /// next generation from `manifest` and `all`.
+    /// Downloads, verifies and unpacks what the store lacks, builds the
+    /// next generation from `manifest` and `all`, and makes it live. A
+    /// generation nxd refuses stays on disk, not current.
     pub fn install(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
         let guard = self.guard.take().context("a dry run cannot install")?;
         let mut files = self.fetch(ui, all)?;
@@ -176,6 +177,12 @@ impl<'m> Session<'m> {
                 image_root: &image_root,
                 os_id: &self.machine.release.id,
             },
+        )?;
+        crate::live::activate(
+            ui,
+            &self.state,
+            built.generation.number,
+            manifest.host.backend,
         )?;
         Ok(built)
     }

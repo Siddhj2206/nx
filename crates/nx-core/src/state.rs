@@ -26,6 +26,33 @@ pub struct State {
     root: PathBuf,
 }
 
+/// How the host tier reaches the running system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// One directory extension merged over `/usr` by `systemd-sysext`.
+    Sysext,
+    /// The generation's `usr` as a prefix, reached through `nx shell`.
+    Prefix,
+}
+
+impl Backend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sysext => "sysext",
+            Self::Prefix => "prefix",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "sysext" => Some(Self::Sysext),
+            "prefix" => Some(Self::Prefix),
+            _ => None,
+        }
+    }
+}
+
 /// Held while a command changes state; a second one waits.
 #[derive(Debug)]
 pub struct Lock {
@@ -78,6 +105,54 @@ impl State {
 
     pub(crate) fn current_link(&self) -> PathBuf {
         self.root.join("current")
+    }
+
+    /// Points `current` at generation `number` with one rename. The caller
+    /// serializes: a command holds the state [`Lock`]; nxd handles one
+    /// request at a time.
+    pub fn set_current(&self, number: u32) -> Result<()> {
+        if !self.generations_dir().join(number.to_string()).is_dir() {
+            return Err(Error::Invalid(format!("there is no generation {number}")));
+        }
+        let link = self.current_link();
+        let tmp = link.with_file_name(".current.part");
+        let _ = std::fs::remove_file(&tmp);
+        std::os::unix::fs::symlink(format!("generations/{number}"), &tmp).map_err(|source| {
+            Error::Write {
+                path: tmp.clone(),
+                source,
+            }
+        })?;
+        rename(&tmp, &link)?;
+        sync_dir(&self.root)
+    }
+
+    /// The activation backend nxd last used; `None` before the first
+    /// activation.
+    pub fn backend(&self) -> Result<Option<Backend>> {
+        let path = self.backend_file();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Backend::parse(text.trim()).map(Some).ok_or_else(|| {
+                Error::Invalid(format!("{} says {:?}", path.display(), text.trim()))
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(Error::Read { path, source }),
+        }
+    }
+
+    /// Records the backend in use, for `nx shell` and the next activation.
+    pub fn set_backend(&self, backend: Backend) -> Result<()> {
+        let path = self.backend_file();
+        let tmp = path.with_file_name(".backend.part");
+        std::fs::write(&tmp, format!("{}\n", backend.name())).map_err(|source| Error::Write {
+            path: tmp.clone(),
+            source,
+        })?;
+        rename(&tmp, &path)
+    }
+
+    fn backend_file(&self) -> PathBuf {
+        self.root.join("backend")
     }
 
     /// Generation numbers on disk, oldest first.
@@ -332,6 +407,23 @@ pub(crate) mod tests {
                 .insert(&lock, "../x", |_| Ok::<(), Error>(()))
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn current_and_backend_are_recorded() -> Result<()> {
+        let tmp = TempDir::new("current");
+        let state = State::new(&tmp.0);
+        let _lock = state.lock()?;
+        assert!(state.set_current(1).is_err());
+        create_dir(&state.generations_dir().join("1"))?;
+        create_dir(&state.generations_dir().join("2"))?;
+        state.set_current(1)?;
+        state.set_current(2)?;
+        assert_eq!(state.current_number()?, Some(2));
+        assert_eq!(state.backend()?, None);
+        state.set_backend(Backend::Prefix)?;
+        assert_eq!(state.backend()?, Some(Backend::Prefix));
         Ok(())
     }
 

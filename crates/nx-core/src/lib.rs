@@ -18,7 +18,7 @@ pub use generation::{Built, Generation, Readable};
 pub use lockfile::{Lock, LockedPackage, LockedRepo};
 pub use manifest::{Manifest, RepoEntry};
 pub use os_release::OsRelease;
-pub use state::{State, Store};
+pub use state::{Backend, State, Store};
 
 /// The version of the state format (manifest, lockfile, generation layout)
 /// this nx writes. An older nx refuses newer state rather than misread it

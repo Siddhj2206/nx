@@ -6,12 +6,17 @@
 
 mod add;
 mod apply;
+mod generations;
 mod help;
 mod host;
 mod info;
 mod list;
+mod live;
+mod remove;
 mod repo;
+mod rollback;
 mod search;
+mod shell;
 mod status;
 mod ui;
 mod why;
@@ -41,7 +46,7 @@ struct Cli {
 /// group is in `help::PLACEMENT`.
 #[derive(Subcommand)]
 enum Command {
-    /// add packages to a new generation (not activated yet)
+    /// add packages to the host tier, live
     Add {
         /// names, provides (pkgconfig(xkbcommon)) or files (/usr/bin/rg);
         /// name@repo takes it from that repo only
@@ -53,9 +58,33 @@ enum Command {
         #[command(flatten)]
         metadata: Metadata,
     },
+    /// remove packages and what only they needed, live
+    Remove {
+        /// what `nx list` shows, as it was added
+        #[arg(value_name = "package", required = true)]
+        packages: Vec<String>,
+        /// list what would be removed; change nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        metadata: Metadata,
+    },
     /// installed packages
     #[command(visible_alias = "ls")]
     List,
+    /// every generation, what each changed, and the current one
+    Generations,
+    /// make an earlier generation current again
+    Rollback {
+        /// the generation to go to (default: the one before the current)
+        #[arg(value_name = "N")]
+        generation: Option<u32>,
+    },
+    /// a shell (or command) with the host tier on its paths
+    Shell {
+        #[arg(value_name = "command", trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// who provides a package, command or file, and why
     Why {
         #[arg(value_name = "name|path")]
@@ -159,7 +188,19 @@ fn main() -> ExitCode {
             dry_run,
             metadata,
         } => machine().and_then(|m| add::run(&mut ui, &m, &packages, dry_run, metadata.refresh())),
+        Command::Remove {
+            packages,
+            dry_run,
+            metadata,
+        } => {
+            machine().and_then(|m| remove::run(&mut ui, &m, &packages, dry_run, metadata.refresh()))
+        }
         Command::List => list::run(&mut ui),
+        Command::Generations => generations::run(&mut ui),
+        Command::Rollback { generation } => {
+            machine().and_then(|m| rollback::run(&mut ui, &m, generation))
+        }
+        Command::Shell { command } => shell::run(&mut ui, &command),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {
             RepoAction::Add {
