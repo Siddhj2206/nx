@@ -136,7 +136,11 @@ enum Command {
     },
     /// at boot: make the generation built for the booted image current
     #[command(hide = true)]
-    Select,
+    Select {
+        /// after the boot-time merge: use the prefix backend if it didn't happen
+        #[arg(long)]
+        after_merge: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,7 +263,8 @@ fn main() -> ExitCode {
             machine().and_then(|m| sync::run(&mut ui, &m, metadata.refresh()))
         }
         Command::Gc { dry_run } => machine().and_then(|m| gc::run(&mut ui, &m, dry_run)),
-        Command::Select => boot::run(&mut ui),
+        Command::Select { after_merge: false } => boot::run(&mut ui),
+        Command::Select { after_merge: true } => boot::settle(&mut ui),
         Command::Status => status::run(
             &mut ui,
             &RpmOstree,

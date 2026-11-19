@@ -391,6 +391,7 @@ dependencies = [
  "anstream",
  "anyhow",
  "clap",
+ "nx-activate",
  "nx-core",
  "nx-librpm",
  "nx-proto",

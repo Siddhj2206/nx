@@ -1,5 +1,6 @@
 # Installed as /usr/lib/systemd/system-preset/90-nx.preset.
 enable nxd.socket
 enable nx-select.service
+enable nx-settle.service
 enable nx-sync.service
 enable nx-refresh.timer

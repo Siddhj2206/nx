@@ -758,3 +758,34 @@ fn removing_a_template_disables_its_enabled_instances() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_boot_that_did_not_merge_falls_back_to_prefix() -> Result<()> {
+    let tmp = Tmp::new("settle");
+    let l = layout(&tmp, false).map_err(|e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    })?;
+    // No current generation, nothing linked: nothing to settle.
+    assert_eq!(settle_at_boot(&l, &Fake::new())?, Settled::NothingToMerge);
+
+    activate(&l, &Fake::new(), 1, Some(Backend::Sysext), &only_uid())?;
+    assert_eq!(settle_at_boot(&l, &Fake::new())?, Settled::Merged);
+    assert_eq!(l.state.backend()?, Some(Backend::Sysext));
+
+    // The boot's merge failed: nothing of nx is listed.
+    let mut unmerged = Fake::new();
+    unmerged.merged = "[]";
+    let got = settle_at_boot(&l, &unmerged)?;
+    assert!(matches!(got, Settled::FellBack(_)), "{got:?}");
+    assert_eq!(l.state.backend()?, Some(Backend::Prefix));
+    assert!(std::fs::symlink_metadata(l.link()).is_err(), "link removed");
+    assert_eq!(l.state.current_number()?, Some(1), "current is kept");
+
+    // Settled: a second run has nothing linked, and the next activation
+    // tries sysext again.
+    assert_eq!(settle_at_boot(&l, &unmerged)?, Settled::NothingToMerge);
+    let got = activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    assert_eq!(got.backend, Backend::Sysext);
+    Ok(())
+}

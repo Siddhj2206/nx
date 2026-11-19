@@ -45,7 +45,7 @@ pub fn run(
         .cloned()
         .collect();
     manifest.add_host(&fresh);
-    let resolved = session.resolve(ui, &manifest.host.packages)?;
+    let resolved = session.resolve_manifest(ui, &manifest.host.packages, specs)?;
 
     // A new spec nothing was resolved for is in the image already. It stays
     // in the manifest all the same (design invariant 8): intent, so it comes

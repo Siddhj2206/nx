@@ -221,6 +221,50 @@ pub fn activate(
     }
 }
 
+/// What [`settle_at_boot`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settled {
+    /// No generation is current, or none is linked for merging.
+    NothingToMerge,
+    /// nx's extension is merged over `/usr`.
+    Merged,
+    /// The boot-time merge didn't happen; the prefix backend is recorded
+    /// and the link removed. The reason is what `systemd-sysext` says.
+    FellBack(String),
+}
+
+/// Run after `systemd-sysext` at boot: when a generation is linked but its
+/// extension is not merged over `/usr` (overlay depth, an unsupported
+/// kernel), switches to the prefix backend, so `nx shell` exports the
+/// generation's `usr` instead of the system booting with a host tier that
+/// silently isn't there. The next activation tries sysext again.
+pub fn settle_at_boot(layout: &Layout, runner: &dyn Runner) -> Result<Settled> {
+    if layout.state.current_number()?.is_none() || std::fs::symlink_metadata(layout.link()).is_err()
+    {
+        return Ok(Settled::NothingToMerge);
+    }
+    let status = sysext_cmd(runner, &["status", "--json=short"])?;
+    if status.success && merged_over_usr(&status.stdout) {
+        if layout.state.backend()? != Some(Backend::Sysext) {
+            layout.state.set_backend(Backend::Sysext)?;
+        }
+        return Ok(Settled::Merged);
+    }
+    let why = if status.success {
+        "nx's extension is not merged over /usr".to_owned()
+    } else {
+        detail(&status)
+    };
+    let link = layout.link();
+    std::fs::remove_file(&link).map_err(|source| Error::Io {
+        path: link.clone(),
+        source,
+    })?;
+    sync_dir(&layout.extensions)?;
+    layout.state.set_backend(Backend::Prefix)?;
+    Ok(Settled::FellBack(why))
+}
+
 /// The record and extension of the generation that is merged now, if one
 /// is: the current one under the sysext backend.
 fn merged_now(layout: &Layout) -> Option<(nx_core::Activation, PathBuf)> {

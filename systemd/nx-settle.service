@@ -1,0 +1,17 @@
+[Unit]
+Description=Use the nx prefix backend when the extension did not merge
+Documentation=https://github.com/Siddhj2206/nx
+# After systemd-sysext has tried; whether it succeeded doesn't matter here.
+DefaultDependencies=no
+After=systemd-sysext.service nx-select.service
+Before=sysinit.target
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/var/lib/nx/generations
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nx select --after-merge
+UMask=0002
+
+[Install]
+WantedBy=sysinit.target

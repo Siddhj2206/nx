@@ -56,6 +56,16 @@ impl std::fmt::Display for Unresolvable {
 
 impl std::error::Error for Unresolvable {}
 
+/// The packages a generation left out that stay out: still in the manifest
+/// and not what the command is about.
+fn still_left_out(skipped: &[String], specs: &[String], asked: &[String]) -> Vec<String> {
+    skipped
+        .iter()
+        .filter(|s| specs.contains(s) && !asked.contains(s))
+        .cloned()
+        .collect()
+}
+
 /// What a resolve found.
 pub struct Resolved {
     /// Every package of the new host tier.
@@ -130,6 +140,42 @@ impl<'m> Session<'m> {
     /// Records that the next generation was resolved without `specs`.
     pub fn leave_out(&mut self, specs: Vec<String>) {
         self.skipped = specs;
+    }
+
+    /// Resolves the manifest for a change `nx sync` didn't make: like
+    /// [`Session::resolve`], but a package the current generation left out
+    /// (it didn't resolve then) stays out while it still doesn't, so one
+    /// unavailable package doesn't block every other change. `asked` are
+    /// the packages this command is about; they are never left out, so a
+    /// typo still fails.
+    pub fn resolve_manifest(
+        &mut self,
+        ui: &mut Ui,
+        specs: &[String],
+        asked: &[String],
+    ) -> Result<Resolved> {
+        let left_out = still_left_out(
+            self.current.as_ref().map_or(&[], |g| &g.lock.skipped),
+            specs,
+            asked,
+        );
+        match self.resolve(ui, specs) {
+            Err(e) if !left_out.is_empty() && e.downcast_ref::<Unresolvable>().is_some() => {}
+            other => return other,
+        }
+        let kept: Vec<String> = specs
+            .iter()
+            .filter(|s| !left_out.contains(s))
+            .cloned()
+            .collect();
+        // What is left fails by itself: that is the problem to report.
+        let resolved = self.resolve(ui, &kept)?;
+        ui.warn(format_args!(
+            "still leaving out {}: they didn't resolve before and still don't",
+            left_out.join(", ")
+        ));
+        self.skipped = left_out;
+        Ok(resolved)
     }
 
     /// Resolves `specs` (the whole manifest) into a host tier.
@@ -650,5 +696,20 @@ mod tests {
             "{err}"
         );
         Ok(())
+    }
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_left_out_package_stays_out_unless_asked_for_or_gone() {
+        let skipped = v(&["a", "b"]);
+        let specs = v(&["a", "b", "c"]);
+        assert_eq!(still_left_out(&skipped, &specs, &[]), v(&["a", "b"]));
+        // Asked for again: it must resolve now.
+        assert_eq!(still_left_out(&skipped, &specs, &v(&["a"])), v(&["b"]));
+        // Removed from the manifest: nothing to leave out.
+        assert_eq!(still_left_out(&skipped, &v(&["b", "c"]), &[]), v(&["b"]));
     }
 }

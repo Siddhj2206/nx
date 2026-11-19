@@ -91,7 +91,7 @@ pub fn add(
     let pins = Pins::write(&host::keys_dir(&session.state), &fetched)?;
     let built = (|| {
         let manifest = session.manifest.clone();
-        let resolved = session.resolve(ui, &manifest.host.packages)?;
+        let resolved = session.resolve_manifest(ui, &manifest.host.packages, &[])?;
         session.install(ui, &manifest, &resolved.all)
     })();
     let built = match built {
@@ -224,7 +224,7 @@ pub fn remove(ui: &mut Ui, machine: &Machine, name: &str) -> Result<()> {
     })?;
     let manifest = session.manifest.clone();
     let resolved = session
-        .resolve(ui, &manifest.host.packages)
+        .resolve_manifest(ui, &manifest.host.packages, &[])
         .with_context(|| format!("packages still need {name}"))?;
     let built = session.install(ui, &manifest, &resolved.all)?;
     let _ = std::fs::remove_file(
