@@ -20,6 +20,17 @@ use crate::host::{self, Machine};
 use crate::ui::{self, Ui};
 
 pub fn run(ui: &mut Ui) -> Result<()> {
+    let result = select(ui);
+    if result.is_err() {
+        // Which generation fits this image is unknown: merging whatever
+        // `current` points at could shadow the image's files (invariants 1
+        // and 2), so merge nothing. The next boot, or `nx sync`, tries again.
+        let _ = host::state().clear_current();
+    }
+    result
+}
+
+fn select(ui: &mut Ui) -> Result<()> {
     let root = Path::new("/");
     let machine = Machine::read(root, &BootedOstree::new(root)?)?;
     let Some(digest) = machine.digest() else {
@@ -73,6 +84,7 @@ pub fn run(ui: &mut Ui) -> Result<()> {
                     &machine.arch,
                 );
                 lock.parent = Some(previous.number);
+                lock.pending = true;
                 lock
             };
             let image_root = machine.image_root()?;

@@ -20,6 +20,10 @@ pub struct Lock {
     /// rollbacks made the numbers say otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<u32>,
+    /// A placeholder `nx select` made at boot because no generation fit the
+    /// booted image: empty, and still to be resolved by `nx sync`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     #[serde(default, rename = "repo")]
     pub repos: Vec<LockedRepo>,
     #[serde(default, rename = "host")]
@@ -61,6 +65,7 @@ impl Lock {
             release: release.to_owned(),
             arch: arch.to_owned(),
             parent: None,
+            pending: false,
             repos: Vec::new(),
             host: Vec::new(),
         }

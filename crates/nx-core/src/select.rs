@@ -122,7 +122,7 @@ mod tests {
     use super::*;
     use crate::state::tests::TempDir;
 
-    fn generation(state: &State, n: u32, image: Option<&str>, packages: &[&str]) {
+    fn generation(state: &State, n: u32, image: Option<&str>, packages: &[&str]) -> Result<()> {
         let mut lock = Lock::new(image.map(str::to_owned), "45", "x86_64");
         for sha in packages {
             lock.host.push(crate::LockedPackage {
@@ -134,18 +134,21 @@ mod tests {
             });
         }
         let dir = state.generations_dir().join(n.to_string());
-        std::fs::create_dir_all(&dir).unwrap_or_default();
-        std::fs::write(dir.join("lock.toml"), lock.to_toml().unwrap_or_default())
-            .unwrap_or_default();
+        let write = |source| Error::Write {
+            path: dir.clone(),
+            source,
+        };
+        std::fs::create_dir_all(&dir).map_err(write)?;
+        std::fs::write(dir.join("lock.toml"), lock.to_toml()?).map_err(write)
     }
 
     #[test]
     fn finds_the_newest_generation_for_a_digest() -> Result<()> {
         let tmp = TempDir::new("select-newest");
         let state = State::new(&tmp.0);
-        generation(&state, 1, Some("sha256:a"), &[]);
-        generation(&state, 2, Some("sha256:b"), &[]);
-        generation(&state, 3, Some("sha256:a"), &[]);
+        generation(&state, 1, Some("sha256:a"), &[])?;
+        generation(&state, 2, Some("sha256:b"), &[])?;
+        generation(&state, 3, Some("sha256:a"), &[])?;
         assert_eq!(newest_for(&state, "sha256:a")?, Some(3));
         assert_eq!(newest_for(&state, "sha256:b")?, Some(2));
         assert_eq!(newest_for(&state, "sha256:c")?, None);
@@ -158,9 +161,9 @@ mod tests {
         let state = State::new(&tmp.0);
         // Generation 1 is the only one for the rollback image; 2..=9 are for
         // the booted one.
-        generation(&state, 1, Some("sha256:old"), &[]);
+        generation(&state, 1, Some("sha256:old"), &[])?;
         for n in 2..=9 {
-            generation(&state, n, Some("sha256:new"), &[]);
+            generation(&state, n, Some("sha256:new"), &[])?;
         }
         state.set_current(9)?;
         let plan = gc_plan(&state, &["sha256:new".into(), "sha256:old".into()])?;
@@ -177,7 +180,7 @@ mod tests {
         let tmp = TempDir::new("select-current");
         let state = State::new(&tmp.0);
         for n in 1..=8 {
-            generation(&state, n, Some("sha256:x"), &[]);
+            generation(&state, n, Some("sha256:x"), &[])?;
         }
         state.set_current(1)?;
         let plan = gc_plan(&state, &[])?;
@@ -191,8 +194,8 @@ mod tests {
         let tmp = TempDir::new("select-store");
         let state = State::new(&tmp.0);
         let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
-        generation(&state, 1, Some("sha256:x"), &[&a, &b]);
-        generation(&state, 2, Some("sha256:x"), &[&b, &c]);
+        generation(&state, 1, Some("sha256:x"), &[&a, &b])?;
+        generation(&state, 2, Some("sha256:x"), &[&b, &c])?;
         for sha in [&a, &b, &c] {
             std::fs::create_dir_all(state.store().path(sha)).map_err(|source| Error::Write {
                 path: tmp.0.clone(),

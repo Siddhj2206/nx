@@ -29,7 +29,11 @@ pub fn run(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<()> {
         host::load(ui, machine, refresh, &manifest)?;
     }
     let built = deployed(ui, machine, refresh)?;
-    if built == 0 {
+    // Generations nothing deployed needs any more (an image that is gone,
+    // older staged ones). Only after every image has its own: a failure
+    // above returned already.
+    let removed = crate::gc::collect(ui, machine)?;
+    if built == 0 && removed == 0 {
         ui.done("every deployed image has a host tier that matches the manifest");
     }
     Ok(())
@@ -103,6 +107,11 @@ fn matches(state: &nx_core::State, digest: &str, current: &Generation) -> Result
     let Some(n) = select::newest_for(state, digest)? else {
         return Ok(false);
     };
+    // The empty generation `nx select` made at boot is a placeholder, not a
+    // host tier.
+    if select::read_lock(state, n)?.pending {
+        return Ok(false);
+    }
     if n == current.number {
         return Ok(true);
     }
@@ -132,6 +141,7 @@ fn build(
         &target
     };
     let mut session = Session::open(ui, machine, refresh, false, |_| Ok(()))?;
+    let was_current = session.current.as_ref().map(|g| g.number);
     let manifest = session.manifest.clone();
     let resolved = session.resolve(ui, &manifest.host.packages)?;
     let built = session.build(ui, &manifest, &resolved.all)?;
@@ -139,7 +149,16 @@ fn build(
     if booted {
         // The booted image had none (it was updated without nx noticing, or
         // the boot fell back to an older generation): this one replaces it.
+        // The lock is gone by now, so a change made meanwhile (an `nx add`
+        // that made its own generation current) wins: this one stays built
+        // and the next sync sees the manifest differ.
         let state = host::state();
+        if state.current_number()? != was_current {
+            ui.warn(format_args!(
+                "generation {number} is built, but the current generation changed meanwhile; not replacing it"
+            ));
+            return Ok(());
+        }
         crate::live::activate(ui, &state, number, manifest.host.backend)?;
     }
     ui.done(format_args!(
@@ -171,6 +190,37 @@ mod tests {
         let roles: Vec<&str> = wanted(&machine).iter().map(|(role, _)| *role).collect();
         assert_eq!(roles, ["booted", "rollback"]);
         let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn a_boot_placeholder_is_not_a_host_tier() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-sync-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = nx_core::State::new(&dir);
+        let mut lock = nx_core::Lock::new(Some("sha256:new".into()), "45", "x86_64");
+        let write = |n: u32, lock: &nx_core::Lock| -> Result<()> {
+            let gen_dir = dir.join(format!("generations/{n}"));
+            std::fs::create_dir_all(&gen_dir)?;
+            std::fs::write(gen_dir.join("lock.toml"), lock.to_toml()?)?;
+            Ok(())
+        };
+        let current = Generation {
+            number: 2,
+            dir: Default::default(),
+            manifest: nx_core::Manifest::default(),
+            lock: lock.clone(),
+            activation: Default::default(),
+        };
+        lock.pending = true;
+        write(2, &lock)?;
+        // `nx select` made generation 2 current for the booted image, but it
+        // is empty: sync must still resolve for the image.
+        assert!(!matches(&state, "sha256:new", &current)?);
+        lock.pending = false;
+        write(2, &lock)?;
+        assert!(matches(&state, "sha256:new", &current)?);
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

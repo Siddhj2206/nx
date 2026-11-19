@@ -168,6 +168,17 @@ impl State {
         sync_dir(&self.root)
     }
 
+    /// Removes `current`, so the next merge carries no host tier. For a boot
+    /// that can't tell which generation fits the image (fail closed).
+    pub fn clear_current(&self) -> Result<()> {
+        let link = self.current_link();
+        match std::fs::remove_file(&link) {
+            Ok(()) => sync_dir(&self.root),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(Error::Write { path: link, source }),
+        }
+    }
+
     /// The activation backend nxd last used; `None` before the first
     /// activation.
     pub fn backend(&self) -> Result<Option<Backend>> {

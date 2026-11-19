@@ -4,13 +4,30 @@
 //! newest, so `nx rollback` has somewhere to go.
 
 use anyhow::{Context, Result};
-use nx_core::State;
 use nx_core::select;
 
 use crate::host::{self, Machine};
 use crate::ui::{self, Stream, Ui};
 
+/// `nx sync`'s tail: removes what `nx gc` would, saying so only when
+/// something went. Returns how many generations were removed.
+pub fn collect(ui: &mut Ui, machine: &Machine) -> Result<usize> {
+    let removed = remove(machine, false)?;
+    if !removed.0.is_empty() || removed.1 > 0 {
+        render(&mut ui.out, &removed.0, removed.1, false);
+    }
+    Ok(removed.0.len())
+}
+
 pub fn run(ui: &mut Ui, machine: &Machine, dry_run: bool) -> Result<()> {
+    let (dropped, packages) = remove(machine, dry_run)?;
+    render(&mut ui.out, &dropped, packages, dry_run);
+    Ok(())
+}
+
+/// What `nx gc` drops: generations and unused store entries. Removes them
+/// unless `dry_run`.
+fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize)> {
     let state = host::state();
     // Off a bootc system nothing is deployed; on one, `Machine::read` has
     // already refused to go on without the deployments.
@@ -40,11 +57,10 @@ pub fn run(ui: &mut Ui, machine: &Machine, dry_run: bool) -> Result<()> {
             state.store().remove(guard, sha)?;
         }
     }
-    render(&mut ui.out, &plan.drop, store.len(), dry_run, &state);
-    Ok(())
+    Ok((plan.drop, store.len()))
 }
 
-fn render(out: &mut Stream, dropped: &[u32], packages: usize, dry_run: bool, _state: &State) {
+fn render(out: &mut Stream, dropped: &[u32], packages: usize, dry_run: bool) {
     let style = out.style;
     for n in dropped {
         out.line(format_args!(
