@@ -1,5 +1,7 @@
 # nx reads the profile manifest and registry from disk
 
+> **Superseded** by [ADR-0006](0006-rust-rebuild-two-tiers.md): nx 1.0 has no Nix profile; generations live under `/var/lib/nx`.
+
 What's installed comes from `~/.local/state/nix/profiles/profile/manifest.json`
 (version 3), its generations from the `profile-N-link` entries beside it, and
 the pin from `~/.config/nix/registry.json`. Reading them takes microseconds;

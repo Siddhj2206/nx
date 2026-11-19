@@ -1,5 +1,7 @@
 # nx: product
 
+> This describes nx 0.x, the Go front end to a Nix profile (tag `v0.2.0`). nx 1.0 is a rebuild: [design.md](design.md) is its design and [ADR-0006](adr/0006-rust-rebuild-two-tiers.md) says why. What carries over is the *Output* section (symbols, results on stdout, progress on stderr, exit codes) and the per-package progress for the tool tier.
+
 nx installs command-line packages from nixpkgs into your Nix profile. It fills
 the role Homebrew plays on macOS: per-user packages, no root, and one command
 to keep them current. It covers the everyday half of package management and
