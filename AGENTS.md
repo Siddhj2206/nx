@@ -92,7 +92,12 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   the workspace version first.
 - `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
   verify, unpack, expose the tool tier, assemble), shared by every command
-  that changes the manifest. `tool.rs` drives the tool tier (pin, catalog,
+  that changes the manifest: `Session::open` (change the manifest under the
+  lock) → `Session::plan(How)` (both tiers, as `How` says) →
+  `Session::install` or `apply::finish` (build, make live, report through
+  `changes.rs`). A new command that changes packages is a manifest edit and
+  a `How`, not a new pipeline. `keys.rs` pins repo keys by content.
+  `tool.rs` drives the tool tier (pin, catalog,
   eval, plan, realise, exposure, shim, GC roots); `route.rs` is the pure
   tier decision. `host.rs` holds `Machine`, the system as one value (root,
   os-release, deployments, arch): commands read `/`, tests a fixture.

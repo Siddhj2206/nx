@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use nx_core::CacheEntry;
 use nx_rpm::Refresh;
 
-use crate::apply::Session;
+use crate::apply::{How, Session};
 use crate::host::{self, Machine};
 use crate::ui::{self, Stream, Ui};
 
@@ -40,9 +40,8 @@ pub fn add(ui: &mut Ui, machine: &Machine, url: &str, key: &str) -> Result<()> {
         m.caches.push(wanted.clone());
         Ok(())
     })?;
-    let manifest = session.manifest.clone();
-    let resolved = session.resolve_manifest(ui, &manifest.host.packages, &[])?;
-    let built = session.install(ui, &manifest, &resolved.all)?;
+    let outcome = session.plan(ui, &How::default())?;
+    let built = session.install(ui, &outcome.all)?;
     let style = ui.out.style;
     ui.out.line(format_args!(
         "{} {} {}",
@@ -64,9 +63,8 @@ pub fn remove(ui: &mut Ui, machine: &Machine, url: &str) -> Result<()> {
         }
         Ok(())
     })?;
-    let manifest = session.manifest.clone();
-    let resolved = session.resolve_manifest(ui, &manifest.host.packages, &[])?;
-    let built = session.install(ui, &manifest, &resolved.all)?;
+    let outcome = session.plan(ui, &How::default())?;
+    let built = session.install(ui, &outcome.all)?;
     let style = ui.out.style;
     ui.out
         .line(format_args!("{} {url}", style.red(ui::SYM_REMOVED)));

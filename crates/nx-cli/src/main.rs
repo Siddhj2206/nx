@@ -8,6 +8,7 @@ mod add;
 mod apply;
 mod boot;
 mod cache;
+mod changes;
 mod compat;
 mod complete;
 mod converge;

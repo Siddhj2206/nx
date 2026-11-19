@@ -9,7 +9,7 @@ use nx_core::{Generation, Manifest, RepoEntry};
 use nx_rpm::repo::{self, Repo, Vars, id_of};
 use nx_rpm::{Http, Refresh, Ureq};
 
-use crate::apply::Session;
+use crate::apply::{How, Session};
 use crate::host::{self, Machine};
 use crate::ui::{self, Stream, Ui};
 
@@ -85,9 +85,8 @@ pub fn add(
     // Under the lock, so nx gc can't take a pin before its generation names
     // it; one left by a change that fails goes with the next gc.
     pin_all(&mut session, &fetched)?;
-    let manifest = session.manifest.clone();
-    let resolved = session.resolve_manifest(ui, &manifest.host.packages, &[])?;
-    let built = session.install(ui, &manifest, &resolved.all)?;
+    let outcome = session.plan(ui, &How::default())?;
+    let built = session.install(ui, &outcome.all)?;
     let st = ui.out.style;
     for f in &fetched {
         ui.out.line(format_args!(
@@ -277,13 +276,12 @@ pub fn remove(ui: &mut Ui, machine: &Machine, name: &str) -> Result<()> {
         m.repos.retain(|r| r.name != name);
         Ok(())
     })?;
-    let manifest = session.manifest.clone();
-    let resolved = session
-        .resolve_manifest(ui, &manifest.host.packages, &[])
+    let outcome = session
+        .plan(ui, &How::default())
         .with_context(|| format!("packages still need {name}"))?;
     // Its pinned key stays while an earlier generation names it (a
     // rollback needs it); nx gc removes it after.
-    let built = session.install(ui, &manifest, &resolved.all)?;
+    let built = session.install(ui, &outcome.all)?;
     let st = ui.out.style;
     ui.out
         .line(format_args!("{} {name}", st.red(ui::SYM_REMOVED)));

@@ -7,11 +7,12 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
+use nx_core::{LockedTool, Manifest};
 use nx_rpm::Refresh;
 
-use crate::apply::Session;
+use crate::apply::{self, How, Session};
 use crate::host::{self, Machine};
-use crate::ui::{self, Stream, Ui};
+use crate::ui::Ui;
 
 pub fn run(
     ui: &mut Ui,
@@ -23,29 +24,16 @@ pub fn run(
     let started = Instant::now();
     // `nx add rg` added ripgrep: `nx remove rg` means it too. Only names to
     // look up; the manifest itself is changed under the lock.
-    let tool_names = host::readable(ui, &host::state())?
+    let tool = host::readable(ui, &host::state())?
         .and_then(|g| g.lock.tool)
         .unwrap_or_default();
     let mut session = Session::open(ui, machine, refresh, dry_run, |m| {
-        let specs: Vec<String> = specs.iter().map(|s| attr_for(m, &tool_names, s)).collect();
-        let (tools, hosts): (Vec<String>, Vec<String>) = specs
-            .iter()
-            .cloned()
-            .partition(|s| m.tool.packages.contains(s));
-        let missing = m.remove_host(&hosts);
-        if !missing.is_empty() {
-            bail!(
-                "{} not added with nx add (nx list shows what was)",
-                missing.join(", ")
-            );
-        }
-        m.tool.packages.retain(|a| !tools.contains(a));
-        Ok(())
+        drop_from(m, &tool, specs)
     })?;
-    let resolved = session.resolve_manifest(ui, &session.manifest.host.packages.clone(), &[])?;
+    let outcome = session.plan(ui, &How::default())?;
     // An allowance for a package that is no longer installed would quietly
     // pass it next time; the user should be asked again.
-    let names: HashSet<&str> = resolved
+    let names: HashSet<&str> = outcome
         .all
         .iter()
         .map(|p| p.package.name.as_str())
@@ -54,55 +42,42 @@ pub fn run(
         .manifest
         .scriptlets
         .retain(|a| names.contains(a.package.as_str()));
-    let keep: HashSet<String> = resolved.all.iter().map(|p| p.package.nevra()).collect();
-    let mut dropped: Vec<Dropped> = session
-        .current
+    apply::finish(ui, &mut session, &outcome, started)
+}
+
+/// Takes `specs` out of `m`. A tool package's unfree allowance goes with
+/// it, unless a package that stays has the same name; an entry nx can't
+/// match to a package is the user's to remove.
+fn drop_from(m: &mut Manifest, tool: &LockedTool, specs: &[String]) -> Result<()> {
+    let specs: Vec<String> = specs.iter().map(|s| attr_for(m, tool, s)).collect();
+    let (tools, hosts): (Vec<String>, Vec<String>) =
+        specs.into_iter().partition(|s| m.tool.packages.contains(s));
+    let missing = m.remove_host(&hosts);
+    if !missing.is_empty() {
+        bail!(
+            "{} not added with nx add (nx list shows what was)",
+            missing.join(", ")
+        );
+    }
+    m.tool.packages.retain(|a| !tools.contains(a));
+    let stays = |name: &str| {
+        tool.packages
+            .iter()
+            .any(|k| k.name == name && m.tool.packages.contains(&k.attr))
+    };
+    let gone: Vec<String> = tool
+        .packages
         .iter()
-        .flat_map(|g| g.lock.host.iter())
-        .filter(|p| !keep.contains(&p.nevra))
-        .map(|p| Dropped {
-            name: p.name.clone(),
-            version: p.evr().to_owned(),
-        })
+        .filter(|p| tools.contains(&p.attr) && !stays(&p.name))
+        .map(|p| p.name.clone())
         .collect();
-    // The tool tier needs no resolve: what is left is as it was.
-    let attrs = session.manifest.tool.packages.clone();
-    if let Some(tool) = session.tool.as_mut() {
-        let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut tool.packages)
-            .into_iter()
-            .partition(|p| attrs.contains(&p.attr));
-        tool.packages = kept;
-        // A removed package's unfree allowance goes with it, unless a package
-        // that stays has the same name. Only those: an entry nx can't match
-        // to a package is the user's to remove.
-        for p in &gone {
-            dropped.push(Dropped {
-                name: p.attr.clone(),
-                version: format!("{} · nixpkgs", p.version),
-            });
-            if !tool.packages.iter().any(|k| k.name == p.name) {
-                session.manifest.tool.unfree.retain(|n| *n != p.name);
-            }
-        }
-    }
-    let manifest = session.manifest.clone();
-    if dry_run {
-        render(&mut ui.out, &dropped, None, started.elapsed().as_secs_f64());
-        return Ok(());
-    }
-    let built = session.install(ui, &manifest, &resolved.all)?;
-    render(
-        &mut ui.out,
-        &dropped,
-        Some(built.generation.number),
-        started.elapsed().as_secs_f64(),
-    );
+    m.tool.unfree.retain(|n| !gone.contains(n));
     Ok(())
 }
 
 /// The manifest entry `spec` means: itself, or the tool-tier attribute
 /// whose name or exposed command it is.
-fn attr_for(m: &nx_core::Manifest, tool: &nx_core::LockedTool, spec: &str) -> String {
+fn attr_for(m: &Manifest, tool: &LockedTool, spec: &str) -> String {
     if m.has(spec) {
         return spec.to_owned();
     }
@@ -112,95 +87,53 @@ fn attr_for(m: &nx_core::Manifest, tool: &nx_core::LockedTool, spec: &str) -> St
         .map_or_else(|| spec.to_owned(), |p| p.attr.clone())
 }
 
-/// A package that left: its name and version.
-struct Dropped {
-    name: String,
-    version: String,
-}
-
-/// One `-` line per package that left either tier, then the total;
-/// `generation` is `None` for a dry run.
-fn render(out: &mut Stream, dropped: &[Dropped], generation: Option<u32>, secs: f64) {
-    let style = out.style;
-    for p in dropped {
-        out.line(format_args!(
-            "{} {} {}",
-            style.red(ui::SYM_REMOVED),
-            p.name,
-            style.dim(&p.version)
-        ));
-    }
-    let what = if dropped.is_empty() {
-        "manifest updated".to_owned()
-    } else {
-        format!("{} removed", ui::plural(dropped.len(), "package"))
-    };
-    match generation {
-        Some(n) => out.line(format_args!(
-            "{} {what} · generation {n} in {secs:.1}s",
-            style.green(ui::SYM_DONE)
-        )),
-        None => out.line(style.dim(&format!("{what} · dry run, nothing changed"))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::SharedBuf;
+    use nx_core::{Bin, ToolPackage};
 
-    fn package(name: &str) -> Dropped {
-        Dropped {
+    fn tool() -> LockedTool {
+        let package = |attr: &str, name: &str, bin: &str| ToolPackage {
+            attr: attr.into(),
             name: name.into(),
-            version: "1-1.fc45".into(),
+            bins: vec![Bin {
+                name: bin.into(),
+                path: String::new(),
+            }],
+            ..ToolPackage::default()
+        };
+        LockedTool {
+            packages: vec![
+                package("ripgrep", "ripgrep", "rg"),
+                package("terraform", "terraform", "terraform"),
+                package("terraform_1", "terraform", "terraform1"),
+                package("ngrok", "ngrok", "ngrok"),
+            ],
+            ..LockedTool::default()
         }
-    }
-
-    fn text(dropped: &[Dropped], generation: Option<u32>) -> String {
-        let buf = SharedBuf::default();
-        let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
-        render(&mut ui.out, dropped, generation, 0.25);
-        buf.text()
     }
 
     #[test]
     fn a_command_names_its_package() {
-        let mut m = nx_core::Manifest::default();
+        let mut m = Manifest::default();
         m.add_tool(&["ripgrep".into()]);
         m.add_host(&["wayland-devel".into()]);
-        let tool = nx_core::LockedTool {
-            packages: vec![nx_core::ToolPackage {
-                attr: "ripgrep".into(),
-                name: "ripgrep".into(),
-                bins: vec![nx_core::Bin {
-                    name: "rg".into(),
-                    path: String::new(),
-                }],
-                ..nx_core::ToolPackage::default()
-            }],
-            ..nx_core::LockedTool::default()
-        };
-        assert_eq!(attr_for(&m, &tool, "rg"), "ripgrep");
-        assert_eq!(attr_for(&m, &tool, "wayland-devel"), "wayland-devel");
-        assert_eq!(attr_for(&m, &tool, "nope"), "nope");
+        assert_eq!(attr_for(&m, &tool(), "rg"), "ripgrep");
+        assert_eq!(attr_for(&m, &tool(), "wayland-devel"), "wayland-devel");
+        assert_eq!(attr_for(&m, &tool(), "nope"), "nope");
     }
 
     #[test]
-    fn lists_what_left_and_the_generation() {
-        let dropped = [package("wayland-devel"), package("libffi-devel")];
-        assert_eq!(
-            text(&dropped, Some(5)),
-            "  - wayland-devel 1-1.fc45\n\
-             \x20 - libffi-devel 1-1.fc45\n\
-             \x20 ✓ 2 packages removed · generation 5 in 0.2s\n"
-        );
-        assert_eq!(
-            text(&dropped[..1], None),
-            "  - wayland-devel 1-1.fc45\n  1 package removed · dry run, nothing changed\n"
-        );
-        assert_eq!(
-            text(&[], Some(6)),
-            "  ✓ manifest updated · generation 6 in 0.2s\n"
-        );
+    fn an_unfree_allowance_leaves_with_its_last_package() -> Result<()> {
+        let mut m = Manifest::default();
+        m.add_tool(&["terraform".into(), "terraform_1".into(), "ngrok".into()]);
+        m.tool.unfree = vec!["terraform".into(), "ngrok".into(), "vault".into()];
+        drop_from(&mut m, &tool(), &["terraform".into(), "ngrok".into()])?;
+        // terraform_1 still needs it; vault isn't nx's to judge.
+        assert_eq!(m.tool.unfree, ["terraform", "vault"]);
+        drop_from(&mut m, &tool(), &["terraform1".into()])?;
+        assert_eq!(m.tool.unfree, ["vault"]);
+        assert!(drop_from(&mut m, &tool(), &["nope".into()]).is_err());
+        Ok(())
     }
 }

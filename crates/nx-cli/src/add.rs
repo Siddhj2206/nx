@@ -8,10 +8,11 @@ use anyhow::{Context, Result, bail};
 use nx_core::{CliTools, ScriptletAllow};
 use nx_rpm::{Package, Refresh};
 
-use crate::apply::Session;
+use crate::apply::{How, Session};
+use crate::changes::{self, Change};
 use crate::host::Machine;
 use crate::route::{self, Forced, Found, Nixpkg, Route, Rpm};
-use crate::tool::{self, Tier};
+use crate::tool;
 use crate::ui::{self, Stream, Ui};
 
 /// What `nx add` was told besides the packages.
@@ -53,28 +54,29 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         );
     }
     let refresh = opts.refresh.unwrap_or(Refresh::IfMissing);
-    let mut session = Session::open(ui, machine, refresh, opts.dry_run, |_| Ok(()))?;
-    let mut manifest = session.manifest.clone();
-    for a in allow {
-        if !manifest.scriptlets.contains(&a) {
-            manifest.scriptlets.push(a);
+    let mut session = Session::open(ui, machine, refresh, opts.dry_run, |m| {
+        for a in allow {
+            if !m.scriptlets.contains(&a) {
+                m.scriptlets.push(a);
+            }
         }
-    }
-    for o in &opts.overrides {
-        if !manifest.overrides.names.contains(o) {
-            manifest.overrides.names.push(o.clone());
+        for o in &opts.overrides {
+            if !m.overrides.names.contains(o) {
+                m.overrides.names.push(o.clone());
+            }
         }
-    }
+        Ok(())
+    })?;
 
     // Where each new spec goes.
+    let routing = session.manifest.routing.clone();
     let use_tool = opts.forced != Some(Forced::Host)
         && tool::available()
-        && (manifest.routing.cli_tools == CliTools::Nix || opts.forced == Some(Forced::Tool));
-    let toolchains = route::toolchains(&manifest.routing);
-    let mut tier: Option<Tier> = None;
+        && (routing.cli_tools == CliTools::Nix || opts.forced == Some(Forced::Tool));
+    let toolchains = route::toolchains(&routing);
     let (mut fresh_host, mut fresh_tool, mut problems) = (Vec::new(), Vec::new(), Vec::new());
     for spec in specs {
-        if manifest.has(spec) {
+        if session.manifest.has(spec) {
             continue;
         }
         let mut found = Found::default();
@@ -86,21 +88,17 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             });
         }
         if use_tool && !route::host_only(spec) {
-            let t = match tier.as_mut() {
-                Some(t) => t,
-                None => tier.insert(Tier::open(ui, session.tool.as_ref(), false)?),
-            };
-            let catalog = t.catalog(ui)?;
+            let unfree = session.manifest.tool.unfree.clone();
+            let catalog = session.tier(ui)?.catalog(ui)?;
             found.nix = catalog.find(spec).map(|p| {
-                let allowed = opts.allow_unfree || manifest.tool.unfree.contains(&p.pname);
+                let allowed = opts.allow_unfree || unfree.contains(&p.pname);
                 Nixpkg::new(p, allowed, &toolchains)
             });
             if found.rpm.is_none() && found.nix.is_none() {
                 found.similar = catalog.similar(spec, 3);
             }
         }
-        let route = route::decide(spec, opts.forced, manifest.routing.cli_tools, &found);
-        let nix = found.nix;
+        let route = route::decide(spec, opts.forced, routing.cli_tools, &found);
         match route {
             // Without the catalog, the solver has the last word on a name.
             Route::Refuse(_) if !use_tool => {
@@ -118,12 +116,13 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             }
             Route::Tool { attr, reason } => {
                 session.routes.insert(attr.clone(), reason);
-                if let Some(n) = nix.as_ref().filter(|n| n.unfree)
-                    && !manifest.tool.unfree.contains(&n.pname)
+                let unfree = &mut session.manifest.tool.unfree;
+                if let Some(n) = found.nix.as_ref().filter(|n| n.unfree)
+                    && !unfree.contains(&n.pname)
                 {
-                    manifest.tool.unfree.push(n.pname.clone());
+                    unfree.push(n.pname.clone());
                 }
-                if !manifest.tool.packages.contains(&attr) && !fresh_tool.contains(&attr) {
+                if !session.manifest.tool.packages.contains(&attr) && !fresh_tool.contains(&attr) {
                     fresh_tool.push(attr);
                 }
             }
@@ -133,78 +132,72 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     if !problems.is_empty() {
         bail!(problems.join("\n"));
     }
-    manifest.add_host(&fresh_host);
-    manifest.add_tool(&fresh_tool);
-    let resolved = session.resolve_manifest(ui, &manifest.host.packages, specs)?;
+    if fresh_host.is_empty()
+        && fresh_tool.is_empty()
+        && session.manifest == current_manifest(&session)
+    {
+        render_nothing(&mut ui.out, specs, &[]);
+        return Ok(());
+    }
+    session.manifest.add_host(&fresh_host);
+    session.manifest.add_tool(&fresh_tool);
+    let outcome = session.plan(
+        ui,
+        &How {
+            asked: specs,
+            ..How::default()
+        },
+    )?;
 
     // A new spec nothing was resolved for is in the image already. It stays
     // in the manifest all the same (design invariant 8): intent, so it comes
     // back if the image drops it.
     let in_image: Vec<&str> = fresh_host
         .iter()
-        .filter(|s| !resolved.all.iter().any(|p| p.requested.contains(s)))
+        .filter(|s| !outcome.all.iter().any(|p| p.requested.contains(s)))
         .map(String::as_str)
         .collect();
-
-    let mut tool_added = Vec::new();
-    let mut tool_download = 0;
-    if let Some(t) = tier.as_ref().filter(|_| !fresh_tool.is_empty()) {
-        let system = tool::system(session.universe.arch());
-        let locked = t.resolve(ui, &manifest, session.tool.as_ref(), &system)?;
-        let plan = t.plan(&locked, &manifest.caches)?;
-        tool_download = plan.sum.download;
-        tool_added = fresh_tool
+    if opts.dry_run {
+        let tools: Vec<ToolAdded> = fresh_tool
             .iter()
-            .filter_map(|a| locked.package(a))
+            .filter_map(|a| session.tool.as_ref()?.package(a))
             .map(|p| ToolAdded {
                 attr: p.attr.clone(),
                 version: p.version.clone(),
             })
             .collect();
-        if !opts.dry_run {
-            t.realise(ui, &locked, &plan, &manifest, &system)?;
-        }
-        session.tool = Some(locked);
-        session.fresh_tools.clone_from(&fresh_tool);
-    }
-
-    if opts.dry_run {
         render_plan(
             &mut ui.out,
             &in_image,
-            &resolved.new,
-            &tool_added,
-            tool_download,
+            &outcome.new_host,
+            &tools,
+            outcome.tool_download,
         );
         return Ok(());
     }
-    if fresh_host.is_empty() && fresh_tool.is_empty() {
-        render_nothing(&mut ui.out, specs, &[]);
-        return Ok(());
-    }
-    let built = session.install(ui, &manifest, &resolved.all)?;
-    for name in &built.allowed {
-        ui.warn(format_args!(
-            "{name}: scriptlets nx can't translate are skipped, as you allowed"
-        ));
-    }
-    for nevra in &built.outside_usr {
-        ui.warn(format_args!(
-            "{nevra} has files outside /usr, which the extension leaves out"
-        ));
-    }
+    let built = session.install(ui, &outcome.all)?;
     render_added(
         &mut ui.out,
-        &Added {
-            packages: &resolved.new,
-            tools: &tool_added,
-            tool_download,
-            in_image: &in_image,
+        &outcome.changes,
+        &in_image,
+        &changes::Done {
+            generation: Some(built.generation.number),
+            download: outcome.download(),
+            secs: started.elapsed().as_secs_f64(),
+            ..changes::Done::default()
         },
-        built.generation.number,
-        started.elapsed().as_secs_f64(),
     );
     Ok(())
+}
+
+/// The manifest the current generation has, to tell an allowance or an
+/// override from nothing at all.
+fn current_manifest(session: &Session) -> nx_core::Manifest {
+    session
+        .current
+        .as_ref()
+        .map(|g| g.manifest.clone())
+        .unwrap_or_default()
 }
 
 /// `--dry-run`: what adding would install, in columns.
@@ -294,58 +287,20 @@ fn render_nothing(out: &mut Stream, specs: &[String], in_image: &[&str]) {
     }
 }
 
-/// What an install added.
-struct Added<'a> {
-    packages: &'a [Package],
-    tools: &'a [ToolAdded],
-    tool_download: u64,
-    in_image: &'a [&'a str],
-}
-
-/// After an install: one `+` line per new package, a line for specs the
-/// image already provides, then the total.
-fn render_added(out: &mut Stream, added: &Added, generation: u32, secs: f64) {
-    let style = out.style;
-    let size: u64 =
-        added.packages.iter().map(|p| p.download_size).sum::<u64>() + added.tool_download;
-    for p in added.packages {
-        out.line(format_args!(
-            "{} {} {}",
-            style.green(ui::SYM_ADDED),
-            p.name,
-            style.dim(&p.evr)
-        ));
-    }
-    for t in added.tools {
-        out.line(format_args!(
-            "{} {} {}",
-            style.green(ui::SYM_ADDED),
-            t.attr,
-            style.dim(&format!("{} · nixpkgs", t.version))
-        ));
-    }
-    if !added.in_image.is_empty() {
+/// After an install: one line per package that changed, a line for specs
+/// the image already provides, then the total.
+fn render_added(out: &mut Stream, changes: &[Change], in_image: &[&str], done: &changes::Done) {
+    changes::lines(out, changes);
+    if !in_image.is_empty() {
+        let style = out.style;
         out.line(format_args!(
             "{} {} {}",
             style.green(ui::SYM_DONE),
-            added.in_image.join(", "),
+            in_image.join(", "),
             style.dim("already in the image · kept in the manifest in case the image drops it")
         ));
     }
-    let count = added.packages.len() + added.tools.len();
-    if count == 0 {
-        out.line(format_args!(
-            "{} manifest updated · generation {generation} in {secs:.1}s",
-            style.green(ui::SYM_DONE)
-        ));
-        return;
-    }
-    out.line(format_args!(
-        "{} {} · generation {generation} · {} in {secs:.1}s",
-        style.green(ui::SYM_DONE),
-        ui::plural(count, "package") + " added",
-        ui::size(size)
-    ));
+    changes::summary(out, changes, done);
 }
 
 #[cfg(test)]
@@ -400,21 +355,8 @@ mod tests {
         );
     }
 
-    fn with<'a>(
-        packages: &'a [Package],
-        tools: &'a [ToolAdded],
-        in_image: &'a [&'a str],
-    ) -> Added<'a> {
-        Added {
-            packages,
-            tools,
-            tool_download: 0,
-            in_image,
-        }
-    }
-
     #[test]
-    fn tool_packages_join_the_plan_and_the_report() {
+    fn tool_packages_join_the_plan() {
         let rg = [ToolAdded {
             attr: "ripgrep".into(),
             version: "15.2.0".into(),
@@ -428,31 +370,17 @@ mod tests {
              \n\
              \x20 2 packages · 2.0 MiB download, 160 KiB installed · dry run, nothing changed\n"
         );
-        assert_eq!(
-            text(|out| render_added(
-                out,
-                &Added {
-                    tool_download: 2 << 20,
-                    ..with(&[], &rg, &[])
-                },
-                5,
-                3.0
-            )),
-            "  + ripgrep 15.2.0 · nixpkgs\n\
-             \x20 ✓ 1 package added · generation 5 · 2.0 MiB in 3.0s\n"
-        );
     }
 
     #[test]
-    fn reports_what_was_added() {
-        let added = [package("libxkbcommon-devel", "1.13.1-4.fc45", "koji", 74)];
+    fn says_what_is_in_the_image_before_the_total() {
+        let done = changes::Done {
+            generation: Some(4),
+            secs: 0.5,
+            ..changes::Done::default()
+        };
         assert_eq!(
-            text(|out| render_added(out, &with(&added, &[], &[]), 3, 1.24)),
-            "  + libxkbcommon-devel 1.13.1-4.fc45\n\
-             \x20 ✓ 1 package added · generation 3 · 74 KiB in 1.2s\n"
-        );
-        assert_eq!(
-            text(|out| render_added(out, &with(&[], &[], &["glibc"]), 4, 0.5)),
+            text(|out| render_added(out, &[], &["glibc"], &done)),
             "  ✓ glibc already in the image · kept in the manifest in case the image drops it\n\
              \x20 ✓ manifest updated · generation 4 in 0.5s\n"
         );

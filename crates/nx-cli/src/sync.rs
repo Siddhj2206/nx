@@ -201,7 +201,7 @@ fn build(
         }
         session.leave_out(skipped);
     }
-    let built = session.build(ui, &manifest, &resolved.all)?;
+    let built = session.build(ui, &resolved.all)?;
     let number = built.generation.number;
     if booted {
         // The booted image had none (it was updated without nx noticing, or

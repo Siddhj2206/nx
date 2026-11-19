@@ -73,7 +73,13 @@ strike it from here once done, and record the decision in `design.md`.
 
 ## Architecture: duplication and overcomplication
 
-8. *Six commands re-implement one pipeline.* `add`, `remove`, `upgrade`,
+8. **Fixed.** `Session::plan(How)` resolves both tiers for every command
+   (`asked`, `newer_host`, `newer_tools`; fresh tool packages are worked
+   out from the lock), `apply::finish` builds and reports, and
+   `changes.rs` is the one change list and summary. `upgrade.rs` and
+   `converge.rs` are options plus the pipeline. `sync`'s partial resolve
+   stays its own. The finding as written:
+   *Six commands re-implement one pipeline.* `add`, `remove`, `upgrade`,
    `apply`, `repo add|remove` and `cache add|remove` each do: change the
    manifest, resolve, open/resolve/plan/realise the tool tier, diff,
    install, render. Duplicated: the host before/after map (`upgrade.rs`,
@@ -83,11 +89,21 @@ strike it from here once done, and record the decision in `design.md`.
    manifest edit plus apply with options (allow newer builds, move the pin,
    which tools are new). One `converge(session, Intent) -> Changes` and one
    renderer.
-9. *`Session` is a shallow god object.* Callers set and read `pub tool`,
+9. **Partly fixed.** `fresh_tools` is gone (computed in `expose`), the
+   tool tier is opened through `Session::tier`, and the order of calls is
+   `open` → `plan` → `install`/`finish`. `current`, `manifest`, `universe`,
+   `routes` and `tool` are still public fields `add`, `sync` and `remove`
+   read or change. The finding as written:
+   *`Session` is a shallow god object.* Callers set and read `pub tool`,
    `fresh_tools`, `routes`, `manifest`, `current`, `universe` between
    calls; the ordering rules (set `tool`/`fresh_tools` before `install`,
    `leave_out` before `build`) aren't in its interface.
-10. *No seam at the orchestration level.* `Session` makes `Ureq::new()`
+10. **Open, narrowed.** The pure parts of the pipeline are tested
+    (`changes`, `apply::without_new`, `remove::drop_from`); `Session` itself
+    still makes its own HTTP, `Nix` and state, so `plan` runs only in the
+    VM. Next step: `Session::open` taking the `State`, an `Http` and a `Nix`.
+    The finding as written:
+    *No seam at the orchestration level.* `Session` makes `Ureq::new()`
     itself; `Tier` hardcodes `nx_nix::System` and `Web` though a `Nix`
     trait exists; `tool::restore` and `gc` call `System` directly; the state
     directory comes from the environment through `host::state()` in about

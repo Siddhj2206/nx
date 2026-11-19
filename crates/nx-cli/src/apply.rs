@@ -14,8 +14,10 @@ use nx_core::{Built, Generation, Lock, LockedPackage, LockedRepo, LockedTool, Ma
 use nx_rpm::packages::Job;
 use nx_rpm::{Package, Plan, Planned, Refresh, Relative, Repo, Universe, Ureq};
 
+use crate::changes::{self, Change};
 use crate::host::{self, Machine};
 use crate::keys::Keys;
+use crate::tool::{self, Tier};
 use crate::ui::{self, Ui};
 
 /// Downloads at once; Fedora's mirrors are fine with a handful.
@@ -42,18 +44,49 @@ pub struct Session<'m> {
     koji_repo: HashMap<String, String>,
     /// Manifest packages the next generation leaves out ([`Session::leave_out`]).
     skipped: Vec<String>,
-    /// The next generation's tool tier: the current one's until a command
-    /// resolves another ([`crate::tool::Tier::resolve`]).
+    /// The next generation's tool tier: the current one's until
+    /// [`Session::plan`] resolves another.
     pub tool: Option<LockedTool>,
-    /// Tool-tier packages this command adds: their commands must not
-    /// clash ([`crate::tool::check`]).
-    pub fresh_tools: Vec<String>,
+    /// The tool tier at the pinned release, opened when first needed.
+    tier: Option<Tier>,
     /// Why each manifest entry is in its tier (`nx why`): the current
     /// generation's, plus what this command routed.
     pub routes: BTreeMap<String, String>,
     /// Resolve without preferring the current generation's builds
     /// (`nx upgrade`).
     unlocked: bool,
+    dry_run: bool,
+}
+
+/// How [`Session::plan`] treats the two tiers.
+#[derive(Debug, Default)]
+pub struct How<'a> {
+    /// What the command names: it must resolve, never left out.
+    pub asked: &'a [String],
+    /// Host packages may move to newer builds (`nx upgrade --host`).
+    pub newer_host: bool,
+    /// The nixpkgs pin moves to the channel's current release (`nx upgrade
+    /// --tool`).
+    pub newer_tools: bool,
+}
+
+/// What a change will do: the host tier to build, and both tiers' changes.
+pub struct Outcome {
+    pub all: Vec<Planned>,
+    /// Host packages the current generation doesn't have.
+    pub new_host: Vec<Package>,
+    pub changes: Vec<Change>,
+    /// The nixpkgs release the tool tier moved to.
+    pub moved: Option<String>,
+    /// What realising the tool tier downloads.
+    pub tool_download: u64,
+}
+
+impl Outcome {
+    /// Everything downloaded: new host packages and the tool tier.
+    pub fn download(&self) -> u64 {
+        self.new_host.iter().map(|p| p.download_size).sum::<u64>() + self.tool_download
+    }
 }
 
 /// The solver found no way to install what was asked: a problem with the
@@ -144,16 +177,116 @@ impl<'m> Session<'m> {
             koji_repo: HashMap::new(),
             skipped: Vec::new(),
             tool,
-            fresh_tools: Vec::new(),
+            tier: None,
             routes,
             unlocked: false,
+            dry_run,
         })
     }
 
-    /// Lets the next resolve move host-tier packages to newer builds: it no
-    /// longer prefers the ones the current generation has.
-    pub fn unlock(&mut self) {
-        self.unlocked = true;
+    /// The tool tier at the pinned release (the channel's current one when
+    /// nothing is pinned yet), opened once.
+    pub fn tier(&mut self, ui: &mut Ui) -> Result<&mut Tier> {
+        let tier = match self.tier.take() {
+            Some(t) => t,
+            None => Tier::open(ui, self.tool.as_ref(), false)?,
+        };
+        Ok(self.tier.insert(tier))
+    }
+
+    /// Resolves both tiers for the session's manifest, as `how` says, and
+    /// (unless a dry run) realises the tool tier. Nothing is built yet:
+    /// [`Session::install`] or [`finish`] does that.
+    pub fn plan(&mut self, ui: &mut Ui, how: &How) -> Result<Outcome> {
+        self.unlocked = how.newer_host;
+        let specs = self.manifest.host.packages.clone();
+        let resolved = self.resolve_manifest(ui, &specs, how.asked)?;
+        let mut changes = crate::changes::host(self.locked(), &resolved.all);
+        let before = self.tool.clone();
+        let (moved, tool_download) = if how.newer_tools {
+            self.upgrade_tools(ui)?
+        } else {
+            (None, self.resolve_tools(ui)?)
+        };
+        changes.extend(crate::changes::tools(before.as_ref(), self.tool.as_ref()));
+        Ok(Outcome {
+            all: resolved.all,
+            new_host: resolved.new,
+            changes,
+            moved,
+            tool_download,
+        })
+    }
+
+    /// The manifest's tool tier at the pinned release: what the lock has
+    /// stays as it is, what it lacks is evaluated and realised. Returns
+    /// what realising downloads.
+    fn resolve_tools(&mut self, ui: &mut Ui) -> Result<u64> {
+        let previous = self.tool.clone();
+        if let Some(kept) = without_new(previous.as_ref(), &self.manifest.tool.packages) {
+            self.tool = kept;
+            return Ok(0);
+        }
+        if !tool::available() {
+            bail!(
+                "the tool tier needs Nix in the image, and {} is missing",
+                nx_nix::STORE
+            );
+        }
+        let system = tool::system(self.universe.arch());
+        let manifest = self.manifest.clone();
+        let dry_run = self.dry_run;
+        let tier = self.tier(ui)?;
+        let locked = tier.resolve(ui, &manifest, previous.as_ref(), &system)?;
+        let plan = tier.plan(&locked, &manifest.caches)?;
+        if !dry_run {
+            tier.realise(ui, &locked, &plan, &manifest, &system)?;
+        }
+        self.tool = Some(locked);
+        Ok(plan.sum.download)
+    }
+
+    /// The tool tier at the channel's current release: every package
+    /// evaluated there, or kept as it is when the release no longer has it.
+    /// At an unchanged pin only paths the store lost are done again.
+    /// Returns the release moved to and what realising downloads.
+    fn upgrade_tools(&mut self, ui: &mut Ui) -> Result<(Option<String>, u64)> {
+        if !tool::available() || self.manifest.tool.packages.is_empty() {
+            return Ok((None, self.resolve_tools(ui)?));
+        }
+        let tier = Tier::open(ui, self.tool.as_ref(), true)?;
+        let same_pin =
+            self.tool.as_ref().map(|t| t.rev.as_str()) == Some(tier.release.rev.as_str());
+        let lost = self.tool.as_ref().is_some_and(tool::incomplete);
+        if same_pin && !lost {
+            return Ok((None, self.resolve_tools(ui)?));
+        }
+        let system = tool::system(self.universe.arch());
+        let manifest = self.manifest.clone();
+        let (locked, held) =
+            tier.resolve_holding(ui, &manifest, None, self.tool.as_ref(), &system)?;
+        if !held.is_empty() {
+            ui.warn(format_args!(
+                "nixpkgs {} has no usable {}: keeping the build you have (nx remove {} to drop it)",
+                tier.release.version(),
+                held.join(", "),
+                if held.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        let mut download = 0;
+        if !self.dry_run {
+            let plan = tier.plan(&locked, &manifest.caches)?;
+            download = plan.sum.download;
+            tier.realise(ui, &locked, &plan, &manifest, &system)?;
+        }
+        let version = tier.release.version();
+        let moved = if same_pin {
+            format!("{version}, realised again")
+        } else {
+            version.to_owned()
+        };
+        self.tool = Some(locked);
+        Ok((Some(moved), download))
     }
 
     /// Accepts the keys now pinned for `ids`, though they differ from what
@@ -277,10 +410,11 @@ impl<'m> Session<'m> {
     /// current: making it live is [`Session::install`]'s job, or the
     /// caller's for an image that isn't booted. The tool tier's outputs
     /// become GC roots once the generation has its final name.
-    pub fn build(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
+    pub fn build(&mut self, ui: &mut Ui, all: &[Planned]) -> Result<Built> {
         // Held until the session ends, so `install` activates under it too.
         let guard = self.guard.take().context("a dry run cannot build")?;
-        let built = self.build_locked(ui, &guard, manifest, all);
+        let manifest = self.manifest.clone();
+        let built = self.build_locked(ui, &guard, &manifest, all);
         self.guard = Some(guard);
         built
     }
@@ -400,11 +534,18 @@ impl<'m> Session<'m> {
             &crate::tool::commands,
         );
         let previous = self.current.as_ref().and_then(|g| g.lock.tool.as_ref());
+        // Packages this change adds: their commands must not clash.
+        let fresh: Vec<String> = tool
+            .packages
+            .iter()
+            .filter(|p| previous.and_then(|t| t.package(&p.attr)).is_none())
+            .map(|p| p.attr.clone())
+            .collect();
         crate::tool::check(
             ui,
             &tool,
             &exposure,
-            &self.fresh_tools,
+            &fresh,
             previous,
             &manifest.overrides.names,
         )?;
@@ -417,14 +558,24 @@ impl<'m> Session<'m> {
     /// build on this generation, or this change is lost. The staged and
     /// rollback images get theirs too (design invariant 6), best effort:
     /// the change is live either way.
-    pub fn install(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
-        let built = self.build(ui, manifest, all)?;
+    pub fn install(&mut self, ui: &mut Ui, all: &[Planned]) -> Result<Built> {
+        let built = self.build(ui, all)?;
         crate::live::activate(
             ui,
             &self.state,
             built.generation.number,
-            manifest.host.backend,
+            self.manifest.host.backend,
         )?;
+        for name in &built.allowed {
+            ui.warn(format_args!(
+                "{name}: scriptlets nx can't translate are skipped, as you allowed"
+            ));
+        }
+        for nevra in &built.outside_usr {
+            ui.warn(format_args!(
+                "{nevra} has files outside /usr, which the extension leaves out"
+            ));
+        }
         // The sync below takes the lock itself, once per image.
         self.guard = None;
         if let Err(e) = crate::sync::deployed(ui, self.machine, Refresh::IfMissing) {
@@ -582,6 +733,56 @@ impl<'m> Session<'m> {
         }
         Ok(lock)
     }
+}
+
+/// The tool tier for `attrs` when the lock has every one of them: the lock
+/// less what left, with nothing to evaluate. `None` when something is new.
+fn without_new(previous: Option<&LockedTool>, attrs: &[String]) -> Option<Option<LockedTool>> {
+    if attrs
+        .iter()
+        .any(|a| previous.and_then(|p| p.package(a)).is_none())
+    {
+        return None;
+    }
+    Some(previous.map(|p| {
+        LockedTool {
+            packages: p
+                .packages
+                .iter()
+                .filter(|t| attrs.contains(&t.attr))
+                .cloned()
+                .collect(),
+            ..p.clone()
+        }
+    }))
+}
+
+/// Builds what `outcome` planned and makes it live (unless a dry run),
+/// then reports both tiers' changes: the end of `nx remove`, `nx upgrade`
+/// and `nx apply`.
+pub fn finish(
+    ui: &mut Ui,
+    session: &mut Session,
+    outcome: &Outcome,
+    started: std::time::Instant,
+) -> Result<()> {
+    let generation = if session.dry_run {
+        None
+    } else {
+        Some(session.install(ui, &outcome.all)?.generation.number)
+    };
+    changes::lines(&mut ui.out, &outcome.changes);
+    changes::summary(
+        &mut ui.out,
+        &outcome.changes,
+        &changes::Done {
+            generation,
+            moved: outcome.moved.as_deref(),
+            download: outcome.download(),
+            secs: started.elapsed().as_secs_f64(),
+        },
+    );
+    Ok(())
 }
 
 /// What only the image can use, by the directory a package ships (as the
@@ -753,6 +954,35 @@ fn download(ui: &mut Ui, http: &Ureq, jobs: &[Job], dir: &Path) -> Result<Vec<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluates_only_when_the_manifest_names_something_new() {
+        let lock = LockedTool {
+            rev: "r".into(),
+            packages: ["ripgrep", "jq"]
+                .iter()
+                .map(|a| nx_core::ToolPackage {
+                    attr: (*a).into(),
+                    ..nx_core::ToolPackage::default()
+                })
+                .collect(),
+            ..LockedTool::default()
+        };
+        let attrs = |l: Option<LockedTool>| -> Vec<String> {
+            l.map(|l| l.packages.into_iter().map(|p| p.attr).collect())
+                .unwrap_or_default()
+        };
+        // A removal keeps the rest as it was, the pin too.
+        let kept = without_new(Some(&lock), &["jq".into()]);
+        assert_eq!(kept.clone().map(attrs), Some(vec!["jq".to_owned()]));
+        assert_eq!(kept.flatten().map(|l| l.rev).as_deref(), Some("r"));
+        // Nothing asked: an empty tier at the same pin; nothing ever: none.
+        assert_eq!(without_new(Some(&lock), &[]).map(attrs), Some(vec![]));
+        assert!(matches!(without_new(None, &[]), Some(None)));
+        // Something new needs the release.
+        assert!(without_new(Some(&lock), &["jq".into(), "fd".into()]).is_none());
+        assert!(without_new(None, &["fd".into()]).is_none());
+    }
 
     #[test]
     fn refuses_what_the_disk_cannot_hold() -> Result<()> {
