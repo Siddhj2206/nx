@@ -12,6 +12,8 @@
 #   phase hint      a package with kernel modules gets the image hint, and
 #                   nothing it needs is downloaded first
 #   phase race      two nx add at once both end up in the manifest
+#   phase owner     what is merged into /usr is root's copy, which tester
+#                   can't write
 #   phase complete  the shell's completion asks nx for live values
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -146,6 +148,23 @@ race)
 	done
 	as tester "nx remove $a $b" >/dev/null
 	echo "race: ok"
+	;;
+owner)
+	# What appears in /usr is root's copy, not the generation tester built.
+	p=libyaml-devel
+	as tester "nx add $p" >/dev/null
+	link=$(readlink /var/lib/extensions/nx)
+	[[ $link == /var/lib/nx-merged/* ]] || fail "the link names $link, not root's copy"
+	merged=/usr/include/yaml.h
+	built=$(readlink -f /var/lib/nx/current)/sysext$merged
+	[[ $(stat -c %u "$merged") == 0 && $(stat -c %u "$built") != 0 ]] || fail "owners: $(stat -c '%U %n' "$merged" "$built")"
+	[[ $(stat -c %i "$merged") != $(stat -c %i "$built") ]] || fail "$merged is the generation's own file"
+	as tester "test -w $merged" && fail "tester can write $merged"
+	as tester "test -w $(dirname "$merged")" && fail "tester can write $(dirname "$merged")"
+	[[ $(stat -c %u /var/lib/nx-merged) == 0 ]] || fail "/var/lib/nx-merged isn't root's"
+	(( $(find /var/lib/nx-merged -mindepth 1 -maxdepth 1 | wc -l) == 1 )) || fail "old copies were left: $(ls /var/lib/nx-merged)"
+	as tester "nx remove $p" >/dev/null
+	echo "owner: ok"
 	;;
 complete)
 	installed=$(as tester "nx list" | awk 'NR>0 && /^  [^ ]/ {print $1; exit}')

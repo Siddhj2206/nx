@@ -207,6 +207,7 @@ mod tests {
         let layout = Layout {
             state,
             extensions: dir.join("extensions"),
+            merged: dir.join("merged"),
             root,
             file_contexts: None,
             image: nx_activate::Image::None,

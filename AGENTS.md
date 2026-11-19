@@ -168,6 +168,13 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
 - `setfiles -r` fails with "Not a directory" on a path through the `current`
   symlink; pass `realpath`. systemd-sysext finds nx through the symlink
   `/var/lib/extensions/nx` (its boot-time search path), not `/run/extensions`.
+- That link names root's copy, `/var/lib/nx-merged/<N>.<pid>`, never a
+  generation: a generation is its builder's, and merging it would let
+  anything running as them rewrite `/usr`. nxd (and `nx select` at boot)
+  makes the copy in `validate`, reflinked; keep the checks on the copy and
+  on opened descriptors, not on the generation. Don't chown the store
+  instead: with `fs.protected_hardlinks=1` the next build couldn't
+  hardlink files it doesn't own.
 - `systemd-sysext status --json=short` lists `{"hierarchy","extensions"}`;
   nxd checks `nx` under `/usr` after a refresh, since a refresh can succeed
   and merge nothing. A forced sysext that doesn't merge is an error; an

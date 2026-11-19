@@ -468,7 +468,7 @@ pub(crate) fn create_dir(dir: &Path) -> Result<()> {
 }
 
 /// Removes a tree nx left half-built, read-only directories included.
-pub(crate) fn remove_tree(dir: &Path) -> Result<()> {
+pub fn remove_tree(dir: &Path) -> Result<()> {
     if std::fs::symlink_metadata(dir).is_err() {
         return Ok(());
     }

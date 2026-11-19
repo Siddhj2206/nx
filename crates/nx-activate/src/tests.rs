@@ -67,6 +67,7 @@ fn layout(tmp: &Tmp, selinux: bool) -> std::io::Result<Layout> {
     Ok(Layout {
         state,
         extensions: tmp.0.join("extensions"),
+        merged: tmp.0.join("merged"),
         root,
         file_contexts: selinux.then_some(contexts),
         image: Image::None,
@@ -156,10 +157,113 @@ fn the_first_activation_labels_links_merges_and_records_sysext() -> Result<()> {
     );
     assert_eq!(l.state.current_number()?, Some(2));
     assert_eq!(l.state.backend()?, Some(Backend::Sysext));
+    let copy = std::fs::read_link(l.link()).map_err(|source| Error::Io {
+        path: l.link(),
+        source,
+    })?;
+    assert_eq!(copy.parent(), Some(l.merged.as_path()), "{copy:?}");
+    assert!(copy.join("usr/bin/tool").is_file());
+    Ok(())
+}
+
+/// Root's copy is what merges: the builder writing to its generation
+/// afterwards changes nothing merged, and nobody but root may write it.
+#[test]
+fn the_merged_tree_is_a_copy_of_roots_own() -> Result<()> {
+    let tmp = Tmp::new("copy");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, false).map_err(io)?;
+    let usr = l.state.root().join("generations/1/sysext/usr");
+    std::fs::set_permissions(usr.join("bin"), std::fs::Permissions::from_mode(0o2775))
+        .map_err(io)?;
+    std::fs::set_permissions(usr.join("bin/tool"), std::fs::Permissions::from_mode(0o775))
+        .map_err(io)?;
+    std::os::unix::fs::symlink("tool", usr.join("bin/alias")).map_err(io)?;
+    activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    let copy = std::fs::read_link(l.link()).map_err(io)?;
+    std::fs::write(usr.join("bin/tool"), "changed").map_err(io)?;
     assert_eq!(
-        std::fs::read_link(l.link()).ok(),
-        Some(l.state.root().join("current/sysext"))
+        std::fs::read_to_string(copy.join("usr/bin/tool")).map_err(io)?,
+        "x"
     );
+    let mode = |p: &Path| std::fs::symlink_metadata(p).map(|m| m.permissions().mode() & 0o7777);
+    assert_eq!(
+        mode(&copy.join("usr/bin")).map_err(io)?,
+        0o755,
+        "no setgid, no group write"
+    );
+    assert_eq!(mode(&copy.join("usr/bin/tool")).map_err(io)?, 0o755);
+    assert_eq!(
+        std::fs::read_link(copy.join("usr/bin/alias")).map_err(io)?,
+        Path::new("tool")
+    );
+    // Moving to generation 2 leaves only its copy.
+    activate(&l, &Fake::new(), 2, None, &only_uid())?;
+    let left: Vec<_> = std::fs::read_dir(&l.merged)
+        .map_err(io)?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(left, [std::fs::read_link(l.link()).map_err(io)?]);
+    Ok(())
+}
+
+/// A merge that fails puts the link back where it was and drops the new
+/// copy.
+#[test]
+fn a_failed_merge_keeps_the_merged_copy() -> Result<()> {
+    let tmp = Tmp::new("copy-fail");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, false).map_err(io)?;
+    activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    let before = std::fs::read_link(l.link()).map_err(io)?;
+    let mut fake = Fake::new();
+    fake.merged = "[]";
+    assert!(activate(&l, &fake, 2, Some(Backend::Sysext), &only_uid()).is_err());
+    assert_eq!(std::fs::read_link(l.link()).map_err(io)?, before);
+    assert_eq!(l.state.current_number()?, Some(1));
+    assert_eq!(std::fs::read_dir(&l.merged).map_err(io)?.count(), 1);
+    Ok(())
+}
+
+/// At boot the generation `nx select` made current gets its copy and the
+/// link, unless nothing is linked (prefix) or it has its copy already.
+#[test]
+fn boot_stages_the_selected_generation() -> Result<()> {
+    let tmp = Tmp::new("stage");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, true).map_err(io)?;
+    l.state.set_current(1)?;
+    let fake = Fake::new();
+    stage_at_boot(&l, &fake, &only_uid())?;
+    assert!(fake.calls().is_empty(), "nothing linked: nothing staged");
+    activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    l.state.set_current(2)?;
+    let fake = Fake::new();
+    stage_at_boot(&l, &fake, &only_uid())?;
+    assert_eq!(fake.calls(), ["setfiles"], "labelled, not refreshed");
+    let copy = std::fs::read_link(l.link()).map_err(io)?;
+    assert!(
+        copy.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("2."))
+    );
+    let fake = Fake::new();
+    stage_at_boot(&l, &fake, &only_uid())?;
+    assert!(fake.calls().is_empty(), "staged already");
+    // A boot that can't tell merges nothing, and the next one stages again.
+    unstage(&l);
+    assert!(!copy.exists());
+    stage_at_boot(&l, &Fake::new(), &only_uid())?;
+    assert!(std::fs::read_link(l.link()).map_err(io)?.is_dir());
     Ok(())
 }
 
@@ -170,11 +274,11 @@ fn a_failed_merge_falls_back_to_prefix_and_keeps_going() -> Result<()> {
         path: tmp.0.clone(),
         source: e,
     })?;
-    l.state.set_current(1)?;
+    activate(&l, &Fake::new(), 1, None, &only_uid())?;
     let mut fake = Fake::new();
     fake.fail = vec!["refresh"];
-    // refresh always fails here, so even unmerging cannot succeed: the
-    // fallback reports that instead of hiding it.
+    // refresh always fails here, so even unmerging generation 1 cannot
+    // succeed: the fallback reports that instead of hiding it.
     let err = activate(&l, &fake, 2, None, &only_uid()).err();
     assert!(
         matches!(

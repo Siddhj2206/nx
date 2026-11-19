@@ -189,7 +189,8 @@ fn generation(i: &Inputs, n: u32, lock: &Lock, out: &mut Vec<Finding>) {
                     "journalctl -b -u nx-settle -u systemd-sysext says why; nx sync merges it again",
                 ));
             }
-            let tree = i.state.root().join(format!("generations/{n}/sysext/usr"));
+            // Root's copy, through the link: what is merged.
+            let tree = i.root.join("var/lib/extensions/nx/usr");
             if let Some(label) = (i.label)(&tree).filter(|l| l.contains(":var_lib_t:")) {
                 out.push(fail(
                     format!(

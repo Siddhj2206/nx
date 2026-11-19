@@ -5,12 +5,14 @@
 //! things are) and a [`Runner`] (how commands run), so tests run
 //! unprivileged against a temporary tree and a fake `systemd-sysext`.
 //!
-//! The sysext backend (design, *Activation backends*): label the
-//! generation's extension tree for the paths it will appear at, point
-//! `current` at it, make sure `/var/lib/extensions/nx` links to it, and
-//! `systemd-sysext refresh`. The prefix backend is the fallback when the
-//! merge fails: no link, nothing merged, and `nx shell` exports the
-//! generation's `usr` as a prefix.
+//! The sysext backend (design, *Activation backends*): copy the
+//! generation's extension tree into root's own directory
+//! (`/var/lib/nx-merged`, reflinked), label the copy for the paths it will
+//! appear at, point `current` at the generation, link
+//! `/var/lib/extensions/nx` to the copy, and `systemd-sysext refresh`. The
+//! generation stays its builder's; what is merged is root's. The prefix
+//! backend is the fallback when the merge fails: no link, nothing merged,
+//! and `nx shell` exports the generation's `usr` as a prefix.
 
 pub mod nixconf;
 mod units;
@@ -55,6 +57,10 @@ pub struct Layout {
     pub state: State,
     /// systemd-sysext's primary search path, `/var/lib/extensions`.
     pub extensions: PathBuf,
+    /// Root's copies of extension trees, `/var/lib/nx-merged`: the one the
+    /// link names, and the next while it is being merged. Outside the state
+    /// directory, which administrators can write.
+    pub merged: PathBuf,
     /// The root whose `usr/lib/os-release` the extension must match.
     pub root: PathBuf,
     /// The policy's `file_contexts`, or `None` when SELinux is off.
@@ -84,6 +90,7 @@ impl Layout {
         Self {
             state,
             extensions: PathBuf::from("/var/lib/extensions"),
+            merged: PathBuf::from("/var/lib/nx-merged"),
             root: PathBuf::from("/"),
             file_contexts: file_contexts(Path::new("/")),
             image: Image::None,
@@ -97,9 +104,9 @@ impl Layout {
         self.extensions.join("nx")
     }
 
-    /// What the link points at: the current generation's extension tree.
-    fn link_target(&self) -> PathBuf {
-        self.state.root().join("current/sysext")
+    /// What the link names now, if there is one.
+    fn linked(&self) -> Option<PathBuf> {
+        std::fs::read_link(self.link()).ok()
     }
 }
 
@@ -286,26 +293,67 @@ pub fn settle_at_boot(layout: &Layout, runner: &dyn Runner) -> Result<Settled> {
         source,
     })?;
     sync_dir(&layout.extensions)?;
+    validate::prune(layout, None);
     Ok(Settled::FellBack(why))
 }
 
+/// Run by `nx select` at boot, once `current` names the generation for
+/// the booted image and before `systemd-sysext` merges: gives it root's
+/// copy and points the link at it, as an activation would (without the
+/// refresh: the boot's merge is next). Nothing to do when nothing is linked
+/// (the prefix backend, or nothing made live yet) or the link already
+/// names this generation's copy. `allowed` is as for [`validate`].
+pub fn stage_at_boot(
+    layout: &Layout,
+    runner: &dyn Runner,
+    allowed: &dyn Fn(u32) -> bool,
+) -> Result<()> {
+    let Some(number) = layout.state.current_number()? else {
+        unstage(layout);
+        return Ok(());
+    };
+    if std::fs::symlink_metadata(layout.link()).is_err() {
+        return Ok(());
+    }
+    let staged = layout.linked().is_some_and(|t| {
+        t.parent() == Some(layout.merged.as_path())
+            && t.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&format!("{number}.")))
+            && t.is_dir()
+    });
+    if staged {
+        return Ok(());
+    }
+    let valid = validate(layout, number, allowed)?;
+    label(layout, runner, &valid.sysext)
+        .and_then(|()| link(layout, &valid.sysext))
+        .inspect_err(|_| validate::prune(layout, None))?;
+    validate::prune(layout, Some(&valid.sysext));
+    Ok(())
+}
+
+/// For a boot that can't tell which generation fits: removes root's copies,
+/// so the link names nothing and nothing merges. The link stays, so the
+/// next boot that can tell stages again.
+pub fn unstage(layout: &Layout) {
+    validate::prune(layout, None);
+}
+
 /// The record and extension of the generation that is merged now, if one
-/// is: the current one under the sysext backend.
+/// is: the current one under the sysext backend, from the tree the link
+/// names (root's copy).
 fn merged_now(layout: &Layout) -> Option<(nx_core::Activation, PathBuf)> {
     if layout.state.backend().ok()? != Some(Backend::Sysext) {
         return None;
     }
     let n = layout.state.current_number().ok()??;
     let g = nx_core::Generation::read(&layout.state, n).ok()?;
-    Some((
-        g.activation,
-        layout
-            .state
-            .root()
-            .join("generations")
-            .join(n.to_string())
-            .join("sysext"),
-    ))
+    let ext = layout
+        .linked()
+        .filter(|t| t.is_dir())
+        .unwrap_or_else(|| g.sysext());
+    Some((g.activation, ext))
 }
 
 /// Stops the units of everything merged, before it is unmerged.
@@ -337,14 +385,18 @@ fn prefix_notice(new: &nx_core::Activation, services: &mut Services) {
     }
 }
 
-/// Labels, points `current` at `number`, links the extension and merges.
-/// Any failure puts back what was there before: the previous generation
-/// (or no `current` and no link, for the first one), re-merged best-effort.
+/// Labels root's copy, points `current` at `number`, links the copy and
+/// merges. Any failure puts back what was there before: the previous
+/// generation and link (or no `current` and no link, for the first one),
+/// re-merged best-effort. Either way only the copy that ends up linked is
+/// kept.
 fn sysext(layout: &Layout, runner: &dyn Runner, number: u32, valid: &Validated) -> Result<()> {
-    label(layout, runner, &valid.sysext)?;
+    let was_linked = layout.linked();
+    label(layout, runner, &valid.sysext)
+        .inspect_err(|_| validate::prune(layout, was_linked.as_deref()))?;
     let previous = layout.state.current_number()?;
     layout.state.set_current(number)?;
-    let merged = link(layout)
+    let merged = link(layout, &valid.sysext)
         .and_then(|()| refresh(runner))
         .and_then(|()| check_merged(runner));
     if let Err(e) = merged {
@@ -353,14 +405,23 @@ fn sysext(layout: &Layout, runner: &dyn Runner, number: u32, valid: &Validated) 
                 let _ = layout.state.set_current(previous);
             }
             None => {
-                let _ = std::fs::remove_file(layout.link());
                 let _ = std::fs::remove_file(layout.state.root().join("current"));
             }
         }
+        match &was_linked {
+            Some(target) => {
+                let _ = link(layout, target);
+            }
+            None => {
+                let _ = std::fs::remove_file(layout.link());
+            }
+        }
         let _ = refresh(runner);
+        validate::prune(layout, was_linked.as_deref());
         return Err(e);
     }
     layout.state.set_backend(Backend::Sysext)?;
+    validate::prune(layout, Some(&valid.sysext));
     Ok(())
 }
 
@@ -376,6 +437,7 @@ fn prefix(layout: &Layout, runner: &dyn Runner, number: u32) -> Result<()> {
         sync_dir(&layout.extensions)?;
         refresh(runner)?;
     }
+    validate::prune(layout, None);
     layout.state.set_current(number)?;
     layout.state.set_backend(Backend::Prefix)?;
     Ok(())
@@ -411,11 +473,10 @@ fn label(layout: &Layout, runner: &dyn Runner, tree: &Path) -> Result<()> {
     }
 }
 
-/// Makes `/var/lib/extensions/nx` a link to the current extension tree, in
-/// one rename.
-fn link(layout: &Layout) -> Result<()> {
+/// Makes `/var/lib/extensions/nx` a link to `target` (root's copy), in one
+/// rename.
+fn link(layout: &Layout, target: &Path) -> Result<()> {
     let link = layout.link();
-    let target = layout.link_target();
     match std::fs::symlink_metadata(&link) {
         Ok(m) if m.file_type().is_symlink() => {
             if std::fs::read_link(&link).is_ok_and(|t| t == target) {
@@ -437,7 +498,7 @@ fn link(layout: &Layout) -> Result<()> {
     })?;
     let tmp = layout.extensions.join(".nx.part");
     let _ = std::fs::remove_file(&tmp);
-    std::os::unix::fs::symlink(&target, &tmp).map_err(|source| Error::Io {
+    std::os::unix::fs::symlink(target, &tmp).map_err(|source| Error::Io {
         path: tmp.clone(),
         source,
     })?;

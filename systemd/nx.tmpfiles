@@ -18,3 +18,7 @@ a+     /var/lib/nx/store       -     -    -     -   group:wheel:rwx,default:grou
 a+     /var/lib/nx/lock        -     -    -     -   group:wheel:rw
 a+     /var/lib/nx/keys        -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
 a+     /var/lib/nx/cache       -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+# Root's copy of the merged extension (nxd makes it from the generation it
+# activates, /var/lib/extensions/nx links to it): outside /var/lib/nx, so
+# no one but root can write what appears in /usr.
+d      /var/lib/nx-merged      0755  root root  -

@@ -41,7 +41,12 @@ strike it from here once done, and record the decision in `design.md`.
 
 ## Security architecture
 
-6. *A wheel user's background processes can change what runs from `/usr`.*
+6. **Fixed (option 1, root's copy).** nxd and `nx select` merge a reflinked
+   copy in `/var/lib/nx-merged`, root's, checked as it is made (design,
+   *Root's copy*; VM: `m7.sh owner`, two reboots). Still open: root's
+   services parse wheel-writable caches; the `nx`-user builder is the
+   direction after 1.0. The finding as written:
+   *A wheel user's background processes can change what runs from `/usr`.*
    The store is unpacked as the calling user and the extension hardlinks
    it, so merged binaries (including the `ExecStart=` of host-tier system
    services, run as root) are inodes that user owns and can write. nxd
@@ -154,9 +159,11 @@ strike it from here once done, and record the decision in `design.md`.
 
 ## Suggested order
 
-1. Done: 1–4.
-2. Decide the ownership model (6, 7): it changes the store, nxd and the
-   units, and removes the `.trash` machinery. Then 5.
+1. Done: 1–4, and 6 by root's copy.
+2. 5 (keys by fingerprint). 7 stays until the `nx`-user builder: alone,
+   `User=nx` would only move the `.trash` problem (wheel-built trees with
+   cut ACL masks are no more removable by `nx` than root-built ones are by
+   wheel).
 3. One converge pipeline with a testable `Session` (8–10): the largest drop
    in code, and orchestration tests without the VM.
 4. 11–22, then prune the design doc (23).

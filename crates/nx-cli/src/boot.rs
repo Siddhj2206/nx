@@ -30,9 +30,32 @@ pub fn run(ui: &mut Ui) -> Result<()> {
         // Which generation fits this image is unknown: merging whatever
         // `current` points at could shadow the image's files (invariants 1
         // and 2), so merge nothing. The next boot, or `nx sync`, tries again.
-        let _ = host::state().clear_current();
+        let state = host::state();
+        let _ = state.clear_current();
+        nx_activate::unstage(&nx_activate::Layout::system(state));
     }
     result
+}
+
+/// Gives the generation now current root's copy, linked for the merge that
+/// follows (what nxd does on every activation; nxd isn't asked this early).
+fn stage(machine: &Machine, state: &nx_core::State) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let layout = nx_activate::Layout {
+        image: nx_activate::Image::Root(machine.image_root()?),
+        ..nx_activate::Layout::system(state.clone())
+    };
+    let runner = nx_activate::System;
+    // As nxd allows, less a caller: root, the state directory's owner (nx)
+    // and the administrators.
+    let owner = std::fs::metadata(state.root())
+        .with_context(|| format!("reading {}", state.root().display()))?
+        .uid();
+    let wheel = nx_activate::Wheel::new(&runner, &layout.root);
+    nx_activate::stage_at_boot(&layout, &runner, &|uid| {
+        uid == owner || wheel.is_member(uid)
+    })
+    .context("staging the extension for the merge")
 }
 
 /// `nx select --after-merge`, once `systemd-sysext` has run: if the
@@ -79,6 +102,7 @@ fn select(ui: &mut Ui) -> Result<()> {
         if current != Some(n) {
             state.set_current(n)?;
         }
+        stage(&machine, &state)?;
         ui.done(format_args!(
             "generation {n} for the booted image ({short})"
         ));
@@ -100,6 +124,7 @@ fn select(ui: &mut Ui) -> Result<()> {
     match crate::compat::check(&machine, &previous) {
         Ok(()) => {
             state.set_current(previous.number)?;
+            stage(&machine, &state)?;
             ui.warn(format_args!(
                 "no generation for the booted image ({short}); generation {} still fits it, nx sync will resolve for it",
                 previous.number
@@ -139,6 +164,7 @@ fn select(ui: &mut Ui) -> Result<()> {
                 },
             )?;
             state.set_current(built.generation.number)?;
+            stage(&machine, &state)?;
             ui.warn(format_args!(
                 "no generation for the booted image ({short}), and generation {} doesn't fit it: {why}; \
                  the host tier is not merged until nx sync resolves for this image",
