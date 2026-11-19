@@ -83,21 +83,21 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
 - `crates/nx-cli/src/sync.rs`, `boot.rs`, `compat.rs`, `gc.rs`: the image
   lifecycle (`nx sync`, `nx select`, the invariant 2 check, `nx gc`).
   `notify.rs` (`nx notify`, run by the user unit `nx-notify.path`) shows
-  what the root services recorded; `doctor.rs`, `converge.rs` (`nx
+  what the root services recorded; `doctor.rs`, `apply.rs` (`nx
   apply`), `migrate.rs` (nx 0.x's profile, read by `nx_nix::profile`) and
   `complete.rs` (completions, man pages) are the 1.0 additions.
 - Releases: a `v*` tag runs `.github/workflows/release.yml`, which builds
   `dev/dist`'s tarball (the tree an image unpacks at `/`) per architecture
   in `fedora:45`. `dev/dist` checks `nx --version` against the tag, so bump
   the workspace version first.
-- `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
+- `crates/nx-cli/src/session.rs`: manifest → generation (resolve, download,
   verify, unpack, expose the tool tier, assemble), shared by every command
   that changes the manifest: `Session::open` (change the manifest under the
   lock) → `Session::plan(How)` (both tiers, as `How` says) →
-  `Session::install` or `apply::finish` (build, make live, report through
+  `Session::install` or `session::finish` (build, make live, report through
   `changes.rs`). A new command that changes packages is a manifest edit and
   a `How`, not a new pipeline. `Session::open_in(Env, …)` takes the state,
-  `Http`, `Nix` and `Live` it uses; `apply/session_tests.rs` drives the
+  `Http`, `Nix` and `Live` it uses; `session/session_tests.rs` drives the
   pipeline on a fixture root that way (test a change there before the VM).
   `keys.rs` pins repo keys by content.
   `tool.rs` drives the tool tier (pin, catalog,

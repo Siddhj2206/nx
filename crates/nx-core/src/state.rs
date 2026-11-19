@@ -144,6 +144,11 @@ impl State {
         self.root.join("generations")
     }
 
+    /// Generation `number`'s directory.
+    pub fn generation_dir(&self, number: u32) -> PathBuf {
+        self.generations_dir().join(number.to_string())
+    }
+
     pub(crate) fn current_link(&self) -> PathBuf {
         self.root.join("current")
     }
@@ -444,7 +449,7 @@ pub(crate) fn sync_fs(dir: &Path) -> Result<()> {
 }
 
 /// Makes renames inside `dir` durable.
-pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
+pub fn sync_dir(dir: &Path) -> Result<()> {
     File::open(dir)
         .and_then(|f| f.sync_all())
         .map_err(|source| Error::Write {

@@ -10,8 +10,8 @@ use std::time::Instant;
 use anyhow::Result;
 use nx_rpm::Refresh;
 
-use crate::apply::{self, How, Session};
 use crate::host::Machine;
+use crate::session::{self, How, Session};
 use crate::ui::Ui;
 
 pub fn run(
@@ -37,5 +37,5 @@ pub fn run(
         ui.done("everything is up to date");
         return Ok(());
     }
-    apply::finish(ui, &mut session, &outcome, started)
+    session::finish(ui, &mut session, &outcome, started)
 }

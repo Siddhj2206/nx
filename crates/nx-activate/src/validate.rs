@@ -64,14 +64,11 @@ pub fn wheel_uids(root: &Path) -> Vec<u32> {
 /// what is merged.
 pub fn validate(layout: &Layout, number: u32, allowed: &dyn Fn(u32) -> bool) -> Result<Validated> {
     let refuse = |reason: String| Error::Refused { number, reason };
-    let root = layout
-        .state
-        .root()
-        .join("generations")
-        .join(number.to_string());
+    let root = layout.state.generation_dir(number);
     let owned = |uid: u32| uid == 0 || allowed(uid);
 
-    for dir in [layout.state.root().join("generations"), root.clone()] {
+    let parent = root.parent().map(Path::to_path_buf).unwrap_or_default();
+    for dir in [parent, root.clone()] {
         let m = std::fs::symlink_metadata(&dir)
             .map_err(|e| refuse(format!("can't read {}: {e}", dir.display())))?;
         if !m.is_dir() || !owned(m.uid()) || m.mode() & 0o002 != 0 {

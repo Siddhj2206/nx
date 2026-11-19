@@ -14,8 +14,8 @@ use nx_core::select;
 use nx_core::{Deployment, Generation};
 use nx_rpm::Refresh;
 
-use crate::apply::{Session, Unresolvable};
 use crate::host::{self, Machine};
+use crate::session::{Session, Unresolvable};
 use crate::ui::Ui;
 
 /// `nx sync [--refresh]`.
@@ -237,7 +237,7 @@ fn resolve_what_fits(
     ui: &mut Ui,
     session: &mut Session,
     specs: &[String],
-) -> Result<(crate::apply::Resolved, Vec<String>)> {
+) -> Result<(crate::session::Resolved, Vec<String>)> {
     let whole = match session.resolve(ui, specs) {
         Ok(resolved) => return Ok((resolved, Vec::new())),
         Err(e) => e,

@@ -10,8 +10,8 @@ use anyhow::{Result, bail};
 use nx_core::{LockedTool, Manifest};
 use nx_rpm::Refresh;
 
-use crate::apply::{self, How, Session};
 use crate::host::{self, Machine};
+use crate::session::{self, How, Session};
 use crate::ui::Ui;
 
 pub fn run(
@@ -39,7 +39,7 @@ pub fn run(
         .map(|p| p.package.name.as_str())
         .collect();
     session.edit(|m| m.scriptlets.retain(|a| names.contains(a.package.as_str())))?;
-    apply::finish(ui, &mut session, &outcome, started)
+    session::finish(ui, &mut session, &outcome, started)
 }
 
 /// Takes `specs` out of `m`. A tool package's unfree allowance goes with

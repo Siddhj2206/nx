@@ -11,7 +11,6 @@ mod cache;
 mod changes;
 mod compat;
 mod complete;
-mod converge;
 mod doctor;
 mod gc;
 mod generations;
@@ -23,11 +22,13 @@ mod list;
 mod live;
 mod migrate;
 mod notify;
+mod problems;
 mod remove;
 mod repo;
 mod rollback;
 mod route;
 mod search;
+mod session;
 mod shell;
 mod status;
 mod sync;
@@ -388,7 +389,7 @@ fn main() -> ExitCode {
             dry_run,
             metadata,
         } => machine()
-            .and_then(|m| converge::run(&mut ui, &m, file.as_deref(), dry_run, metadata.refresh())),
+            .and_then(|m| apply::run(&mut ui, &m, file.as_deref(), dry_run, metadata.refresh())),
         Command::Shell { command } => shell::run(&mut ui, &command),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {

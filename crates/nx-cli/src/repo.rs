@@ -9,8 +9,8 @@ use nx_core::{Generation, Manifest, RepoEntry};
 use nx_rpm::repo::{self, Repo, Vars, id_of};
 use nx_rpm::{Http, Refresh, Ureq};
 
-use crate::apply::{How, Session};
 use crate::host::{self, Machine};
+use crate::session::{How, Session};
 use crate::ui::{self, Stream, Ui};
 
 /// A repo the user named: its manifest entry and its key.

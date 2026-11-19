@@ -13,10 +13,7 @@ use crate::{Error, Result};
 
 /// One generation's lockfile, for the questions that don't need the rest.
 pub fn read_lock(state: &State, number: u32) -> Result<Lock> {
-    let path = state
-        .generations_dir()
-        .join(number.to_string())
-        .join("lock.toml");
+    let path = state.generation_dir(number).join("lock.toml");
     let text = std::fs::read_to_string(&path).map_err(|source| Error::Read {
         path: path.clone(),
         source,

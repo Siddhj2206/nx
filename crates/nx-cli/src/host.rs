@@ -168,6 +168,14 @@ pub fn state_overridden() -> bool {
     std::env::var_os("NX_STATE_DIR").is_some_and(|d| !d.is_empty())
 }
 
+/// Whether the tree at `root` has a command `name` in one of the
+/// directories on `PATH` ([`nx_rpm::COMMAND_DIRS`]).
+pub fn has_command(root: &Path, name: &str) -> bool {
+    nx_rpm::COMMAND_DIRS
+        .iter()
+        .any(|d| std::fs::symlink_metadata(root.join(d).join(name)).is_ok())
+}
+
 /// Where `nx repo add` pins third-party keys.
 pub fn keys_dir(state: &State) -> PathBuf {
     state.root().join("keys")

@@ -395,9 +395,7 @@ fn plan_from(tool: &LockedTool, closure: &BTreeMap<String, narinfo::Info>) -> Pl
             .iter()
             .any(|o| closure.get(&o.path).is_none_or(|i| i.missing));
         if uncached {
-            let names: Vec<&str> = p.outputs.iter().map(|o| o.name.as_str()).collect();
-            plan.installables
-                .push(format!("{}^{}", p.drv, names.join(",")));
+            plan.installables.push(from_drv(p));
             plan.build.push(p.attr.clone());
         } else {
             plan.installables
@@ -405,6 +403,13 @@ fn plan_from(tool: &LockedTool, closure: &BTreeMap<String, narinfo::Info>) -> Pl
         }
     }
     plan
+}
+
+/// `<drv>^<outputs>`: what Nix builds a package's outputs from when no
+/// cache has them.
+fn from_drv(p: &ToolPackage) -> String {
+    let names: Vec<&str> = p.outputs.iter().map(|o| o.name.as_str()).collect();
+    format!("{}^{}", p.drv, names.join(","))
 }
 
 /// The commands an output has: the executables in its `bin/`, without
@@ -682,8 +687,7 @@ pub fn restore(ui: &mut Ui, nix: &dyn Nix, tool: &LockedTool, caches: &[CacheEnt
             continue;
         }
         if Path::new(&p.drv).exists() {
-            let names: Vec<&str> = p.outputs.iter().map(|o| o.name.as_str()).collect();
-            installables.push(format!("{}^{}", p.drv, names.join(",")));
+            installables.push(from_drv(p));
         } else {
             installables.extend(lost.iter().map(|o| o.path.clone()));
         }

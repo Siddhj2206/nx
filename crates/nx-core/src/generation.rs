@@ -105,7 +105,7 @@ pub struct Refusal {
 
 impl Generation {
     pub fn read(state: &State, number: u32) -> Result<Self> {
-        let dir = state.generations_dir().join(number.to_string());
+        let dir = state.generation_dir(number);
         let manifest_path = dir.join("manifest.toml");
         let lock_path = dir.join("lock.toml");
         let activation_path = dir.join("activation.toml");
@@ -449,13 +449,18 @@ pub fn check_extension(extension: &Path, image_root: &Path) -> Result<()> {
     if clashes.is_empty() {
         return Ok(());
     }
+    Err(image_clash(clashes))
+}
+
+/// "the image already has …", naming the first five.
+fn image_clash(mut clashes: Vec<String>) -> Error {
     let more = clashes.len().saturating_sub(5);
     clashes.truncate(5);
     let mut msg = format!("the image already has {}", clashes.join(", "));
     if more > 0 {
         msg.push_str(&format!(" and {more} more"));
     }
-    Err(Error::Conflict(msg))
+    Error::Conflict(msg)
 }
 
 fn collect_clashes(
@@ -612,13 +617,7 @@ impl Tree {
         if clashes.is_empty() {
             return Ok(());
         }
-        let more = clashes.len().saturating_sub(5);
-        clashes.truncate(5);
-        let mut msg = format!("the image already has {}", clashes.join(", "));
-        if more > 0 {
-            msg.push_str(&format!(" and {more} more"));
-        }
-        Err(Error::Conflict(msg))
+        Err(image_clash(clashes))
     }
 
     /// Checks that `dest` holds exactly what [`Tree::write`] was to put

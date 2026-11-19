@@ -77,11 +77,7 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
     out.blank();
     let mut foot = format!("{} · ", ui::plural(g.lock.host.len(), "host package"));
     if let Some(t) = g.lock.tool.as_ref().filter(|t| !t.packages.is_empty()) {
-        let release = nx_nix::Release {
-            rev: t.rev.clone(),
-            name: t.release.clone(),
-            url: String::new(),
-        };
+        let release = crate::tool::pinned(t);
         foot.push_str(&format!(
             "{} at nixpkgs {} · ",
             ui::plural(t.packages.len(), "tool"),

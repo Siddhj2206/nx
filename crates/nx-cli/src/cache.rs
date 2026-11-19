@@ -7,8 +7,8 @@ use anyhow::{Result, bail};
 use nx_core::CacheEntry;
 use nx_rpm::Refresh;
 
-use crate::apply::{How, Session};
 use crate::host::{self, Machine};
+use crate::session::{How, Session};
 use crate::ui::{self, Stream, Ui};
 
 /// Checks what the user typed: an https URL and a `name:key`, neither with

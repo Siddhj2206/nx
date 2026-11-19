@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use nx_core::{DeploymentSource, Deployments, State, select};
+use nx_core::{DeploymentSource, Deployments, State};
+
+use crate::problems::Problem;
 
 use crate::ui::Ui;
 
@@ -98,63 +100,28 @@ pub fn run(
     write_seen(seen_file, &kept)
 }
 
-/// What the records say now, the newest problem of each kind.
+/// What the records say now, one note per problem.
 pub fn notes(state: &State, deployments: Option<&Deployments>) -> Vec<Note> {
-    let role = |digest: &str| -> String {
-        let Some(d) = deployments else {
-            return "an image".to_owned();
-        };
-        let is = |dep: Option<&nx_core::Deployment>| {
-            dep.and_then(|d| d.image_digest.as_deref()) == Some(digest)
-        };
-        if is(d.booted()) {
-            "the booted image".to_owned()
-        } else if is(d.staged()) {
-            "the staged update".to_owned()
-        } else if is(d.rollback()) {
-            "the rollback image".to_owned()
-        } else {
-            "an image".to_owned()
-        }
-    };
-    let mut out = Vec::new();
-    let failures = select::failures(state);
-    for (digest, why) in &failures {
-        out.push(Note {
-            summary: format!("nx couldn't set up packages for {}", role(digest)),
-            body: format!("{why}. nx status has the details."),
-        });
-    }
-    let digests = deployments.map_or_else(Vec::new, |d| {
-        d.all()
-            .iter()
-            .filter_map(|d| d.image_digest.clone())
-            .collect()
-    });
-    for digest in digests.iter().filter(|d| !failures.contains_key(*d)) {
-        let skipped = select::newest_for(state, digest)
-            .ok()
-            .flatten()
-            .and_then(|n| select::read_lock(state, n).ok())
-            .map(|l| l.skipped)
-            .unwrap_or_default();
-        if !skipped.is_empty() {
-            out.push(Note {
-                summary: format!("nx left packages out for {}", role(digest)),
+    crate::problems::problems(state, deployments)
+        .into_iter()
+        .map(|p| match p {
+            Problem::NoHostTier { image, why, .. } => Note {
+                summary: format!("nx couldn't set up packages for {image}"),
+                body: format!("{why}. nx status has the details."),
+            },
+            Problem::LeftOut { image, packages } => Note {
+                summary: format!("nx left packages out for {image}"),
                 body: format!(
                     "{} didn't resolve for it; nx tries again daily.",
-                    skipped.join(", ")
+                    packages.join(", ")
                 ),
-            });
-        }
-    }
-    if let Some(why) = select::upgrade_failure(state) {
-        out.push(Note {
-            summary: "nx couldn't upgrade your tools".to_owned(),
-            body: format!("{why}. Run nx upgrade to see more."),
-        });
-    }
-    out
+            },
+            Problem::UpgradeFailed(why) => Note {
+                summary: "nx couldn't upgrade your tools".to_owned(),
+                body: format!("{why}. Run nx upgrade to see more."),
+            },
+        })
+        .collect()
 }
 
 /// `$XDG_STATE_HOME/nx/notified`, else `~/.local/state/nx/notified`.
@@ -188,6 +155,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+
+    use nx_core::select;
 
     use crate::ui::SharedBuf;
 

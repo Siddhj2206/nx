@@ -8,10 +8,10 @@ use anyhow::{Context, Result, bail};
 use nx_core::{CliTools, ScriptletAllow};
 use nx_rpm::{Package, Refresh};
 
-use crate::apply::{How, Session};
 use crate::changes::{self, Change};
 use crate::host::Machine;
 use crate::route::{self, Forced, Found, Nixpkg, Route, Rpm};
+use crate::session::{How, Session};
 use crate::tool;
 use crate::ui::{self, Stream, Ui};
 

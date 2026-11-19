@@ -546,12 +546,7 @@ fn sysext_cmd(runner: &dyn Runner, args: &[&str]) -> Result<Output> {
 
 /// Makes a rename or removal in `dir` durable.
 fn sync_dir(dir: &Path) -> Result<()> {
-    std::fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|source| Error::Io {
-            path: dir.to_owned(),
-            source,
-        })
+    Ok(nx_core::state::sync_dir(dir)?)
 }
 
 /// Whether `systemd-sysext status --json` lists `nx` under `/usr`.

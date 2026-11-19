@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 use nx_core::{Backend, Deployments, Lock, State, select};
 use nx_nix::profile::Legacy;
 
+use crate::problems::Problem;
 use crate::ui::{self, Ui};
 
 /// How a check came out.
@@ -122,17 +123,27 @@ pub fn checks(i: &Inputs) -> Vec<Finding> {
             tools(i, lock, &mut out);
         }
     }
-    for (digest, why) in select::failures(i.state) {
-        out.push(warn(
-            format!("no host tier for {}: {why}", ui::short_digest(&digest)),
-            "nx status shows which image; nx sync --refresh tries again",
-        ));
-    }
-    if let Some(why) = select::upgrade_failure(i.state) {
-        out.push(warn(
-            format!("the weekly tool upgrade failed: {why}"),
-            "nx upgrade --tool shows it",
-        ));
+    for p in crate::problems::problems(i.state, i.deployments.as_ref()) {
+        out.push(match p {
+            Problem::NoHostTier { image, digest, why } => warn(
+                format!(
+                    "no host tier for {image} ({}): {why}",
+                    ui::short_digest(&digest)
+                ),
+                "nx sync --refresh tries again",
+            ),
+            Problem::LeftOut { image, packages } => warn(
+                format!(
+                    "{image} leaves out {}: they don't resolve for it",
+                    packages.join(", ")
+                ),
+                "the daily nx sync --refresh tries again",
+            ),
+            Problem::UpgradeFailed(why) => warn(
+                format!("the weekly tool upgrade failed: {why}"),
+                "nx upgrade --tool shows it",
+            ),
+        });
     }
     environment(i, &mut out);
     legacy(i, &mut out);
@@ -157,15 +168,6 @@ fn generation(i: &Inputs, n: u32, lock: &Lock, out: &mut Vec<Finding>) {
         )),
         (Some(_), _) => out.push(ok(format!("generation {n} is built for the booted image"))),
         (None, _) => {}
-    }
-    if !lock.skipped.is_empty() {
-        out.push(warn(
-            format!(
-                "generation {n} leaves out {}: they don't resolve for this image",
-                lock.skipped.join(", ")
-            ),
-            "the daily nx sync --refresh tries again",
-        ));
     }
     let sock = i.root.join(nx_proto::SOCKET.trim_start_matches('/'));
     if sock.exists() {
@@ -232,10 +234,7 @@ fn tools(i: &Inputs, lock: &Lock, out: &mut Vec<Finding>) {
     if let Some(image) = &i.image_root {
         for p in &tool.packages {
             for b in &p.bins {
-                let has = nx_rpm::COMMAND_DIRS
-                    .iter()
-                    .any(|d| std::fs::symlink_metadata(image.join(d).join(&b.name)).is_ok());
-                if has {
+                if crate::host::has_command(image, &b.name) {
                     out.push(warn(
                         format!(
                             "the image has {} now, so {}'s copy is hidden",

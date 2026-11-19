@@ -125,11 +125,7 @@ fn tool_tier(state: &State, root: &Path, st: crate::ui::Style) -> String {
         .filter(|t| !t.packages.is_empty());
     match tool {
         Some(t) => {
-            let release = nx_nix::Release {
-                rev: t.rev,
-                name: t.release,
-                url: t.url,
-            };
+            let release = crate::tool::pinned(&t);
             format!(
                 "{} {}",
                 crate::ui::plural(t.packages.len(), "tool"),
