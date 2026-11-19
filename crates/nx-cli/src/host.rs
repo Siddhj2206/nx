@@ -111,17 +111,17 @@ impl Machine {
         }
     }
 
-    /// Resolver options for this machine.
-    pub fn options(&self, refresh: Refresh) -> Result<Options> {
-        Ok(Options {
+    /// Resolver options for this machine, with metadata cached in `cache`.
+    pub fn options(&self, refresh: Refresh, cache: PathBuf) -> Options {
+        Options {
             root: self.root.clone(),
-            cache: cache_dir()?,
+            cache,
             image_digest: self.digest(),
             vars: self.vars(),
             arch: self.arch.clone(),
             refresh,
             extra: Vec::new(),
-        })
+        }
     }
 }
 
@@ -130,7 +130,12 @@ impl Machine {
 /// so a second administrator's first change doesn't download the metadata
 /// again; otherwise their own, `$XDG_CACHE_HOME/nx` or `~/.cache/nx`.
 pub fn cache_dir() -> Result<PathBuf> {
-    if let Some(shared) = state().shared_cache() {
+    cache_dir_for(&state())
+}
+
+/// [`cache_dir`] for the state directory `state`.
+pub fn cache_dir_for(state: &State) -> Result<PathBuf> {
+    if let Some(shared) = state.shared_cache() {
         return Ok(shared);
     }
     user_cache_dir()
@@ -218,10 +223,22 @@ pub fn load(
     refresh: Refresh,
     manifest: &Manifest,
 ) -> Result<Universe> {
-    let mut opts = machine.options(refresh)?;
+    load_from(ui, machine, refresh, manifest, &Ureq::new(), cache_dir()?)
+}
+
+/// [`load`] through `http`, with metadata cached in `cache`.
+pub fn load_from(
+    ui: &mut Ui,
+    machine: &Machine,
+    refresh: Refresh,
+    manifest: &Manifest,
+    http: &dyn nx_rpm::Http,
+    cache: PathBuf,
+) -> Result<Universe> {
+    let mut opts = machine.options(refresh, cache);
     opts.extra = added_repos(manifest, &opts.vars)?;
     let err = &mut ui.err;
-    let universe = Universe::load(&opts, &Ureq::new(), &mut |repo| {
+    let universe = Universe::load(&opts, http, &mut |repo| {
         let sym = err.style.cyan(crate::ui::SYM_FETCH);
         err.line(format_args!("{sym} {repo} metadata"));
     })

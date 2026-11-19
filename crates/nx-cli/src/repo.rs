@@ -78,7 +78,7 @@ pub fn add(
         session.trust(&ids);
     }
     for (f, id) in fetched.iter().zip(&ids) {
-        if let Some(s) = session.universe.skipped.iter().find(|s| s.repo == *id) {
+        if let Some(s) = session.universe().skipped.iter().find(|s| s.repo == *id) {
             bail!("can't add {}: {}", f.entry.name, s.error);
         }
     }
@@ -143,7 +143,7 @@ fn fetch(
 
 /// Pins each fetched key and has the session check its repo against it.
 fn pin_all(session: &mut Session, fetched: &[Fetched]) -> Result<()> {
-    let dir = crate::keys::dir(&session.state);
+    let dir = crate::keys::dir(session.state());
     for f in fetched {
         let sha = crate::keys::pin(&dir, &f.key)?;
         session.choose_key(&id_of(&f.entry.name), sha);

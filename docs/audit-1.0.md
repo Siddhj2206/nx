@@ -89,20 +89,24 @@ strike it from here once done, and record the decision in `design.md`.
    manifest edit plus apply with options (allow newer builds, move the pin,
    which tools are new). One `converge(session, Intent) -> Changes` and one
    renderer.
-9. **Partly fixed.** `fresh_tools` is gone (computed in `expose`), the
-   tool tier is opened through `Session::tier`, and the order of calls is
-   `open` → `plan` → `install`/`finish`. `current`, `manifest`, `universe`,
-   `routes` and `tool` are still public fields `add`, `sync` and `remove`
-   read or change. The finding as written:
+9. **Fixed.** `Session` has no public fields: reads go through
+   `state()`, `current()`, `manifest()`, `universe()`, `tool()`; `route()`
+   records a reason; `edit()` changes the manifest after opening and
+   refuses a repo change (the repos were loaded when it opened). The order
+   is `open` → `plan` → `install`/`finish`. The finding as written:
    *`Session` is a shallow god object.* Callers set and read `pub tool`,
    `fresh_tools`, `routes`, `manifest`, `current`, `universe` between
    calls; the ordering rules (set `tool`/`fresh_tools` before `install`,
    `leave_out` before `build`) aren't in its interface.
-10. **Open, narrowed.** The pure parts of the pipeline are tested
-    (`changes`, `apply::without_new`, `remove::drop_from`); `Session` itself
-    still makes its own HTTP, `Nix` and state, so `plan` runs only in the
-    VM. Next step: `Session::open` taking the `State`, an `Http` and a `Nix`.
-    The finding as written:
+10. **Fixed for the host tier.** `Session::open_in` takes an `Env`: the
+    state directory, `Http` (metadata, packages, Koji), `Nix` and `Live`
+    (nxd, or a `current` that just moves); `Session::open` is
+    `Env::system()`. `Tier`, `tool::restore` and `add_roots` take the `Nix`
+    they run; `sync::deployed` and the caches take the state. `apply/
+    session_tests.rs` runs plan → install → remove on a fixture root with a
+    real signed RPM and no network, Nix or nxd. Still concrete: `nx-nix`'s
+    `Web` (channel, catalog, narinfos), so a tool-tier change that
+    evaluates something new runs only in the VM. The finding as written:
     *No seam at the orchestration level.* `Session` makes `Ureq::new()`
     itself; `Tier` hardcodes `nx_nix::System` and `Web` though a `Nix`
     trait exists; `tool::restore` and `gc` call `System` directly; the state

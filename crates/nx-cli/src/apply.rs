@@ -27,18 +27,43 @@ const THREADS: usize = 4;
 /// half-way.
 const SPARE: u64 = 32 << 20;
 
-/// The machine, its state and the current generation, loaded once.
+/// What a session reaches the system through: the state directory, HTTP
+/// (repo metadata, packages, Koji), `nix`, and what makes a generation
+/// live. Commands use [`Env::system`]; tests a temporary state, canned
+/// answers and a `current` that just moves.
+pub struct Env {
+    pub state: State,
+    pub http: Box<dyn nx_rpm::Http>,
+    pub nix: Box<dyn nx_nix::Nix>,
+    pub live: Box<dyn crate::live::Live>,
+}
+
+impl Env {
+    /// `/var/lib/nx` (or `NX_STATE_DIR`), the network, the image's `nix`
+    /// and nxd.
+    pub fn system() -> Self {
+        Self {
+            state: host::state(),
+            http: Box::new(Ureq::new()),
+            nix: Box::new(nx_nix::System),
+            live: Box::new(crate::live::Nxd),
+        }
+    }
+}
+
+/// One change to the packages, from the lock to the live generation:
+/// [`Session::open`] (the manifest changed under the state lock), then
+/// [`Session::plan`], then [`Session::install`] or [`finish`].
 pub struct Session<'m> {
     machine: &'m Machine,
-    pub state: State,
+    env: Env,
     /// Held unless this is a dry run.
     guard: Option<state::Lock>,
-    pub current: Option<Generation>,
+    current: Option<Generation>,
     /// The current manifest, changed as the command asked; the repos were
     /// loaded for it.
-    pub manifest: Manifest,
-    pub universe: Universe,
-    http: Ureq,
+    manifest: Manifest,
+    universe: Universe,
     keys: Keys,
     /// Koji `name.arch` → the repo whose keys verified it.
     koji_repo: HashMap<String, String>,
@@ -46,12 +71,12 @@ pub struct Session<'m> {
     skipped: Vec<String>,
     /// The next generation's tool tier: the current one's until
     /// [`Session::plan`] resolves another.
-    pub tool: Option<LockedTool>,
+    tool: Option<LockedTool>,
     /// The tool tier at the pinned release, opened when first needed.
     tier: Option<Tier>,
     /// Why each manifest entry is in its tier (`nx why`): the current
     /// generation's, plus what this command routed.
-    pub routes: BTreeMap<String, String>,
+    routes: BTreeMap<String, String>,
     /// Resolve without preferring the current generation's builds
     /// (`nx upgrade`).
     unlocked: bool,
@@ -133,7 +158,19 @@ impl<'m> Session<'m> {
         dry_run: bool,
         change: impl FnOnce(&mut Manifest) -> Result<()>,
     ) -> Result<Self> {
-        let state = host::state();
+        Self::open_in(Env::system(), ui, machine, refresh, dry_run, change)
+    }
+
+    /// [`Session::open`] through `env`.
+    pub fn open_in(
+        env: Env,
+        ui: &mut Ui,
+        machine: &'m Machine,
+        refresh: Refresh,
+        dry_run: bool,
+        change: impl FnOnce(&mut Manifest) -> Result<()>,
+    ) -> Result<Self> {
+        let state = &env.state;
         let guard = if dry_run {
             None
         } else {
@@ -144,7 +181,7 @@ impl<'m> Session<'m> {
                 )
             })?)
         };
-        let current = match Generation::current(&state) {
+        let current = match Generation::current(state) {
             Ok(g) => g,
             Err(e @ nx_core::Error::Newer { .. }) => {
                 return Err(anyhow::Error::new(e).context(
@@ -158,8 +195,9 @@ impl<'m> Session<'m> {
             .map(|g| g.manifest.clone())
             .unwrap_or_default();
         change(&mut manifest)?;
-        let universe = host::load(ui, machine, refresh, &manifest)?;
-        let keys = Keys::new(machine, &state, current.as_ref(), &manifest);
+        let cache = host::cache_dir_for(state)?;
+        let universe = host::load_from(ui, machine, refresh, &manifest, &*env.http, cache)?;
+        let keys = Keys::new(machine, state, current.as_ref(), &manifest);
         let tool = current.as_ref().and_then(|g| g.lock.tool.clone());
         let routes = current
             .as_ref()
@@ -167,12 +205,11 @@ impl<'m> Session<'m> {
             .unwrap_or_default();
         Ok(Self {
             machine,
-            state,
+            env,
             guard,
             current,
             manifest,
             universe,
-            http: Ureq::new(),
             keys,
             koji_repo: HashMap::new(),
             skipped: Vec::new(),
@@ -182,6 +219,47 @@ impl<'m> Session<'m> {
             unlocked: false,
             dry_run,
         })
+    }
+
+    pub fn state(&self) -> &State {
+        &self.env.state
+    }
+
+    /// The generation the change builds on.
+    pub fn current(&self) -> Option<&Generation> {
+        self.current.as_ref()
+    }
+
+    /// The manifest as the command changed it.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Changes the manifest further, under the lock the session holds. Its
+    /// repos were loaded when the session opened, so they can't change
+    /// here; that is [`Session::open`]'s `change`.
+    pub fn edit(&mut self, change: impl FnOnce(&mut Manifest)) -> Result<()> {
+        let repos = self.manifest.repos.clone();
+        change(&mut self.manifest);
+        if self.manifest.repos != repos {
+            bail!("the repos changed after they were loaded");
+        }
+        Ok(())
+    }
+
+    /// The image and the repos the manifest names.
+    pub fn universe(&self) -> &Universe {
+        &self.universe
+    }
+
+    /// The next generation's tool tier as planned so far.
+    pub fn tool(&self) -> Option<&LockedTool> {
+        self.tool.as_ref()
+    }
+
+    /// Records why `entry` is in its tier, for `nx why`.
+    pub fn route(&mut self, entry: &str, why: String) {
+        self.routes.insert(entry.to_owned(), why);
     }
 
     /// The tool tier at the pinned release (the channel's current one when
@@ -236,11 +314,14 @@ impl<'m> Session<'m> {
         let system = tool::system(self.universe.arch());
         let manifest = self.manifest.clone();
         let dry_run = self.dry_run;
-        let tier = self.tier(ui)?;
-        let locked = tier.resolve(ui, &manifest, previous.as_ref(), &system)?;
+        self.tier(ui)?;
+        let (Some(tier), nix) = (self.tier.as_ref(), &*self.env.nix) else {
+            bail!("the nixpkgs release didn't open");
+        };
+        let locked = tier.resolve(ui, nix, &manifest, previous.as_ref(), &system)?;
         let plan = tier.plan(&locked, &manifest.caches)?;
         if !dry_run {
-            tier.realise(ui, &locked, &plan, &manifest, &system)?;
+            tier.realise(ui, nix, &locked, &plan, &manifest, &system)?;
         }
         self.tool = Some(locked);
         Ok(plan.sum.download)
@@ -263,8 +344,14 @@ impl<'m> Session<'m> {
         }
         let system = tool::system(self.universe.arch());
         let manifest = self.manifest.clone();
-        let (locked, held) =
-            tier.resolve_holding(ui, &manifest, None, self.tool.as_ref(), &system)?;
+        let (locked, held) = tier.resolve_holding(
+            ui,
+            &*self.env.nix,
+            &manifest,
+            None,
+            self.tool.as_ref(),
+            &system,
+        )?;
         if !held.is_empty() {
             ui.warn(format_args!(
                 "nixpkgs {} has no usable {}: keeping the build you have (nx remove {} to drop it)",
@@ -277,7 +364,7 @@ impl<'m> Session<'m> {
         if !self.dry_run {
             let plan = tier.plan(&locked, &manifest.caches)?;
             download = plan.sum.download;
-            tier.realise(ui, &locked, &plan, &manifest, &system)?;
+            tier.realise(ui, &*self.env.nix, &locked, &plan, &manifest, &system)?;
         }
         let version = tier.release.version();
         let moved = if same_pin {
@@ -360,8 +447,8 @@ impl<'m> Session<'m> {
             .iter()
             .map(|l| (l.repo.id.clone(), l.repo.clone()))
             .collect();
-        let cache = host::cache_dir()?.join("koji");
-        let (http, keys, koji_repo) = (&self.http, &mut self.keys, &mut self.koji_repo);
+        let cache = host::cache_dir_for(&self.env.state)?.join("koji");
+        let (http, keys, koji_repo) = (&*self.env.http, &mut self.keys, &mut self.koji_repo);
         let err = &mut ui.err;
         let mut koji = |rel: &Relative, stand_in: &Package| -> nx_rpm::Result<PathBuf> {
             let repo = repos
@@ -439,7 +526,7 @@ impl<'m> Session<'m> {
             all.iter().cloned().partition(|p| asked(&p.package.name));
         let mut files = self.fetch(ui, &first)?;
         let mut host = self.unpack(guard, &first, &mut files)?;
-        let store = self.state.store();
+        let store = self.env.state.store();
         let image_only = image_only(&host, &asked, &|sha| store.path(sha));
         if !image_only.is_empty() {
             return Err(image_hint(&image_only));
@@ -468,12 +555,12 @@ impl<'m> Session<'m> {
             .as_ref()
             .is_some_and(|t| t.bins().next().is_some());
         let shim = if has_bins {
-            Some(crate::tool::shim(&self.state)?)
+            Some(crate::tool::shim(&self.env.state)?)
         } else {
             None
         };
         let built = generation::build(
-            &self.state,
+            &self.env.state,
             guard,
             &Spec {
                 manifest,
@@ -485,7 +572,7 @@ impl<'m> Session<'m> {
             },
         )
         .map_err(refusal_error)?;
-        crate::tool::add_roots(&built.generation)?;
+        crate::tool::add_roots(&*self.env.nix, &built.generation)?;
         Ok(built)
     }
 
@@ -504,13 +591,13 @@ impl<'m> Session<'m> {
         // Collected since it was realised: fetch it again. If that fails,
         // the host tier still gets its generation, without those commands.
         if crate::tool::incomplete(&tool)
-            && let Err(e) = crate::tool::restore(ui, &tool, &manifest.caches)
+            && let Err(e) = crate::tool::restore(ui, &*self.env.nix, &tool, &manifest.caches)
         {
             ui.warn(format_args!(
                 "tool-tier commands whose Nix paths are gone are left out until nx upgrade --tool: {e:#}"
             ));
         }
-        let store = self.state.store();
+        let store = self.env.state.store();
         let owner = |name: &str| -> Option<String> {
             let dirs = nx_rpm::COMMAND_DIRS;
             if dirs
@@ -560,9 +647,9 @@ impl<'m> Session<'m> {
     /// the change is live either way.
     pub fn install(&mut self, ui: &mut Ui, all: &[Planned]) -> Result<Built> {
         let built = self.build(ui, all)?;
-        crate::live::activate(
+        self.env.live.activate(
             ui,
-            &self.state,
+            &self.env.state,
             built.generation.number,
             self.manifest.host.backend,
         )?;
@@ -578,7 +665,8 @@ impl<'m> Session<'m> {
         }
         // The sync below takes the lock itself, once per image.
         self.guard = None;
-        if let Err(e) = crate::sync::deployed(ui, self.machine, Refresh::IfMissing) {
+        if let Err(e) = crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing)
+        {
             ui.warn(format_args!(
                 "the staged and rollback images were not updated: {e:#} (nx sync retries)"
             ));
@@ -589,7 +677,7 @@ impl<'m> Session<'m> {
     /// Downloads what the store lacks, after checking there is room for it
     /// and for its unpacked files. Returns each package's file by NEVRA.
     fn fetch(&self, ui: &mut Ui, all: &[Planned]) -> Result<HashMap<String, PathBuf>> {
-        let store = self.state.store();
+        let store = self.env.state.store();
         let missing: Vec<&Planned> = all
             .iter()
             .filter(|p| {
@@ -614,15 +702,15 @@ impl<'m> Session<'m> {
                 })
             })
             .collect::<Result<_>>()?;
-        let dir = host::cache_dir()?.join("packages");
+        let dir = host::cache_dir_for(&self.env.state)?.join("packages");
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         check_space(
             &dir,
             jobs.iter().map(|j| j.package.download_size).sum(),
-            self.state.root(),
+            self.env.state.root(),
             missing.iter().map(|p| p.package.install_size).sum(),
         )?;
-        let files = download(ui, &self.http, &jobs, &dir)?;
+        let files = download(ui, &*self.env.http, &jobs, &dir)?;
         Ok(jobs
             .iter()
             .zip(files)
@@ -639,7 +727,7 @@ impl<'m> Session<'m> {
         all: &[Planned],
         files: &mut HashMap<String, PathBuf>,
     ) -> Result<Vec<LockedPackage>> {
-        let store = self.state.store();
+        let store = self.env.state.store();
         let mut staged: Vec<Staged> = Vec::new();
         let mut locked = Vec::new();
         for p in all {
@@ -923,7 +1011,12 @@ fn need(path: &Path, bytes: u64) -> Result<()> {
 }
 
 /// Downloads on worker threads; this thread draws a `↓` line as each lands.
-fn download(ui: &mut Ui, http: &Ureq, jobs: &[Job], dir: &Path) -> Result<Vec<PathBuf>> {
+fn download(
+    ui: &mut Ui,
+    http: &dyn nx_rpm::Http,
+    jobs: &[Job],
+    dir: &Path,
+) -> Result<Vec<PathBuf>> {
     if jobs.is_empty() {
         return Ok(Vec::new());
     }
@@ -950,6 +1043,9 @@ fn download(ui: &mut Ui, http: &Ureq, jobs: &[Job], dir: &Path) -> Result<Vec<Pa
             .context("downloading packages")
     })
 }
+
+#[cfg(test)]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {

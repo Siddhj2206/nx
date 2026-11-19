@@ -19,6 +19,33 @@ fn socket() -> PathBuf {
         .map_or_else(|| PathBuf::from(nx_proto::SOCKET), PathBuf::from)
 }
 
+/// Makes a built generation live. [`Nxd`] asks the daemon; tests move
+/// `current` and nothing more.
+pub trait Live {
+    fn activate(
+        &self,
+        ui: &mut Ui,
+        state: &State,
+        number: u32,
+        forced: Option<Backend>,
+    ) -> Result<()>;
+}
+
+/// The real thing: [`activate`].
+pub struct Nxd;
+
+impl Live for Nxd {
+    fn activate(
+        &self,
+        ui: &mut Ui,
+        state: &State,
+        number: u32,
+        forced: Option<Backend>,
+    ) -> Result<()> {
+        activate(ui, state, number, forced)
+    }
+}
+
 /// Makes generation `number` current and live, telling the user how.
 pub fn activate(ui: &mut Ui, state: &State, number: u32, forced: Option<Backend>) -> Result<()> {
     if host::state_overridden() {

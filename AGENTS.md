@@ -96,7 +96,10 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   lock) → `Session::plan(How)` (both tiers, as `How` says) →
   `Session::install` or `apply::finish` (build, make live, report through
   `changes.rs`). A new command that changes packages is a manifest edit and
-  a `How`, not a new pipeline. `keys.rs` pins repo keys by content.
+  a `How`, not a new pipeline. `Session::open_in(Env, …)` takes the state,
+  `Http`, `Nix` and `Live` it uses; `apply/session_tests.rs` drives the
+  pipeline on a fixture root that way (test a change there before the VM).
+  `keys.rs` pins repo keys by content.
   `tool.rs` drives the tool tier (pin, catalog,
   eval, plan, realise, exposure, shim, GC roots); `route.rs` is the pure
   tier decision. `host.rs` holds `Machine`, the system as one value (root,

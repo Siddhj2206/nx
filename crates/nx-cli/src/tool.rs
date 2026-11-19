@@ -12,7 +12,7 @@ use nx_core::{Bin, CacheEntry, Generation, LockedTool, Manifest, State, ToolOutp
 use nx_nix::eval::{self, Evaluated};
 use nx_nix::log::Note;
 use nx_nix::narinfo::{self, Caches, Sum};
-use nx_nix::{Catalog, Nix, Release, System, Web};
+use nx_nix::{Catalog, Nix, Release, Web};
 
 use crate::host;
 use crate::ui::{self, Ui};
@@ -40,7 +40,6 @@ pub fn pinned(tool: &LockedTool) -> Release {
 /// evaluate and realise.
 pub struct Tier {
     web: Web,
-    nix: System,
     cache: PathBuf,
     pub release: Release,
     catalog: Option<Catalog>,
@@ -60,7 +59,6 @@ impl Tier {
         };
         Ok(Self {
             web,
-            nix: System,
             cache: host::cache_dir()?.join("nix"),
             release,
             catalog: None,
@@ -90,11 +88,12 @@ impl Tier {
     pub fn resolve(
         &self,
         ui: &mut Ui,
+        nix: &dyn Nix,
         manifest: &Manifest,
         previous: Option<&LockedTool>,
         system: &str,
     ) -> Result<LockedTool> {
-        self.resolve_holding(ui, manifest, previous, None, system)
+        self.resolve_holding(ui, nix, manifest, previous, None, system)
             .map(|(locked, _)| locked)
     }
 
@@ -104,6 +103,7 @@ impl Tier {
     pub fn resolve_holding(
         &self,
         ui: &mut Ui,
+        nix: &dyn Nix,
         manifest: &Manifest,
         previous: Option<&LockedTool>,
         held: Option<&LockedTool>,
@@ -118,7 +118,7 @@ impl Tier {
             .filter(|a| kept(a).is_none())
             .cloned()
             .collect();
-        let evaluated = self.evaluate(ui, &new, &manifest.tool.unfree, system)?;
+        let evaluated = self.evaluate(ui, nix, &new, &manifest.tool.unfree, system)?;
         let (packages, holding) = lock(
             manifest,
             &evaluated,
@@ -138,6 +138,7 @@ impl Tier {
     fn evaluate(
         &self,
         ui: &mut Ui,
+        nix: &dyn Nix,
         attrs: &[String],
         unfree: &[String],
         system: &str,
@@ -150,7 +151,7 @@ impl Tier {
             attrs.join(", "),
             self.release.version()
         ));
-        eval::evaluate(&self.nix, &self.release.nixexprs(), system, attrs, unfree)
+        eval::evaluate(nix, &self.release.nixexprs(), system, attrs, unfree)
             .context("evaluating nixpkgs")
     }
 
@@ -182,6 +183,7 @@ impl Tier {
     pub fn realise(
         &self,
         ui: &mut Ui,
+        nix: &dyn Nix,
         tool: &LockedTool,
         plan: &Plan,
         manifest: &Manifest,
@@ -196,7 +198,7 @@ impl Tier {
             .filter(|p| plan.build.contains(&p.attr) && !Path::new(&p.drv).exists())
             .map(|p| p.attr.clone())
             .collect();
-        self.evaluate(ui, &lost, &manifest.tool.unfree, system)?;
+        self.evaluate(ui, nix, &lost, &manifest.tool.unfree, system)?;
         if plan.sum.paths > plan.sum.unbuilt {
             ui.step(format_args!(
                 "fetching {} from the Nix caches · {} ({} unpacked)",
@@ -212,7 +214,7 @@ impl Tier {
             ));
         }
         let urls: Vec<String> = manifest.caches.iter().map(|c| c.url.clone()).collect();
-        nx_nix::nix::realise(&self.nix, &plan.installables, &urls, &mut |note| {
+        nx_nix::nix::realise(nix, &plan.installables, &urls, &mut |note| {
             draw(ui, note);
         })
         .with_context(|| realise_failed(&plan.build))
@@ -648,11 +650,11 @@ fn find_shim() -> Result<PathBuf> {
 /// Registers `g`'s tool-tier outputs as GC roots, in `gcroots/` under its
 /// final name. A generation whose paths aren't rooted must not go live: a
 /// plain `nix store gc` would delete what its commands run.
-pub fn add_roots(g: &Generation) -> Result<()> {
+pub fn add_roots(nix: &dyn Nix, g: &Generation) -> Result<()> {
     let Some(tool) = g.lock.tool.as_ref().filter(|t| !t.packages.is_empty()) else {
         return Ok(());
     };
-    root(&System, g, tool).with_context(|| {
+    root(nix, g, tool).with_context(|| {
         format!(
             "generation {} is built, but its Nix paths are not GC roots, so it was not made live",
             g.number
@@ -672,7 +674,7 @@ pub fn incomplete(tool: &LockedTool) -> bool {
 /// Realises again the outputs of `tool` the store lost: from their
 /// derivation when it is still there (Nix substitutes what a cache has and
 /// builds the rest), else by store path from the caches.
-pub fn restore(ui: &mut Ui, tool: &LockedTool, caches: &[CacheEntry]) -> Result<()> {
+pub fn restore(ui: &mut Ui, nix: &dyn Nix, tool: &LockedTool, caches: &[CacheEntry]) -> Result<()> {
     let mut installables = Vec::new();
     for p in &tool.packages {
         let lost: Vec<&ToolOutput> = p.outputs.iter().filter(|o| !local(&o.path)).collect();
@@ -691,7 +693,7 @@ pub fn restore(ui: &mut Ui, tool: &LockedTool, caches: &[CacheEntry]) -> Result<
     }
     ui.step("fetching tool-tier paths the Nix store no longer has");
     let urls: Vec<String> = caches.iter().map(|c| c.url.clone()).collect();
-    nx_nix::nix::realise(&System, &installables, &urls, &mut |note| draw(ui, note))
+    nx_nix::nix::realise(nix, &installables, &urls, &mut |note| draw(ui, note))
         .context("realising the tool tier again")
 }
 

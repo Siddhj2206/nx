@@ -38,10 +38,7 @@ pub fn run(
         .iter()
         .map(|p| p.package.name.as_str())
         .collect();
-    session
-        .manifest
-        .scriptlets
-        .retain(|a| names.contains(a.package.as_str()));
+    session.edit(|m| m.scriptlets.retain(|a| names.contains(a.package.as_str())))?;
     apply::finish(ui, &mut session, &outcome, started)
 }
 

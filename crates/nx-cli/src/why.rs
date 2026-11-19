@@ -50,7 +50,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
         render(&mut ui.out, what, &found);
         return Ok(());
     }
-    let opts = machine.options(Refresh::IfMissing)?;
+    let opts = machine.options(Refresh::IfMissing, host::cache_dir()?);
     let image = Universe::load_image(&opts).context("reading the image's packages")?;
     let mut found = if what.contains('/') {
         None

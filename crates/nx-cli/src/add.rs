@@ -69,26 +69,27 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     })?;
 
     // Where each new spec goes.
-    let routing = session.manifest.routing.clone();
+    let routing = session.manifest().routing.clone();
     let use_tool = opts.forced != Some(Forced::Host)
         && tool::available()
         && (routing.cli_tools == CliTools::Nix || opts.forced == Some(Forced::Tool));
     let toolchains = route::toolchains(&routing);
     let (mut fresh_host, mut fresh_tool, mut problems) = (Vec::new(), Vec::new(), Vec::new());
+    let mut unfree = session.manifest().tool.unfree.clone();
     for spec in specs {
-        if session.manifest.has(spec) {
+        if session.manifest().has(spec) {
             continue;
         }
         let mut found = Found::default();
         if !route::host_only(spec) {
-            found.rpm = session.universe.info(spec)?.map(|p| Rpm {
-                plugs: session.universe.plugs_in(&p, &toolchains),
+            let universe = session.universe();
+            found.rpm = universe.info(spec)?.map(|p| Rpm {
+                plugs: universe.plugs_in(&p, &toolchains),
                 name: p.name,
                 installed: p.installed,
             });
         }
         if use_tool && !route::host_only(spec) {
-            let unfree = session.manifest.tool.unfree.clone();
             let catalog = session.tier(ui)?.catalog(ui)?;
             found.nix = catalog.find(spec).map(|p| {
                 let allowed = opts.allow_unfree || unfree.contains(&p.pname);
@@ -107,22 +108,22 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
                 } else {
                     "the image has no Nix"
                 };
-                session.routes.insert(spec.clone(), why.into());
+                session.route(spec, why.into());
                 fresh_host.push(spec.clone());
             }
             Route::Host(why) => {
-                session.routes.insert(spec.clone(), why);
+                session.route(spec, why);
                 fresh_host.push(spec.clone());
             }
             Route::Tool { attr, reason } => {
-                session.routes.insert(attr.clone(), reason);
-                let unfree = &mut session.manifest.tool.unfree;
+                session.route(&attr, reason);
                 if let Some(n) = found.nix.as_ref().filter(|n| n.unfree)
                     && !unfree.contains(&n.pname)
                 {
                     unfree.push(n.pname.clone());
                 }
-                if !session.manifest.tool.packages.contains(&attr) && !fresh_tool.contains(&attr) {
+                if !session.manifest().tool.packages.contains(&attr) && !fresh_tool.contains(&attr)
+                {
                     fresh_tool.push(attr);
                 }
             }
@@ -134,13 +135,16 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     }
     if fresh_host.is_empty()
         && fresh_tool.is_empty()
-        && session.manifest == current_manifest(&session)
+        && *session.manifest() == current_manifest(&session)
     {
         render_nothing(&mut ui.out, specs, &[]);
         return Ok(());
     }
-    session.manifest.add_host(&fresh_host);
-    session.manifest.add_tool(&fresh_tool);
+    session.edit(|m| {
+        m.add_host(&fresh_host);
+        m.add_tool(&fresh_tool);
+        m.tool.unfree = unfree;
+    })?;
     let outcome = session.plan(
         ui,
         &How {
@@ -160,7 +164,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     if opts.dry_run {
         let tools: Vec<ToolAdded> = fresh_tool
             .iter()
-            .filter_map(|a| session.tool.as_ref()?.package(a))
+            .filter_map(|a| session.tool()?.package(a))
             .map(|p| ToolAdded {
                 attr: p.attr.clone(),
                 version: p.version.clone(),
@@ -194,8 +198,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
 /// override from nothing at all.
 fn current_manifest(session: &Session) -> nx_core::Manifest {
     session
-        .current
-        .as_ref()
+        .current()
         .map(|g| g.manifest.clone())
         .unwrap_or_default()
 }

@@ -53,9 +53,8 @@ pub fn run(
     let outcome = session.plan(ui, &How::default())?;
     let unchanged = outcome.changes.is_empty()
         && session
-            .current
-            .as_ref()
-            .is_some_and(|g| g.manifest == session.manifest);
+            .current()
+            .is_some_and(|g| g.manifest == *session.manifest());
     if unchanged {
         ui.done("the system matches the manifest");
         return Ok(());

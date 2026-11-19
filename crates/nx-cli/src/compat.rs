@@ -39,9 +39,8 @@ pub fn check(machine: &Machine, generation: &Generation) -> Result<(), String> {
     if lock.host.is_empty() {
         return Ok(());
     }
-    let mut opts = machine
-        .options(Refresh::Never)
-        .map_err(|e| format!("{e:#}"))?;
+    let cache = host::cache_dir().map_err(|e| format!("{e:#}"))?;
+    let mut opts = machine.options(Refresh::Never, cache);
     opts.extra =
         host::added_repos(&generation.manifest, &opts.vars).map_err(|e| format!("{e:#}"))?;
     let mut universe =

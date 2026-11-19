@@ -30,7 +30,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<()> {
             .unwrap_or_default();
         host::load(ui, machine, refresh, &manifest)?;
     }
-    let built = deployed(ui, machine, refresh)?;
+    let built = deployed(ui, machine, &host::state(), refresh)?;
     // Generations nothing deployed needs any more (an image that is gone,
     // older staged ones). Only after every image has its own: a failure
     // above returned already. The daily refresh collects the Nix store too.
@@ -87,9 +87,13 @@ fn wanted(machine: &Machine) -> Vec<(Role, Deployment)> {
 /// Builds a generation for each deployed image that lacks one for the
 /// current manifest; returns how many it built. Every image is tried; the
 /// first failure is returned once the rest are done.
-pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usize> {
-    let state = host::state();
-    let current = match Generation::current(&state) {
+pub fn deployed(
+    ui: &mut Ui,
+    machine: &Machine,
+    state: &nx_core::State,
+    refresh: Refresh,
+) -> Result<usize> {
+    let current = match Generation::current(state) {
         Ok(Some(g)) => g,
         // Nothing added yet: nothing to carry across images.
         Ok(None) => return Ok(0),
@@ -101,7 +105,7 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
         let Some(digest) = d.image_digest.as_deref() else {
             continue;
         };
-        if matches(&state, digest, &current, refresh)? {
+        if matches(state, digest, &current, refresh)? {
             continue;
         }
         let result = build(ui, machine, role, &d, refresh);
@@ -119,7 +123,7 @@ pub fn deployed(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<usiz
     }
     // Only this run's failures stand: an image that now has a host tier, or
     // is no longer deployed, drops out.
-    select::record_failures(&state, &failures);
+    select::record_failures(state, &failures);
     match first_error {
         Some(e) => Err(e.context("some deployed images have no host tier yet")),
         None => Ok(built),
@@ -176,22 +180,22 @@ fn build(
         &target
     };
     let mut session = Session::open(ui, machine, refresh, false, |_| Ok(()))?;
-    let was_current = session.current.as_ref().map(|g| g.number);
-    let manifest = session.manifest.clone();
+    let was_current = session.current().map(|g| g.number);
+    let manifest = session.manifest().clone();
     let (resolved, skipped) = resolve_what_fits(ui, &mut session, &manifest.host.packages)?;
     if !skipped.is_empty() {
         // A repeat of the last attempt (the daily refresh, with the same
         // repos still lacking them) would only add a generation like it.
-        if let Some(n) = select::newest_for(&session.state, digest)?
+        if let Some(n) = select::newest_for(session.state(), digest)?
             && same_as(
-                &session.state,
+                session.state(),
                 n,
                 &manifest,
                 &resolved.all,
                 &skipped,
-                session.tool.as_ref(),
+                session.tool(),
             )?
-            && (!booted || session.state.current_number()? == Some(n))
+            && (!booted || session.state().current_number()? == Some(n))
         {
             ui.step(format_args!(
                 "still nothing for {}; generation {n} stays",
