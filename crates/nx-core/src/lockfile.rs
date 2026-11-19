@@ -123,6 +123,11 @@ pub struct LockedRepo {
     /// Fingerprints of the keys its packages must verify against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
+    /// An added repo's pinned key: the SHA-256 of its text, kept as
+    /// `keys/<sha256>.asc` while a generation names it, so a rollback still
+    /// has the key it was built with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// One RPM in the host tier.
@@ -209,6 +214,7 @@ mod tests {
             primary: "cd".into(),
             revision: Some("1731".into()),
             keys: vec![],
+            key: Some("ab".repeat(32)),
         });
         lock.host.push(LockedPackage {
             name: "pkgconf".into(),

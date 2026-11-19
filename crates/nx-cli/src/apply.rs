@@ -12,9 +12,10 @@ use nx_core::generation::{self, Spec};
 use nx_core::state::{self, Staged};
 use nx_core::{Built, Generation, Lock, LockedPackage, LockedRepo, LockedTool, Manifest, State};
 use nx_rpm::packages::Job;
-use nx_rpm::{Package, Plan, Planned, Refresh, Relative, Repo, RepoKeys, Universe, Ureq};
+use nx_rpm::{Package, Plan, Planned, Refresh, Relative, Repo, Universe, Ureq};
 
 use crate::host::{self, Machine};
+use crate::keys::Keys;
 use crate::ui::{self, Ui};
 
 /// Downloads at once; Fedora's mirrors are fine with a handful.
@@ -158,7 +159,13 @@ impl<'m> Session<'m> {
     /// Accepts the keys now pinned for `ids`, though they differ from what
     /// the current generation recorded: the user confirmed them.
     pub fn trust(&mut self, ids: &[String]) {
-        self.keys.trusted.extend(ids.iter().cloned());
+        self.keys.trust(ids);
+    }
+
+    /// Checks repo `id`'s packages against the key pinned as `sha` (one
+    /// this command fetched and showed), not the current generation's.
+    pub fn choose_key(&mut self, id: &str, sha: String) {
+        self.keys.choose(id, sha);
     }
 
     fn locked(&self) -> &[LockedPackage] {
@@ -570,6 +577,7 @@ impl<'m> Session<'m> {
                 primary: l.synced.primary_checksum().to_owned(),
                 revision: l.synced.repomd.revision.clone(),
                 keys,
+                key: self.keys.pin_of(&l.repo.id),
             });
         }
         Ok(lock)
@@ -687,95 +695,6 @@ struct Source {
     repo: String,
 }
 
-/// Repo keys, read as packages need them. An added repo's keys must match
-/// what the current generation recorded (design, *Repositories and COPR*:
-/// a changed key blocks the repo until the user confirms it).
-struct Keys {
-    root: PathBuf,
-    dir: PathBuf,
-    loaded: HashMap<String, RepoKeys>,
-    /// Added repo id → its name and the fingerprints the current
-    /// generation recorded.
-    pinned: HashMap<String, (String, Vec<String>)>,
-    /// Added repo ids → names.
-    added: HashMap<String, String>,
-    /// Repos whose new key the user confirmed (`nx repo add --new-key`).
-    trusted: Vec<String>,
-    generation: u32,
-}
-
-impl Keys {
-    fn new(
-        machine: &Machine,
-        state: &State,
-        current: Option<&Generation>,
-        manifest: &Manifest,
-    ) -> Self {
-        let added: HashMap<String, String> = manifest
-            .repos
-            .iter()
-            .map(|r| (nx_rpm::repo::id_of(&r.name), r.name.clone()))
-            .collect();
-        let pinned = current
-            .map(|g| {
-                g.lock
-                    .repos
-                    .iter()
-                    .filter(|r| !r.keys.is_empty())
-                    .filter_map(|r| {
-                        let name = added.get(&r.id)?;
-                        Some((r.id.clone(), (name.clone(), r.keys.clone())))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self {
-            root: machine.root.clone(),
-            dir: host::keys_dir(state),
-            loaded: HashMap::new(),
-            pinned,
-            added,
-            trusted: Vec::new(),
-            generation: current.map_or(0, |g| g.number),
-        }
-    }
-
-    fn is_added(&self, id: &str) -> bool {
-        self.added.contains_key(id)
-    }
-
-    fn get(&mut self, repo: &Repo) -> nx_rpm::Result<&RepoKeys> {
-        if !self.loaded.contains_key(&repo.id) {
-            let keys = nx_rpm::keyring(repo, &self.root, &self.dir)?;
-            if let Some((name, was)) = self.pinned.get(&repo.id)
-                && *was != keys.fingerprints
-                && !self.trusted.contains(&repo.id)
-            {
-                return Err(nx_rpm::Error::Invalid(format!(
-                    "the key pinned for {name} changed since generation {} (was {}, now {}); \
-                     if you trust the new key: nx repo add {name} --new-key",
-                    self.generation,
-                    was.join(", "),
-                    keys.fingerprints.join(", ")
-                )));
-            }
-            self.loaded.insert(repo.id.clone(), keys);
-        }
-        self.loaded
-            .get(&repo.id)
-            .ok_or_else(|| nx_rpm::Error::Invalid(format!("no keys for {}", repo.id)))
-    }
-
-    /// What to suggest when an added repo's package fails to verify.
-    fn change_hint(&self, id: &str) -> String {
-        self.added.get(id).map_or_else(String::new, |name| {
-            format!(
-                " (if {name} changed its signing key, check the new one and run nx repo add {name} --new-key)"
-            )
-        })
-    }
-}
-
 /// Refuses a change the disk can't hold: `download` bytes into `cache`
 /// and `unpack` bytes into `store`, plus [`SPARE`] on each filesystem.
 fn check_space(cache: &Path, download: u64, store: &Path, unpack: u64) -> Result<()> {
@@ -834,66 +753,6 @@ fn download(ui: &mut Ui, http: &Ureq, jobs: &[Job], dir: &Path) -> Result<Vec<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nx_rpm::repo::Added;
-
-    fn testdata(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/rpm")
-            .join(name)
-    }
-
-    #[test]
-    fn a_changed_key_blocks_the_repo_until_trusted() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("nx-cli-keys-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let vars = nx_rpm::Vars {
-            releasever: "45".into(),
-            basearch: "x86_64".into(),
-        };
-        let repo = Repo::added(
-            &Added {
-                name: "copr:lilay/topgrade",
-                baseurl: None,
-                metalink: None,
-                gpgkey: None,
-                priority: None,
-            },
-            &vars,
-        )?;
-        std::fs::copy(
-            testdata("copr-lilay-topgrade.gpg"),
-            dir.join(nx_rpm::packages::pinned_key(&repo.id)),
-        )?;
-        let name = "copr:lilay/topgrade".to_owned();
-        let mut keys = Keys {
-            root: PathBuf::from("/"),
-            dir: dir.clone(),
-            loaded: HashMap::new(),
-            pinned: HashMap::from([(
-                repo.id.clone(),
-                (
-                    name.clone(),
-                    vec!["0000000000000000000000000000000000000000".into()],
-                ),
-            )]),
-            added: HashMap::from([(repo.id.clone(), name)]),
-            trusted: Vec::new(),
-            generation: 3,
-        };
-        let err = keys
-            .get(&repo)
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
-        assert!(
-            err.starts_with("the key pinned for copr:lilay/topgrade changed since generation 3"),
-            "{err}"
-        );
-        keys.trusted.push(repo.id.clone());
-        assert_eq!(keys.get(&repo)?.fingerprints.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(())
-    }
 
     #[test]
     fn refuses_what_the_disk_cannot_hold() -> Result<()> {

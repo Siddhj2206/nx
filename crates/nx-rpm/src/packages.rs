@@ -21,25 +21,36 @@ pub struct RepoKeys {
 }
 
 /// The keys `repo`'s packages must be signed with. `file://` keys are read
-/// from the image under `root`; any other URL must have been pinned by
-/// `nx repo add` into `pinned` (its file named by [`pinned_key`]). Never
-/// the system keyring.
-pub fn keyring(repo: &Repo, root: &Path, pinned: &Path) -> Result<RepoKeys> {
+/// from the image under `root`; any other URL takes `pinned`, the key
+/// `nx repo add` fetched and pinned (one per repo, whatever URLs it
+/// names). Never the system keyring.
+pub fn keyring(repo: &Repo, root: &Path, pinned: Option<&str>) -> Result<RepoKeys> {
     if repo.gpgkey.is_empty() {
         return Err(Error::Invalid(format!("{} names no gpgkey", repo.id)));
     }
     let mut keyring = Keyring::new()?;
     let mut fingerprints = Vec::new();
+    let mut pinned_added = false;
     for url in &repo.gpgkey {
-        let path = match url.strip_prefix("file://") {
-            Some(abs) => root.join(abs.trim_start_matches('/')),
-            None => pinned.join(pinned_key(&repo.id)),
-        };
-        let text = std::fs::read_to_string(&path).map_err(|source| Error::Read {
-            path: path.clone(),
-            source,
-        })?;
-        fingerprints.extend(keyring.add(&text)?);
+        match url.strip_prefix("file://") {
+            Some(abs) => {
+                let path = root.join(abs.trim_start_matches('/'));
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|source| Error::Read { path, source })?;
+                fingerprints.extend(keyring.add(&text)?);
+            }
+            None if pinned_added => {}
+            None => {
+                let text = pinned.ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "{} has no pinned key (nx repo add pins it)",
+                        repo.id
+                    ))
+                })?;
+                fingerprints.extend(keyring.add(text)?);
+                pinned_added = true;
+            }
+        }
     }
     fingerprints.sort();
     fingerprints.dedup();
@@ -49,8 +60,9 @@ pub fn keyring(repo: &Repo, root: &Path, pinned: &Path) -> Result<RepoKeys> {
     })
 }
 
-/// The file name a repo's pinned key is kept under.
-pub fn pinned_key(repo_id: &str) -> String {
+/// The file name a repo's key was pinned under before nx kept keys by
+/// content (`keys/<sha256>.asc`); read when a lockfile names no key.
+pub fn legacy_pinned_key(repo_id: &str) -> String {
     format!("{}.asc", repo_id.replace(['/', ':'], "_"))
 }
 
@@ -300,7 +312,7 @@ mod tests {
             &vars(),
         )
         .remove(0);
-        let keys = keyring(&fedora, &root, &tmp.0.join("pinned"))?;
+        let keys = keyring(&fedora, &root, None)?;
         assert_eq!(keys.fingerprints, [FEDORA_45]);
 
         let copr = parse(
@@ -309,15 +321,10 @@ mod tests {
             &vars(),
         )
         .remove(0);
-        assert!(
-            keyring(&copr, &root, &tmp.0.join("pinned")).is_err(),
-            "not pinned yet"
-        );
-        let pinned = tmp.0.join("pinned");
-        let _ = std::fs::create_dir_all(&pinned);
-        let copr_key = std::fs::read(testdata("copr-lilay-topgrade.gpg")).unwrap_or_default();
-        let _ = std::fs::write(pinned.join(pinned_key("copr:a:b")), copr_key);
-        let keys = keyring(&copr, &root, &pinned)?;
+        assert!(keyring(&copr, &root, None).is_err(), "not pinned yet");
+        let copr_key =
+            std::fs::read_to_string(testdata("copr-lilay-topgrade.gpg")).unwrap_or_default();
+        let keys = keyring(&copr, &root, Some(&copr_key))?;
         assert_eq!(keys.fingerprints.len(), 1);
         Ok(())
     }

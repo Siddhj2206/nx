@@ -31,7 +31,10 @@ strike it from here once done, and record the decision in `design.md`.
 4. **Fixed.** *`nx why` dated "added in" by generation numbers.* Generations
    for other images and ones a rollback left sit between the numbers; it
    now follows `parent` (`why::added_in`, tested).
-5. *Repo keys live outside generations.* Pinned keys are files in
+5. **Fixed.** Keys are pinned as `keys/<sha256>.asc`, named by the lock's
+   `key`, never removed while a kept generation names them; `Pins`/`undo`
+   are gone (VM: `m7.sh keys`). The finding as written:
+   *Repo keys live outside generations.* Pinned keys are files in
    `/var/lib/nx/keys/<id>.asc`, mutable and shared; the lockfile records
    only fingerprints. `nx repo remove` deletes the file, so rolling back to
    a generation that still has the repo can't verify its packages. The
@@ -159,8 +162,8 @@ strike it from here once done, and record the decision in `design.md`.
 
 ## Suggested order
 
-1. Done: 1–4, and 6 by root's copy.
-2. 5 (keys by fingerprint). 7 stays until the `nx`-user builder: alone,
+1. Done: 1–6 (6 by root's copy).
+2. 7 stays until the `nx`-user builder: alone,
    `User=nx` would only move the `.trash` problem (wheel-built trees with
    cut ACL masks are no more removable by `nx` than root-built ones are by
    wheel).

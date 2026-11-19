@@ -36,10 +36,12 @@ pub fn run(
             nx_nix::STORE
         );
     }
-    // Keys are fetched (and shown) before the lock, as `nx repo add` does.
+    // Keys are fetched (and shown) before the lock, as `nx repo add` does,
+    // and pinned under it.
+    let current = host::readable(ui, &host::state())?;
     let unpinned = wanted
         .as_ref()
-        .map(|w| crate::repo::fetch_unpinned(ui, machine, w))
+        .map(|w| crate::repo::fetch_unpinned(ui, machine, w, current.as_ref()))
         .transpose()?;
     let mut session = Session::open(ui, machine, refresh, dry_run, |m| {
         if let Some(w) = &wanted {
@@ -47,17 +49,10 @@ pub fn run(
         }
         Ok(())
     })?;
-    let pins = match unpinned.filter(|u| !u.is_empty() && !dry_run) {
-        Some(u) => Some(u.pin(&host::keys_dir(&session.state))?),
-        None => None,
-    };
-    let result = converge(ui, &mut session, dry_run, started);
-    if result.is_err()
-        && let Some(p) = pins
-    {
-        p.undo();
+    if let Some(u) = unpinned.filter(|_| !dry_run) {
+        u.pin(&mut session)?;
     }
-    result
+    converge(ui, &mut session, dry_run, started)
 }
 
 fn read(path: &Path) -> Result<Manifest> {

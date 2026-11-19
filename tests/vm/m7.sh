@@ -14,6 +14,8 @@
 #   phase race      two nx add at once both end up in the manifest
 #   phase owner     what is merged into /usr is root's copy, which tester
 #                   can't write
+#   phase keys      a repo's pinned key survives nx repo remove, so a
+#                   rollback to the repo can still verify its packages
 #   phase complete  the shell's completion asks nx for live values
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -165,6 +167,22 @@ owner)
 	(( $(find /var/lib/nx-merged -mindepth 1 -maxdepth 1 | wc -l) == 1 )) || fail "old copies were left: $(ls /var/lib/nx-merged)"
 	as tester "nx remove $p" >/dev/null
 	echo "owner: ok"
+	;;
+keys)
+	# A repo's key is pinned by content and outlives nx repo remove, so a
+	# rollback to a generation with the repo can still verify its packages.
+	repo=copr:lilay/topgrade
+	grep -q "\"$repo\"" /var/lib/nx/current/manifest.toml || as tester "nx repo add $repo" >/dev/null
+	sha=$(python3 -c 'import sys,tomllib; print(next(r["key"] for r in tomllib.load(open("/var/lib/nx/current/lock.toml","rb"))["repo"] if r["id"]=="copr:lilay:topgrade"))')
+	[[ -f /var/lib/nx/keys/$sha.asc ]] || fail "the lock names $sha, which isn't pinned"
+	as tester "nx repo remove $repo" >/dev/null
+	[[ -f /var/lib/nx/keys/$sha.asc ]] || fail "nx repo remove took the key an earlier generation names"
+	as tester "nx rollback" >/dev/null
+	grep -q "\"$repo\"" /var/lib/nx/current/manifest.toml || fail "the rollback didn't bring the repo back"
+	as tester "nx add libyaml-devel" >/tmp/m7-keys.txt 2>&1 || fail "a change after the rollback failed: $(cat /tmp/m7-keys.txt)"
+	as tester "nx remove libyaml-devel" >/dev/null
+	as tester "nx repo remove $repo" >/dev/null
+	echo "keys: ok"
 	;;
 complete)
 	installed=$(as tester "nx list" | awk 'NR>0 && /^  [^ ]/ {print $1; exit}')

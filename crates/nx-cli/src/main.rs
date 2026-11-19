@@ -17,6 +17,7 @@ mod generations;
 mod help;
 mod host;
 mod info;
+mod keys;
 mod list;
 mod live;
 mod migrate;

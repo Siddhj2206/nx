@@ -218,7 +218,7 @@ The host tier accepts COPR and other third-party RPM repos through the same pipe
 - `nx repo add copr:owner/project` expands to the COPR URL for the booted release and architecture, e.g. `https://download.copr.fedorainfracloud.org/results/<owner>/<project>/fedora-$releasever-$basearch/`, and the project key at its `pubkey.gpg`.
 - `nx repo add <url>` adds any other RPM repo (VS Code, Tailscale, etc.).
 - Repos the image already enables in `/etc/yum.repos.d` are imported read-only and marked as image-provided. nx never edits those files.
-- `nx repo list` / `nx repo remove` manage them. Repos are recorded in `manifest.toml`; the metadata checksum and key fingerprint of each go in `lock.toml`.
+- `nx repo list` / `nx repo remove` manage them. Repos are recorded in `manifest.toml`; the metadata checksum and key fingerprint of each go in `lock.toml`. An added repo's key is pinned by content, `/var/lib/nx/keys/<sha256>.asc`, and `lock.toml` names it (`key`): a pin is never replaced, `nx repo remove` leaves it for the generations that still name it (a rollback verifies with the key it was built with), and `nx gc` removes the ones no kept generation names. A pin is checked against its name when read. Pins from before (`keys/<repo id>.asc`) are read when a lock names no key, and pinned by content from then on.
 
 **Pipeline:** identical to Fedora's. repomd → cached `.solv` → libsolv → RPM header classification → host tier. No zchunk is assumed for third-party repos.
 

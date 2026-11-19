@@ -115,6 +115,24 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
         for sha in &store {
             state.store().remove(guard, sha)?;
         }
+        // Pinned repo keys no kept generation names. A generation this nx
+        // can't read may name any, so then none goes.
+        let mut pins = std::collections::HashSet::new();
+        let readable = plan
+            .keep
+            .iter()
+            .all(|n| match select::read_lock(&state, *n) {
+                Ok(lock) => {
+                    pins.extend(lock.repos.into_iter().filter_map(|r| r.key));
+                    true
+                }
+                Err(_) => false,
+            });
+        if readable {
+            for path in crate::keys::unused(&crate::keys::dir(&state), &pins) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
         // What an earlier gc set aside: removable now if this is root
         // (nx sync runs gc as root every day).
         state.purge_trash(guard);

@@ -2,7 +2,7 @@
 //! manifest with their key pinned. Adding or removing one builds a new
 //! generation, as any manifest change does.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use nx_core::{Generation, Manifest, RepoEntry};
@@ -82,19 +82,12 @@ pub fn add(
             bail!("can't add {}: {}", f.entry.name, s.error);
         }
     }
-    let pins = Pins::write(&host::keys_dir(&session.state), &fetched)?;
-    let built = (|| {
-        let manifest = session.manifest.clone();
-        let resolved = session.resolve_manifest(ui, &manifest.host.packages, &[])?;
-        session.install(ui, &manifest, &resolved.all)
-    })();
-    let built = match built {
-        Ok(b) => b,
-        Err(e) => {
-            pins.undo();
-            return Err(e);
-        }
-    };
+    // Under the lock, so nx gc can't take a pin before its generation names
+    // it; one left by a change that fails goes with the next gc.
+    pin_all(&mut session, &fetched)?;
+    let manifest = session.manifest.clone();
+    let resolved = session.resolve_manifest(ui, &manifest.host.packages, &[])?;
+    let built = session.install(ui, &manifest, &resolved.all)?;
     let st = ui.out.style;
     for f in &fetched {
         ui.out.line(format_args!(
@@ -149,10 +142,25 @@ fn fetch(
     })
 }
 
-/// The keys of `wanted`'s repos that have none pinned yet (`nx apply` on a
-/// new machine), fetched and shown as `nx repo add` does. Refuses two
-/// repos with one id, and a repo the image has.
-pub fn fetch_unpinned(ui: &mut Ui, machine: &Machine, wanted: &Manifest) -> Result<Unpinned> {
+/// Pins each fetched key and has the session check its repo against it.
+fn pin_all(session: &mut Session, fetched: &[Fetched]) -> Result<()> {
+    let dir = crate::keys::dir(&session.state);
+    for f in fetched {
+        let sha = crate::keys::pin(&dir, &f.key)?;
+        session.choose_key(&id_of(&f.entry.name), sha);
+    }
+    Ok(())
+}
+
+/// The keys of `wanted`'s repos that the current generation has none
+/// pinned for (`nx apply` on a new machine), fetched and shown as `nx repo
+/// add` does. Refuses two repos with one id, and a repo the image has.
+pub fn fetch_unpinned(
+    ui: &mut Ui,
+    machine: &Machine,
+    wanted: &Manifest,
+    current: Option<&Generation>,
+) -> Result<Unpinned> {
     for (i, r) in wanted.repos.iter().enumerate() {
         if let Some(other) = wanted.repos[..i]
             .iter()
@@ -166,15 +174,18 @@ pub fn fetch_unpinned(ui: &mut Ui, machine: &Machine, wanted: &Manifest) -> Resu
         .into_iter()
         .map(|r| r.id)
         .collect();
-    let dir = host::keys_dir(&host::state());
+    let dir = crate::keys::dir(&host::state());
+    let pinned = |id: &str| {
+        current
+            .and_then(|g| g.lock.repo(id))
+            .is_some_and(|r| r.key.is_some())
+            || dir.join(nx_rpm::packages::legacy_pinned_key(id)).is_file()
+    };
     let http = Ureq::new();
     let fetched = wanted
         .repos
         .iter()
-        .filter(|r| {
-            !dir.join(nx_rpm::packages::pinned_key(&id_of(&r.name)))
-                .exists()
-        })
+        .filter(|r| !pinned(&id_of(&r.name)))
         .map(|r| fetch(ui, &http, &vars, &image_ids, r.clone()))
         .collect::<Result<Vec<_>>>()?;
     Ok(Unpinned(fetched))
@@ -184,13 +195,9 @@ pub fn fetch_unpinned(ui: &mut Ui, machine: &Machine, wanted: &Manifest) -> Resu
 pub struct Unpinned(Vec<Fetched>);
 
 impl Unpinned {
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Pins them; [`Pins::undo`] takes them back if the change fails.
-    pub fn pin(&self, dir: &Path) -> Result<Pins> {
-        Pins::write(dir, &self.0)
+    /// Pins them for `session`'s resolve. Take the lock first.
+    pub fn pin(&self, session: &mut Session) -> Result<()> {
+        pin_all(session, &self.0)
     }
 }
 
@@ -201,36 +208,6 @@ fn same_id<'a>(m: &'a Manifest, name: &str) -> Option<&'a RepoEntry> {
     m.repos
         .iter()
         .find(|r| r.name != name && id_of(&r.name) == id)
-}
-
-/// Key files written for a change, and what they replaced, so a change
-/// that fails leaves the keys as they were.
-pub struct Pins(Vec<(PathBuf, Option<String>)>);
-
-impl Pins {
-    fn write(dir: &Path, fetched: &[Fetched]) -> Result<Self> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let mut pins = Self(Vec::new());
-        for f in fetched {
-            let path = dir.join(nx_rpm::packages::pinned_key(&id_of(&f.entry.name)));
-            let before = std::fs::read_to_string(&path).ok();
-            if let Err(e) = std::fs::write(&path, &f.key) {
-                pins.undo();
-                return Err(e).with_context(|| format!("writing {}", path.display()));
-            }
-            pins.0.push((path, before));
-        }
-        Ok(pins)
-    }
-
-    pub fn undo(self) {
-        for (path, before) in self.0 {
-            let _ = match before {
-                Some(text) => std::fs::write(&path, text),
-                None => std::fs::remove_file(&path),
-            };
-        }
-    }
 }
 
 /// What `source` names: `copr:owner/project`, a `.repo` file's URL, or a
@@ -304,10 +281,9 @@ pub fn remove(ui: &mut Ui, machine: &Machine, name: &str) -> Result<()> {
     let resolved = session
         .resolve_manifest(ui, &manifest.host.packages, &[])
         .with_context(|| format!("packages still need {name}"))?;
+    // Its pinned key stays while an earlier generation names it (a
+    // rollback needs it); nx gc removes it after.
     let built = session.install(ui, &manifest, &resolved.all)?;
-    let _ = std::fs::remove_file(
-        host::keys_dir(&session.state).join(nx_rpm::packages::pinned_key(&id_of(name))),
-    );
     let st = ui.out.style;
     ui.out
         .line(format_args!("{} {name}", st.red(ui::SYM_REMOVED)));
