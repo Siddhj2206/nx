@@ -14,7 +14,7 @@
 //! prefix backend is recorded and the link removed, so `nx shell` exports
 //! the generation's `usr` instead. The next activation tries sysext again.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use nx_core::generation::{self, Spec};
@@ -106,7 +106,7 @@ fn select(ui: &mut Ui) -> Result<()> {
             ));
         }
         Err(why) => {
-            let lock = {
+            let mut lock = {
                 let mut lock = Lock::new(
                     Some(digest.clone()),
                     &machine.release.version_id,
@@ -114,9 +114,18 @@ fn select(ui: &mut Ui) -> Result<()> {
                 );
                 lock.parent = Some(previous.number);
                 lock.pending = true;
+                // The tool tier doesn't depend on the image: it stays.
+                lock.tool = previous.lock.tool.clone();
                 lock
             };
             let image_root = machine.image_root()?;
+            let shim = crate::tool::shim(&state);
+            if let Err(e) = &shim {
+                ui.warn(format_args!(
+                    "the tool tier is left out until nx sync: {e:#}"
+                ));
+                lock.tool = None;
+            }
             let built = generation::build(
                 &state,
                 &guard,
@@ -126,6 +135,7 @@ fn select(ui: &mut Ui) -> Result<()> {
                     image_root: &image_root,
                     os_id: &machine.release.id,
                     image_has: &|_| false,
+                    shim: shim.as_ref().ok().map(PathBuf::as_path),
                 },
             )?;
             state.set_current(built.generation.number)?;

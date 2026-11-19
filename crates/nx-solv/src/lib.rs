@@ -47,6 +47,13 @@ pub struct RepoId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct SolvableId(sys::Id);
 
+/// Which dependency list [`Pool::deps`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deps {
+    Provides,
+    Requires,
+}
+
 /// What nx needs to know about one package.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Package {
@@ -403,6 +410,27 @@ impl Pool {
                 s,
                 sys::SOLVABLE_DESCRIPTION as i32,
             ))
+        }
+    }
+
+    /// What a package provides or requires, each as rpm prints it
+    /// (`libxkbcommon.so.0()(64bit)`, `pkgconfig(wayland-client) >= 1.20`).
+    pub fn deps(&self, id: SolvableId, which: Deps) -> Vec<String> {
+        let key = match which {
+            Deps::Provides => sys::SOLVABLE_PROVIDES,
+            Deps::Requires => sys::SOLVABLE_REQUIRES,
+        };
+        let mut q = Queue::new();
+        // SAFETY: as in package(); the queue is initialised, and each
+        // dep2str result is copied before the next call reuses its space.
+        unsafe {
+            let p = self.p();
+            let s = (*p).solvables.add(id.0 as usize);
+            sys::solvable_lookup_deparray(s, key as i32, &mut q.0, 0);
+            q.ids()
+                .filter(|&dep| dep != sys::SOLVABLE_PREREQMARKER as i32)
+                .map(|dep| owned(sys::pool_dep2str(p, dep)))
+                .collect()
         }
     }
 

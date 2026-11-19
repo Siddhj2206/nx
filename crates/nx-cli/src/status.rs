@@ -66,7 +66,7 @@ pub fn run(
         s.row(key, &value);
     }
     s.row("Host tier", &host_tier(state, st));
-    s.row("Tool tier", &st.dim("not built yet (M6)"));
+    s.row("Tool tier", &tool_tier(state, root, st));
     s.blank();
     Ok(())
 }
@@ -111,6 +111,35 @@ fn host_tier(state: &State, st: crate::ui::Style) -> String {
     }
 }
 
+/// The current generation's nixpkgs release and how many tools it has.
+fn tool_tier(state: &State, root: &Path, st: crate::ui::Style) -> String {
+    if !root.join("nix/store").is_dir() {
+        return st.yellow("off: the image has no Nix (/nix/store)");
+    }
+    let tool = state
+        .current_number()
+        .ok()
+        .flatten()
+        .and_then(|n| nx_core::select::read_lock(state, n).ok())
+        .and_then(|l| l.tool)
+        .filter(|t| !t.packages.is_empty());
+    match tool {
+        Some(t) => {
+            let release = nx_nix::Release {
+                rev: t.rev,
+                name: t.release,
+                url: t.url,
+            };
+            format!(
+                "{} {}",
+                crate::ui::plural(t.packages.len(), "tool"),
+                st.dim(&format!("· nixpkgs {}", release.version()))
+            )
+        }
+        None => st.dim("nothing added yet"),
+    }
+}
+
 /// `  without a, b` when the generation leaves manifest packages out.
 fn left_out(state: &State, n: u32, st: crate::ui::Style) -> String {
     match nx_core::select::read_lock(state, n) {
@@ -141,6 +170,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nx-status-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("usr/lib"))?;
+        std::fs::create_dir_all(dir.join("nix/store"))?;
         std::fs::write(
             dir.join("usr/lib/os-release"),
             "NAME=\"Neptuno\"\nID=fedora\nVERSION_ID=45\n",
@@ -183,7 +213,7 @@ mod tests {
   Staged      none
   Rollback    45.20261117 from sha256:292ee1bfc6d4
   Host tier   nothing added yet
-  Tool tier   not built yet (M6)
+  Tool tier   nothing added yet
 
 "
         );

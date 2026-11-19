@@ -1,5 +1,5 @@
-//! `nx list`: the host tier of the current generation, from its lockfile.
-//! Reads no repo metadata, so it is instant and works offline.
+//! `nx list`: both tiers of the current generation, from its lockfile.
+//! Reads no repo metadata or catalog, so it is instant and works offline.
 
 use anyhow::Result;
 use nx_core::{Generation, LockedPackage};
@@ -14,10 +14,11 @@ pub fn run(ui: &mut Ui) -> Result<()> {
 }
 
 /// What the user asked for first, then what it pulled in, then what the
-/// manifest asks for that the image provides.
+/// manifest asks for that the image provides, then the tool tier with the
+/// commands each package exposes.
 fn render(out: &mut Stream, current: Option<&Generation>) {
     let style = out.style;
-    let Some(g) = current.filter(|g| !g.manifest.host.packages.is_empty()) else {
+    let Some(g) = current.filter(|g| !g.manifest.is_empty()) else {
         out.line(style.dim("Nothing added yet · nx add <name> adds a package"));
         return;
     };
@@ -28,12 +29,14 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
         .iter()
         .filter(|s| !g.lock.host.iter().any(|p| p.requested.contains(s)))
         .collect();
+    let tools: &[nx_core::ToolPackage] = g.lock.tool.as_ref().map_or(&[], |t| &t.packages);
     let width = g
         .lock
         .host
         .iter()
         .map(|p| p.name.len())
         .chain(in_image.iter().map(|s| s.len()))
+        .chain(tools.iter().map(|p| p.attr.len()))
         .max()
         .unwrap_or(0)
         + 2;
@@ -57,12 +60,36 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
             ui::in_image(style)
         ));
     }
+    for p in tools {
+        let names: Vec<&str> = p.bins.iter().map(|b| b.name.as_str()).collect();
+        let runs = match names.as_slice() {
+            [] => "  · nixpkgs, no commands exposed".to_owned(),
+            [one] if *one == p.attr => "  · nixpkgs".to_owned(),
+            _ => format!("  · nixpkgs · {}", names.join(" ")),
+        };
+        out.line(format_args!(
+            "{}{}{}",
+            ui::pad(&style.bold(&p.attr), width),
+            style.dim(&p.version),
+            style.dim(&runs)
+        ));
+    }
     out.blank();
-    out.line(style.dim(&format!(
-        "{} · generation {} · host tier",
-        ui::plural(g.lock.host.len(), "package"),
-        g.number
-    )));
+    let mut foot = format!("{} · ", ui::plural(g.lock.host.len(), "host package"));
+    if let Some(t) = g.lock.tool.as_ref().filter(|t| !t.packages.is_empty()) {
+        let release = nx_nix::Release {
+            rev: t.rev.clone(),
+            name: t.release.clone(),
+            url: String::new(),
+        };
+        foot.push_str(&format!(
+            "{} at nixpkgs {} · ",
+            ui::plural(t.packages.len(), "tool"),
+            release.version()
+        ));
+    }
+    foot.push_str(&format!("generation {}", g.number));
+    out.line(style.dim(&foot));
 }
 
 #[cfg(test)]
@@ -110,7 +137,46 @@ mod tests {
              \x20 libffi-devel   3.5.1-2.fc45  · for wayland-devel\n\
              \x20 glibc          ✓ in the image\n\
              \n\
-             \x20 2 packages · generation 2 · host tier\n"
+             \x20 2 host packages · generation 2\n"
+        );
+    }
+
+    #[test]
+    fn lists_tools_with_their_commands() {
+        let mut manifest = Manifest::default();
+        manifest.add_tool(&["ripgrep".into(), "jq".into()]);
+        let mut lock = Lock::new(None, "45", "x86_64");
+        let tool = |attr: &str, bins: &[&str]| nx_core::ToolPackage {
+            attr: attr.into(),
+            version: "1.0".into(),
+            bins: bins
+                .iter()
+                .map(|b| nx_core::Bin {
+                    name: (*b).into(),
+                    path: String::new(),
+                })
+                .collect(),
+            ..nx_core::ToolPackage::default()
+        };
+        lock.tool = Some(nx_core::LockedTool {
+            rev: "e21fec321d73511849707a7585e4ea155ee4bf40".into(),
+            release: "nixpkgs-26.11pre1122334.e21fec321d73".into(),
+            packages: vec![tool("ripgrep", &["rg"]), tool("jq", &["jq"])],
+            ..nx_core::LockedTool::default()
+        });
+        let g = Generation {
+            number: 3,
+            dir: Default::default(),
+            manifest,
+            lock,
+            activation: Default::default(),
+        };
+        assert_eq!(
+            text(Some(&g)),
+            "  ripgrep  1.0  · nixpkgs · rg\n\
+             \x20 jq       1.0  · nixpkgs\n\
+             \n\
+             \x20 0 host packages · 2 tools at nixpkgs 26.11pre1122334 · generation 3\n"
         );
     }
 

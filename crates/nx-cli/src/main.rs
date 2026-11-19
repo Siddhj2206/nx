@@ -7,6 +7,7 @@
 mod add;
 mod apply;
 mod boot;
+mod cache;
 mod compat;
 mod gc;
 mod generations;
@@ -18,11 +19,14 @@ mod live;
 mod remove;
 mod repo;
 mod rollback;
+mod route;
 mod search;
 mod shell;
 mod status;
 mod sync;
+mod tool;
 mod ui;
+mod upgrade;
 mod why;
 
 use std::path::Path;
@@ -50,15 +54,27 @@ struct Cli {
 /// group is in `help::PLACEMENT`.
 #[derive(Subcommand)]
 enum Command {
-    /// add packages to the host tier, live
+    /// add packages, live: tools from nixpkgs, the rest as Fedora RPMs
     Add {
-        /// names, provides (pkgconfig(xkbcommon)) or files (/usr/bin/rg);
-        /// name@repo takes it from that repo only
+        /// names, commands (rg), provides (pkgconfig(xkbcommon)) or files
+        /// (/usr/bin/rg); name@repo takes it from that repo only
         #[arg(value_name = "package", required = true)]
         packages: Vec<String>,
         /// resolve and list what would be added; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// a Fedora RPM in the host tier, wherever nx would put it
+        #[arg(long, conflicts_with = "tool")]
+        host: bool,
+        /// a nixpkgs package in the tool tier, wherever nx would put it
+        #[arg(long)]
+        tool: bool,
+        /// allow these nixpkgs packages despite an unfree license
+        #[arg(long)]
+        allow_unfree: bool,
+        /// let this package have a command another one has
+        #[arg(long = "override", value_name = "command")]
+        overrides: Vec<String>,
         /// install despite scriptlets nx can't translate, after you reviewed
         /// them: package=digest, as the refusal prints it
         #[arg(long, value_name = "package=digest")]
@@ -72,6 +88,20 @@ enum Command {
         #[arg(value_name = "package", required = true)]
         packages: Vec<String>,
         /// list what would be removed; change nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        metadata: Metadata,
+    },
+    /// move packages to newer builds and nixpkgs to its current release
+    Upgrade {
+        /// only the host tier's packages
+        #[arg(long, conflicts_with = "tool")]
+        host: bool,
+        /// only the tool tier: move the nixpkgs pin
+        #[arg(long)]
+        tool: bool,
+        /// list what would change; change nothing
         #[arg(long)]
         dry_run: bool,
         #[command(flatten)]
@@ -106,6 +136,12 @@ enum Command {
     Repo {
         #[command(subcommand)]
         action: RepoAction,
+    },
+    /// extra Nix binary caches for the tool tier: add, list, remove
+    #[command(subcommand_required = true, arg_required_else_help = true)]
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
     },
     /// find packages by name or summary
     Search {
@@ -168,6 +204,25 @@ enum RepoAction {
     },
 }
 
+#[derive(Subcommand)]
+enum CacheAction {
+    /// trust a binary cache and the key it signs with
+    Add {
+        #[arg(value_name = "url")]
+        url: String,
+        /// as the cache publishes it: name-1:base64…
+        #[arg(value_name = "key")]
+        key: String,
+    },
+    /// cache.nixos.org and the caches nx added
+    List,
+    /// stop trusting a cache nx added
+    Remove {
+        #[arg(value_name = "url")]
+        url: String,
+    },
+}
+
 /// How the host-tier commands treat cached repo metadata.
 #[derive(Args)]
 struct Metadata {
@@ -187,13 +242,17 @@ impl Metadata {
         }
     }
 
-    /// The universe for the repos of the generation nx can read.
-    fn load(&self, ui: &mut Ui) -> anyhow::Result<nx_rpm::Universe> {
+    /// The universe for the repos of the generation nx can read, and that
+    /// generation.
+    fn load(&self, ui: &mut Ui) -> anyhow::Result<(nx_rpm::Universe, Option<nx_core::Generation>)> {
         let machine = machine()?;
-        let manifest = host::readable(ui, &host::state())?
-            .map(|g| g.manifest)
+        let current = host::readable(ui, &host::state())?;
+        let manifest = current
+            .as_ref()
+            .map(|g| g.manifest.clone())
             .unwrap_or_default();
-        host::load(ui, &machine, self.refresh(), &manifest)
+        let universe = host::load(ui, &machine, self.refresh(), &manifest)?;
+        Ok((universe, current))
     }
 }
 
@@ -215,18 +274,41 @@ fn main() -> ExitCode {
         Command::Add {
             packages,
             dry_run,
+            host,
+            tool,
+            allow_unfree,
+            overrides,
             allow_scriptlets,
             metadata,
-        } => machine().and_then(|m| {
-            add::run(
-                &mut ui,
-                &m,
-                &packages,
+        } => {
+            let opts = add::Options {
                 dry_run,
-                &allow_scriptlets,
-                metadata.refresh(),
-            )
-        }),
+                allow_scriptlets,
+                refresh: Some(metadata.refresh()),
+                forced: match (host, tool) {
+                    (true, _) => Some(route::Forced::Host),
+                    (_, true) => Some(route::Forced::Tool),
+                    _ => None,
+                },
+                allow_unfree,
+                overrides,
+            };
+            machine().and_then(|m| add::run(&mut ui, &m, &packages, &opts))
+        }
+        Command::Upgrade {
+            host,
+            tool,
+            dry_run,
+            metadata,
+        } => machine()
+            .and_then(|m| upgrade::run(&mut ui, &m, (host, tool), dry_run, metadata.refresh())),
+        Command::Cache { action } => match action {
+            CacheAction::Add { url, key } => {
+                machine().and_then(|m| cache::add(&mut ui, &m, &url, &key))
+            }
+            CacheAction::List => cache::list(&mut ui),
+            CacheAction::Remove { url } => machine().and_then(|m| cache::remove(&mut ui, &m, &url)),
+        },
         Command::Remove {
             packages,
             dry_run,
@@ -253,12 +335,17 @@ fn main() -> ExitCode {
             RepoAction::List => machine().and_then(|m| repo::list(&mut ui, &m)),
             RepoAction::Remove { name } => machine().and_then(|m| repo::remove(&mut ui, &m, &name)),
         },
-        Command::Search { terms, metadata } => metadata
-            .load(&mut ui)
-            .map(|u| search::run(&mut ui, &u, &terms)),
-        Command::Info { package, metadata } => metadata
-            .load(&mut ui)
-            .and_then(|u| info::run(&mut ui, &u, &package)),
+        Command::Search { terms, metadata } => metadata.load(&mut ui).map(|(u, g)| {
+            let pinned = g.and_then(|g| g.lock.tool);
+            let catalog = tool::catalog_to_read(&mut ui, pinned.as_ref());
+            search::run(&mut ui, &u, catalog.as_ref(), &terms);
+        }),
+        Command::Info { package, metadata } => metadata.load(&mut ui).and_then(|(u, g)| {
+            let pinned = g.as_ref().and_then(|g| g.lock.tool.clone());
+            let manifest = g.map(|g| g.manifest).unwrap_or_default();
+            let catalog = tool::catalog_to_read(&mut ui, pinned.as_ref());
+            info::run(&mut ui, &u, catalog.as_ref(), &manifest, &package)
+        }),
         Command::Sync { metadata } => {
             machine().and_then(|m| sync::run(&mut ui, &m, metadata.refresh()))
         }

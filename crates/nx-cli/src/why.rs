@@ -4,7 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nx_core::{Generation, LockedPackage, State};
+use nx_core::{Generation, LockedPackage, State, ToolPackage};
 use nx_rpm::{Package, Refresh, Universe};
 
 use crate::host::{self, Machine};
@@ -20,6 +20,14 @@ enum Owner {
         current: u32,
         added: u32,
     },
+    /// A tool-tier package, with the command asked about and the release.
+    Tool {
+        package: ToolPackage,
+        command: Option<String>,
+        release: String,
+        current: u32,
+        added: u32,
+    },
     Image(Package),
 }
 
@@ -28,6 +36,12 @@ pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
     let current = host::readable(ui, &state)?;
     if let Some(g) = &current
         && let Some(found) = in_generation(&state, g, what)?
+    {
+        render(&mut ui.out, what, &found);
+        return Ok(());
+    }
+    if let Some(g) = &current
+        && let Some(found) = in_tool_tier(&state, g, what)
     {
         render(&mut ui.out, what, &found);
         return Ok(());
@@ -84,6 +98,45 @@ fn in_generation(state: &State, g: &Generation, what: &str) -> Result<Option<Own
     }))
 }
 
+/// The tool-tier package that is `what`: its attribute, an exposed
+/// command, or a path in one of its outputs.
+fn in_tool_tier(state: &State, g: &Generation, what: &str) -> Option<Owner> {
+    let tool = g.lock.tool.as_ref()?;
+    let (package, command) = tool.packages.iter().find_map(|p| {
+        if p.attr == what {
+            return Some((p, None));
+        }
+        if let Some(b) = p.bins.iter().find(|b| b.name == what) {
+            return Some((p, Some(b.name.clone())));
+        }
+        p.paths()
+            .any(|o| what == o || what.starts_with(&format!("{o}/")))
+            .then_some((p, None))
+    })?;
+    let mut added = g.number;
+    for n in (1..g.number).rev() {
+        let had = Generation::read(state, n).is_ok_and(|older| {
+            older
+                .lock
+                .tool
+                .as_ref()
+                .and_then(|t| t.package(&package.attr))
+                .is_some_and(|p| p.outputs == package.outputs)
+        });
+        if !had {
+            break;
+        }
+        added = n;
+    }
+    Some(Owner::Tool {
+        package: package.clone(),
+        command,
+        release: tool.release.clone(),
+        current: g.number,
+        added,
+    })
+}
+
 fn owner_of_path(state: &State, g: &Generation, path: &str) -> Option<LockedPackage> {
     let rel = relative(path)?;
     std::fs::symlink_metadata(g.sysext().join(&rel)).ok()?;
@@ -136,12 +189,44 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
                 format!("needed by {}", package.requested.join(", "))
             };
             out.row("Why", &reason);
-            let generation = if added == current {
-                format!("{current}")
-            } else {
-                format!("{current} {}", style.dim(&format!("· added in {added}")))
-            };
-            out.row("Generation", &generation);
+            out.row("Generation", &generation_row(style, *current, *added));
+        }
+        Owner::Tool {
+            package,
+            command,
+            release,
+            current,
+            added,
+        } => {
+            out.line(format_args!(
+                "{} {}",
+                style.bold(&package.attr),
+                style.dim(&package.version)
+            ));
+            out.blank();
+            if what != package.attr {
+                out.row("Asked", what);
+            }
+            out.row(
+                "Tier",
+                &format!("tool {}", style.dim("· nixpkgs, sealed beside the image")),
+            );
+            out.row("Release", release);
+            for o in &package.outputs {
+                out.row("Store", &o.path);
+            }
+            if let Some(c) = command
+                .as_ref()
+                .and_then(|c| package.bins.iter().find(|b| &b.name == c))
+            {
+                out.row("Runs", &c.path);
+            }
+            let mut why = "you added it".to_owned();
+            if package.unfree {
+                why.push_str(&style.dim(" · unfree, allowed"));
+            }
+            out.row("Why", &why);
+            out.row("Generation", &generation_row(style, *current, *added));
         }
         Owner::Image(p) => {
             out.line(format_args!(
@@ -161,6 +246,14 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
         }
     }
     out.blank();
+}
+
+fn generation_row(style: ui::Style, current: u32, added: u32) -> String {
+    if added == current {
+        format!("{current}")
+    } else {
+        format!("{current} {}", style.dim(&format!("· added in {added}")))
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +308,47 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("  Asked       rg\n"), "{out}");
+    }
+
+    #[test]
+    fn explains_a_tool() {
+        let rg = "/nix/store/whbrk657qmih065xal60m4khwf6cb9pj-ripgrep-15.2.0";
+        let owner = Owner::Tool {
+            package: ToolPackage {
+                attr: "ripgrep".into(),
+                name: "ripgrep".into(),
+                version: "15.2.0".into(),
+                outputs: vec![nx_core::ToolOutput {
+                    name: "out".into(),
+                    path: rg.into(),
+                }],
+                bins: vec![nx_core::Bin {
+                    name: "rg".into(),
+                    path: format!("{rg}/bin/rg"),
+                }],
+                ..ToolPackage::default()
+            },
+            command: Some("rg".into()),
+            release: "nixpkgs-26.11pre1122334.e21fec321d73".into(),
+            current: 4,
+            added: 4,
+        };
+        assert_eq!(
+            text("rg", &owner),
+            format!(
+                "\n\
+                 \x20 ripgrep 15.2.0\n\
+                 \n\
+                 \x20 Asked       rg\n\
+                 \x20 Tier        tool · nixpkgs, sealed beside the image\n\
+                 \x20 Release     nixpkgs-26.11pre1122334.e21fec321d73\n\
+                 \x20 Store       {rg}\n\
+                 \x20 Runs        {rg}/bin/rg\n\
+                 \x20 Why         you added it\n\
+                 \x20 Generation  4\n\
+                 \n"
+            )
+        );
     }
 
     #[test]

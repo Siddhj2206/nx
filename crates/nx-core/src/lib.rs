@@ -18,8 +18,8 @@ pub use deployment::{
     BootedOstree, Deployment, DeploymentSource, Deployments, Ostree, OstreeCli, RpmOstree,
 };
 pub use generation::{Activation, ActivationPackage, Built, Generation, Readable, Refusal};
-pub use lockfile::{Lock, LockedPackage, LockedRepo};
-pub use manifest::{Manifest, RepoEntry, ScriptletAllow};
+pub use lockfile::{Bin, Lock, LockedPackage, LockedRepo, LockedTool, ToolOutput, ToolPackage};
+pub use manifest::{CacheEntry, CliTools, Manifest, RepoEntry, ScriptletAllow};
 pub use os_release::OsRelease;
 pub use state::{Backend, State, Store};
 

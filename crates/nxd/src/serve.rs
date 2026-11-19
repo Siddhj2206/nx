@@ -210,6 +210,7 @@ mod tests {
             root,
             file_contexts: None,
             image: nx_activate::Image::None,
+            nix_conf: None,
         };
         Ok((tmp, layout))
     }

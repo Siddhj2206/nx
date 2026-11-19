@@ -1,0 +1,15 @@
+[package]
+name = "nx-shim"
+description = "What runs a tool-tier command: finds its store path beside itself and execs it"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "nx-shim"
+path = "src/main.rs"
+
+[lints]
+workspace = true

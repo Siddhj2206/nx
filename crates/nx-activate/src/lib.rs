@@ -12,6 +12,7 @@
 //! merge fails: no link, nothing merged, and `nx shell` exports the
 //! generation's `usr` as a prefix.
 
+pub mod nixconf;
 mod units;
 mod validate;
 mod wheel;
@@ -60,6 +61,9 @@ pub struct Layout {
     pub file_contexts: Option<PathBuf>,
     /// The booted image's own tree, which an extension must not shadow.
     pub image: Image,
+    /// Nix's configuration directory (`/etc/nix`), where the generation's
+    /// extra caches are listed; `None` when Nix isn't installed.
+    pub nix_conf: Option<PathBuf>,
 }
 
 /// Where to check an extension for files that would hide the image's.
@@ -83,6 +87,7 @@ impl Layout {
             root: PathBuf::from("/"),
             file_contexts: file_contexts(Path::new("/")),
             image: Image::None,
+            nix_conf: Some(PathBuf::from("/etc/nix")).filter(|d| d.join("nix.conf").is_file()),
         }
     }
 
@@ -177,6 +182,9 @@ pub fn activate(
     let valid = validate(layout, number, allowed)?;
     let merged = merged_now(layout);
     let mut services = Services::default();
+    if let Some(dir) = &layout.nix_conf {
+        nixconf::apply(dir, runner, &valid.caches, &mut services);
+    }
     if forced == Some(Backend::Prefix) {
         unmerge_units(runner, &layout.root, merged.as_ref(), &mut services);
         prefix(layout, runner, number)?;

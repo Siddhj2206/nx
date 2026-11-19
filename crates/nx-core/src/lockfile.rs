@@ -33,6 +33,76 @@ pub struct Lock {
     pub repos: Vec<LockedRepo>,
     #[serde(default, rename = "host")]
     pub host: Vec<LockedPackage>,
+    /// The tool tier: the nixpkgs release and what was realised from it.
+    /// The same in every image's generation: it doesn't depend on the image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<LockedTool>,
+}
+
+/// The tool tier as resolved: one pinned release (ADR-0004) and each
+/// package's store paths, evaluated once (ADR-0009).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedTool {
+    pub rev: String,
+    /// The channel release's name (`nixpkgs-26.11pre1122334.e21fec321d73`).
+    pub release: String,
+    /// The release directory.
+    pub url: String,
+    #[serde(default, rename = "package", skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<ToolPackage>,
+}
+
+impl LockedTool {
+    pub fn package(&self, attr: &str) -> Option<&ToolPackage> {
+        self.packages.iter().find(|p| p.attr == attr)
+    }
+
+    /// Every exposed command, with the package that exposes it.
+    pub fn bins(&self) -> impl Iterator<Item = (&ToolPackage, &Bin)> {
+        self.packages
+            .iter()
+            .flat_map(|p| p.bins.iter().map(move |b| (p, b)))
+    }
+}
+
+/// One tool-tier package.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPackage {
+    /// The attribute path, as in the manifest.
+    pub attr: String,
+    /// The package's name and version, as nixpkgs has them.
+    pub name: String,
+    pub version: String,
+    /// Its derivation, for building what no cache has.
+    pub drv: String,
+    /// `meta.outputsToInstall` and their store paths: the generation's GC
+    /// roots.
+    pub outputs: Vec<ToolOutput>,
+    /// The commands it exposes; names something else owns are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bins: Vec<Bin>,
+    /// Built locally because it is unfree (no cache has it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unfree: bool,
+}
+
+impl ToolPackage {
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.outputs.iter().map(|o| o.path.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutput {
+    pub name: String,
+    pub path: String,
+}
+
+/// An exposed command and the store file it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bin {
+    pub name: String,
+    pub path: String,
 }
 
 /// The metadata a resolve used.
@@ -74,6 +144,7 @@ impl Lock {
             skipped: Vec::new(),
             repos: Vec::new(),
             host: Vec::new(),
+            tool: None,
         }
     }
 
@@ -139,8 +210,29 @@ mod tests {
             sha256: "ef".into(),
             requested: vec!["libxkbcommon-devel".into()],
         });
+        lock.tool = Some(LockedTool {
+            rev: "e21fec321d73511849707a7585e4ea155ee4bf40".into(),
+            release: "nixpkgs-26.11pre1122334.e21fec321d73".into(),
+            url: "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1122334.e21fec321d73".into(),
+            packages: vec![ToolPackage {
+                attr: "jq".into(),
+                name: "jq".into(),
+                version: "1.8.2".into(),
+                drv: "/nix/store/8ydjymrq0hlzxz7c1h1r1qsa19iw8js6-jq-1.8.2.drv".into(),
+                outputs: vec![ToolOutput {
+                    name: "bin".into(),
+                    path: "/nix/store/nh0wly5a1h79bfjgw46sly70ljdy1xkl-jq-1.8.2-bin".into(),
+                }],
+                bins: vec![Bin {
+                    name: "jq".into(),
+                    path: "/nix/store/nh0wly5a1h79bfjgw46sly70ljdy1xkl-jq-1.8.2-bin/bin/jq".into(),
+                }],
+                unfree: false,
+            }],
+        });
         let text = lock.to_toml()?;
         assert!(text.contains("[[host]]"), "{text}");
+        assert!(text.contains("[[tool.package]]"), "{text}");
         assert_eq!(Lock::parse(&text, Path::new("l"))?, lock);
         assert_eq!(
             lock.package("pkgconf").map(|p| p.sha256.as_str()),

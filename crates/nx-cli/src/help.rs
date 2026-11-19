@@ -15,6 +15,7 @@ const GROUPS: [&str; 3] = ["Packages", "Maintenance", "System"];
 const PLACEMENT: &[(&str, &str)] = &[
     ("add", "Packages"),
     ("remove", "Packages"),
+    ("upgrade", "Packages"),
     ("list", "Packages"),
     ("search", "Packages"),
     ("info", "Packages"),
@@ -22,6 +23,7 @@ const PLACEMENT: &[(&str, &str)] = &[
     ("generations", "Maintenance"),
     ("rollback", "Maintenance"),
     ("repo", "Maintenance"),
+    ("cache", "Maintenance"),
     ("sync", "Maintenance"),
     ("gc", "Maintenance"),
     ("shell", "System"),

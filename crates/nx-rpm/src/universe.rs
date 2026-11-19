@@ -225,6 +225,16 @@ impl Universe {
         out
     }
 
+    /// Why `p` plugs into the system and so belongs in the host tier
+    /// ([`crate::plugs::plugs_in`]), or `None` for a standalone package.
+    pub fn plugs_in(&self, p: &Package) -> Option<String> {
+        crate::plugs::plugs_in(
+            &p.name,
+            &self.pool.deps(p.id, nx_solv::Deps::Provides),
+            &self.pool.deps(p.id, nx_solv::Deps::Requires),
+        )
+    }
+
     /// Whether the image has a package named `name`.
     pub fn in_image(&self, name: &str) -> bool {
         self.pool

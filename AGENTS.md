@@ -83,8 +83,15 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
 - `crates/nx-cli/src/sync.rs`, `boot.rs`, `compat.rs`, `gc.rs`: the image
   lifecycle (`nx sync`, `nx select`, the invariant 2 check, `nx gc`).
 - `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
-  verify, unpack, assemble), shared by every command that changes the
-  manifest. `host.rs` holds `Machine`, the system as one value (root,
+  verify, unpack, expose the tool tier, assemble), shared by every command
+  that changes the manifest. `tool.rs` drives the tool tier (pin, catalog,
+  eval, plan, realise, exposure, shim, GC roots); `route.rs` is the pure
+  tier decision.
+- `crates/nx-nix`: the tool tier's Nix side: channel and catalog, batched
+  `nix eval` (ADR-0009), narinfo closures, `nix` behind the `Nix` trait
+  (tests use `Fake`), and the internal-json log. `crates/nx-shim`: the shim
+  every exposed command is a hard link to (std only). `shell/`: the PATH
+  snippets an image installs. `host.rs` holds `Machine`, the system as one value (root,
   os-release, deployments, arch): commands read `/`, tests a fixture.
 - `spike/`: throwaway scripts that answer a design question (M0). Their
   results go into `docs/design.md`; the script can go once they have.
@@ -211,7 +218,19 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   untrusted user only once it is in `trusted-substituters` and the daemon
   has restarted.
 
-Nix log pitfalls from nx 0.x, for M6:
+- `packages.json.br` marks every unfree, broken or insecure package
+  `available = false` (Hydra allows none of them): only an `x` flag without
+  `u`, `b` or `i` means "not for this platform".
+- `nix store gc` prints its "… freed" summary on stdout, not stderr.
+- A bootc image's fish reads `/usr/etc/fish` and `vendor_conf.d`, never
+  `/etc/fish/conf.d`, and computes its vendor directories before anything
+  sets `XDG_DATA_DIRS`: `dev/vm-install` bind-mounts a copy of
+  `/usr/share/fish/vendor_conf.d` for `nx.fish`.
+- Generations `nx-sync.service` builds as root have extension directories
+  without wheel's ACL, so a wheel user's `nx gc` can't remove them yet; the
+  M6 VM test runs `nx gc` as root.
+
+Nix log pitfalls from nx 0.x:
 
 - Nix logs download retries at error level with "warning:" in the text, and
   logs recovered failures as "error (ignored):". Classify by text, not level.

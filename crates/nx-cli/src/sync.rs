@@ -150,7 +150,8 @@ fn matches(
         return Ok(true);
     }
     let g = Generation::read(state, n).with_context(|| format!("reading generation {n}"))?;
-    Ok(g.manifest == current.manifest)
+    Ok(g.manifest == current.manifest
+        && crate::tool::same(g.lock.tool.as_ref(), current.lock.tool.as_ref()))
 }
 
 fn build(
@@ -182,7 +183,14 @@ fn build(
         // A repeat of the last attempt (the daily refresh, with the same
         // repos still lacking them) would only add a generation like it.
         if let Some(n) = select::newest_for(&session.state, digest)?
-            && same_as(&session.state, n, &manifest, &resolved.all, &skipped)?
+            && same_as(
+                &session.state,
+                n,
+                &manifest,
+                &resolved.all,
+                &skipped,
+                session.tool.as_ref(),
+            )?
             && (!booted || session.state.current_number()? == Some(n))
         {
             ui.step(format_args!(
@@ -268,6 +276,7 @@ fn same_as(
     manifest: &nx_core::Manifest,
     all: &[nx_rpm::Planned],
     skipped: &[String],
+    tool: Option<&nx_core::LockedTool>,
 ) -> Result<bool> {
     let lock = select::read_lock(state, n)?;
     let have: std::collections::BTreeSet<&str> =
@@ -275,7 +284,9 @@ fn same_as(
     let want: std::collections::BTreeSet<String> = all.iter().map(|p| p.package.nevra()).collect();
     // A manifest change that resolves to the same packages (a repo, a
     // scriptlet allowance) still makes a generation.
-    Ok(Generation::read(state, n)?.manifest == *manifest
+    let g = Generation::read(state, n)?;
+    Ok(g.manifest == *manifest
+        && crate::tool::same(g.lock.tool.as_ref(), tool)
         && lock.skipped == skipped
         && have.len() == want.len()
         && want.iter().all(|nevra| have.contains(nevra.as_str())))

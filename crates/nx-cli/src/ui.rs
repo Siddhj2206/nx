@@ -17,6 +17,7 @@ use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
 
 pub const SYM_STEP: &str = "›";
+pub const SYM_UPGRADED: &str = "↑";
 pub const SYM_ADDED: &str = "+";
 pub const SYM_REMOVED: &str = "-";
 pub const SYM_FETCH: &str = "↓";

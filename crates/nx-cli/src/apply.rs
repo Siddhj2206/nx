@@ -1,6 +1,7 @@
 //! From a manifest to a generation: resolve against the image and the
-//! repos, download what the store lacks, verify and unpack it, assemble.
-//! Shared by `add` and `repo`.
+//! repos, download what the store lacks, verify and unpack it, expose the
+//! tool tier's commands, assemble. Shared by every command that changes
+//! the manifest.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::sync::mpsc;
 use anyhow::{Context, Result, bail};
 use nx_core::generation::{self, Spec};
 use nx_core::state::{self, Staged};
-use nx_core::{Built, Generation, Lock, LockedPackage, LockedRepo, Manifest, State};
+use nx_core::{Built, Generation, Lock, LockedPackage, LockedRepo, LockedTool, Manifest, State};
 use nx_rpm::packages::Job;
 use nx_rpm::{Package, Plan, Planned, Refresh, Relative, Repo, RepoKeys, Universe, Ureq};
 
@@ -40,6 +41,15 @@ pub struct Session<'m> {
     koji_repo: HashMap<String, String>,
     /// Manifest packages the next generation leaves out ([`Session::leave_out`]).
     skipped: Vec<String>,
+    /// The next generation's tool tier: the current one's until a command
+    /// resolves another ([`crate::tool::Tier::resolve`]).
+    pub tool: Option<LockedTool>,
+    /// Tool-tier packages this command adds: their commands must not
+    /// clash ([`crate::tool::check`]).
+    pub fresh_tools: Vec<String>,
+    /// Resolve without preferring the current generation's builds
+    /// (`nx upgrade`).
+    unlocked: bool,
 }
 
 /// The solver found no way to install what was asked: a problem with the
@@ -113,6 +123,7 @@ impl<'m> Session<'m> {
         change(&mut manifest)?;
         let universe = host::load(ui, machine, refresh, &manifest)?;
         let keys = Keys::new(machine, &state, current.as_ref(), &manifest);
+        let tool = current.as_ref().and_then(|g| g.lock.tool.clone());
         Ok(Self {
             machine,
             state,
@@ -124,7 +135,16 @@ impl<'m> Session<'m> {
             keys,
             koji_repo: HashMap::new(),
             skipped: Vec::new(),
+            tool,
+            fresh_tools: Vec::new(),
+            unlocked: false,
         })
+    }
+
+    /// Lets the next resolve move host-tier packages to newer builds: it no
+    /// longer prefers the ones the current generation has.
+    pub fn unlock(&mut self) {
+        self.unlocked = true;
     }
 
     /// Accepts the keys now pinned for `ids`, though they differ from what
@@ -181,7 +201,11 @@ impl<'m> Session<'m> {
     /// Resolves `specs` (the whole manifest) into a host tier.
     pub fn resolve(&mut self, ui: &mut Ui, specs: &[String]) -> Result<Resolved> {
         let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
-        let locked: Vec<String> = self.locked().iter().map(|p| p.nevra.clone()).collect();
+        let locked: Vec<String> = if self.unlocked {
+            Vec::new()
+        } else {
+            self.locked().iter().map(|p| p.nevra.clone()).collect()
+        };
         let repos: HashMap<String, Repo> = self
             .universe
             .repos
@@ -233,16 +257,29 @@ impl<'m> Session<'m> {
     }
 
     /// Downloads, verifies and unpacks what the store lacks and builds the
-    /// next generation from `manifest` and `all`. It stays on disk, not
+    /// next generation from `manifest`, `all` and the session's tool tier,
+    /// whose outputs must be realised already. It stays on disk, not
     /// current: making it live is [`Session::install`]'s job, or the
-    /// caller's for an image that isn't booted.
+    /// caller's for an image that isn't booted. The tool tier's outputs
+    /// become GC roots once the generation has its final name.
     pub fn build(&mut self, ui: &mut Ui, manifest: &Manifest, all: &[Planned]) -> Result<Built> {
         let guard = self.guard.take().context("a dry run cannot build")?;
         let mut files = self.fetch(ui, all)?;
         let host = self.unpack(&guard, all, &mut files)?;
-        let lock = self.lock(host)?;
         let image_root = self.machine.image_root()?;
-        generation::build(
+        let tool = self.expose(ui, manifest, &host, &image_root)?;
+        let mut lock = self.lock(host)?;
+        lock.tool = tool;
+        let has_bins = lock
+            .tool
+            .as_ref()
+            .is_some_and(|t| t.bins().next().is_some());
+        let shim = if has_bins {
+            Some(crate::tool::shim(&self.state)?)
+        } else {
+            None
+        };
+        let built = generation::build(
             &self.state,
             &guard,
             &Spec {
@@ -251,9 +288,69 @@ impl<'m> Session<'m> {
                 image_root: &image_root,
                 os_id: &self.machine.release.id,
                 image_has: &|name| self.universe.in_image(name),
+                shim: shim.as_deref(),
             },
         )
-        .map_err(refusal_error)
+        .map_err(refusal_error)?;
+        crate::tool::add_roots(ui, &built.generation);
+        Ok(built)
+    }
+
+    /// The tool tier for this image: which commands each package exposes,
+    /// given what the image and the host tier (`host`) already have.
+    fn expose(
+        &self,
+        ui: &mut Ui,
+        manifest: &Manifest,
+        host: &[LockedPackage],
+        image_root: &Path,
+    ) -> Result<Option<LockedTool>> {
+        let Some(mut tool) = self.tool.clone() else {
+            return Ok(None);
+        };
+        if let Some(p) = tool
+            .packages
+            .iter()
+            .find(|p| p.paths().any(|path| !Path::new(path).exists()))
+        {
+            bail!(
+                "{} is not in the Nix store (collected since?); nx upgrade --tool realises the tool tier again",
+                p.attr
+            );
+        }
+        let store = self.state.store();
+        let owner = |name: &str| -> Option<String> {
+            let dirs = ["usr/bin", "usr/sbin", "bin", "sbin"];
+            if dirs
+                .iter()
+                .any(|d| std::fs::symlink_metadata(image_root.join(d).join(name)).is_ok())
+            {
+                return Some("the image".to_owned());
+            }
+            host.iter()
+                .find(|p| {
+                    let root = store.path(&p.sha256);
+                    dirs.iter()
+                        .any(|d| std::fs::symlink_metadata(root.join(d).join(name)).is_ok())
+                })
+                .map(|p| format!("the host tier's {}", p.name))
+        };
+        let exposure = crate::tool::expose(
+            &mut tool,
+            &owner,
+            &manifest.overrides.names,
+            &crate::tool::commands,
+        );
+        let previous = self.current.as_ref().and_then(|g| g.lock.tool.as_ref());
+        crate::tool::check(
+            ui,
+            &tool,
+            &exposure,
+            &self.fresh_tools,
+            previous,
+            &manifest.overrides.names,
+        )?;
+        Ok(Some(tool))
     }
 
     /// [`Session::build`], then makes the generation live through nxd. A

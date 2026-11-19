@@ -3,6 +3,7 @@
 
 pub mod fetch;
 pub mod packages;
+pub mod plugs;
 pub mod repo;
 pub mod repomd;
 pub mod universe;

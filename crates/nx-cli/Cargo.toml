@@ -21,5 +21,6 @@ clap = { version = "4.6.8", features = ["derive"] }
 nx-librpm = { version = "1.0.0-alpha.0", path = "../nx-librpm" }
 nx-activate = { version = "1.0.0-alpha.0", path = "../nx-activate" }
 nx-core = { version = "1.0.0-alpha.0", path = "../nx-core" }
+nx-nix = { version = "1.0.0-alpha.0", path = "../nx-nix" }
 nx-proto = { version = "1.0.0-alpha.0", path = "../nx-proto" }
 nx-rpm = { version = "1.0.0-alpha.0", path = "../nx-rpm" }

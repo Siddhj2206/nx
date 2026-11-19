@@ -302,3 +302,24 @@ fn a_repo_suffix_selects_from_one_repo() -> Result<()> {
     assert_eq!(split_repo("a@copr:o:p"), Some(("a", "copr:o:p")));
     Ok(())
 }
+
+#[test]
+fn reads_provides_and_requires() -> Result<()> {
+    let provides = r#"<rpm:provides><rpm:entry name="libxkbcommon.so.0()(64bit)"/><rpm:entry name="pkgconfig(xkbcommon)" flags="EQ" epoch="0" ver="1.11.0"/></rpm:provides>"#;
+    let fedora = vec![pkg(
+        "libxkbcommon-devel",
+        "1.11.0",
+        "1.fc45",
+        &format!("{provides}{}", requires(&["libxkbcommon", "pkgconf"])),
+    )];
+    let f = fixture("deps", &image(), &fedora)?;
+    let id = f.pool.select("libxkbcommon-devel")?[0];
+    let provides = f.pool.deps(id, Deps::Provides);
+    assert!(
+        provides.contains(&"pkgconfig(xkbcommon) = 1.11.0".to_owned()),
+        "{provides:?}"
+    );
+    assert!(provides.contains(&"libxkbcommon.so.0()(64bit)".to_owned()));
+    assert_eq!(f.pool.deps(id, Deps::Requires), ["libxkbcommon", "pkgconf"]);
+    Ok(())
+}

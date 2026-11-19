@@ -21,8 +21,17 @@ pub struct Manifest {
     /// ignore (design, *Scriptlet translation*).
     #[serde(default, rename = "scriptlets", skip_serializing_if = "Vec::is_empty")]
     pub scriptlets: Vec<ScriptletAllow>,
-    /// Sections this nx doesn't know yet (`[tool]` before M6), kept as
-    /// written.
+    /// nixpkgs packages, sealed beside the image (design, *Tool tier*).
+    #[serde(default, skip_serializing_if = "Tool::is_empty")]
+    pub tool: Tool,
+    /// Extra Nix binary caches, tried with cache.nixos.org.
+    #[serde(default, rename = "cache", skip_serializing_if = "Vec::is_empty")]
+    pub caches: Vec<CacheEntry>,
+    #[serde(default, skip_serializing_if = "Routing::is_default")]
+    pub routing: Routing,
+    #[serde(default, skip_serializing_if = "Overrides::is_empty")]
+    pub overrides: Overrides,
+    /// Sections this nx doesn't know yet, kept as written.
     #[serde(flatten)]
     pub rest: toml::Table,
 }
@@ -38,6 +47,10 @@ impl Default for Manifest {
             host: Host::default(),
             repos: Vec::new(),
             scriptlets: Vec::new(),
+            tool: Tool::default(),
+            caches: Vec::new(),
+            routing: Routing::default(),
+            overrides: Overrides::default(),
             rest: toml::Table::new(),
         }
     }
@@ -52,6 +65,70 @@ pub struct Host {
     /// that works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<Backend>,
+}
+
+/// The tool tier's intent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tool {
+    /// nixpkgs attribute paths (`ripgrep`, `python3Packages.black`).
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// Package names (`lib.getName`) allowed despite an unfree license.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unfree: Vec<String>,
+}
+
+impl Tool {
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty() && self.unfree.is_empty()
+    }
+}
+
+/// A trusted extra Nix binary cache: its URL and the key its paths are
+/// signed with (`name:base64`). nxd lists it in the daemon's
+/// `trusted-substituters` when the generation goes live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheEntry {
+    pub url: String,
+    pub key: String,
+}
+
+/// Where a standalone command-line tool goes when both tiers have it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CliTools {
+    /// nixpkgs, which moves with its own pin, not the image (the default).
+    #[default]
+    Nix,
+    /// Fedora's RPM, in the host tier.
+    Fedora,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Routing {
+    #[serde(default)]
+    pub cli_tools: CliTools,
+}
+
+impl Routing {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Command names a tool-tier package may expose although something else
+/// has them (`nx add --override`): the image and the host tier keep theirs
+/// (they come first on `PATH`), another tool package's is replaced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overrides {
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+impl Overrides {
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
 }
 
 /// A package's scriptlets, reviewed. `digest` fingerprints the text nx
@@ -146,6 +223,25 @@ impl Manifest {
     pub fn repo(&self, name: &str) -> Option<&RepoEntry> {
         self.repos.iter().find(|r| r.name == name)
     }
+
+    /// Adds tool-tier `attrs` not already listed.
+    pub fn add_tool(&mut self, attrs: &[String]) {
+        for a in attrs {
+            if !self.tool.packages.contains(a) {
+                self.tool.packages.push(a.clone());
+            }
+        }
+    }
+
+    /// Whether `spec` is in either tier.
+    pub fn has(&self, spec: &str) -> bool {
+        self.host.packages.iter().any(|p| p == spec) || self.tool.packages.iter().any(|p| p == spec)
+    }
+
+    /// Whether nothing is asked of either tier.
+    pub fn is_empty(&self) -> bool {
+        self.host.packages.is_empty() && self.tool.packages.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -159,8 +255,19 @@ mod tests {
 packages = ["wayland-devel"]
 backend = "prefix"
 
+[future]
+setting = "kept"
+
 [tool]
 packages = ["ripgrep"]
+unfree = ["terraform"]
+
+[[cache]]
+url = "https://nix-community.cachix.org"
+key = "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+
+[routing]
+cli_tools = "fedora"
 
 [[repo]]
 name = "copr:atim/lazygit"
@@ -179,7 +286,12 @@ priority = 50
         m.add_host(&["wayland-devel".into()]);
         let text = m.to_toml()?;
         assert_eq!(Manifest::parse(&text, Path::new("m"))?, m);
-        assert!(text.contains("[tool]"), "{text}");
+        assert!(text.contains("[future]"), "{text}");
+        assert_eq!(m.tool.packages, ["ripgrep"]);
+        assert_eq!(m.tool.unfree, ["terraform"]);
+        assert_eq!(m.caches.len(), 1);
+        assert_eq!(m.routing.cli_tools, CliTools::Fedora);
+        assert!(m.has("ripgrep") && m.has("wayland-devel") && !m.has("nope"));
         assert_eq!(
             m.repo("copr:atim/lazygit").and_then(|r| r.priority),
             Some(50)

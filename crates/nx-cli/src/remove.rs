@@ -1,12 +1,12 @@
-//! `nx remove`: drops packages from the manifest, re-resolves what is
-//! left (which also drops the dependencies nothing else needs), and makes
-//! the new generation live.
+//! `nx remove`: drops packages from the manifest, re-resolves the host
+//! tier that is left (which also drops the dependencies nothing else
+//! needs), and makes the new generation live. A tool-tier package simply
+//! leaves; its store paths go with the generations that root them.
 
 use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use nx_core::LockedPackage;
 use nx_rpm::Refresh;
 
 use crate::apply::Session;
@@ -22,13 +22,18 @@ pub fn run(
 ) -> Result<()> {
     let started = Instant::now();
     let mut session = Session::open(ui, machine, refresh, dry_run, |m| {
-        let missing = m.remove_host(specs);
+        let (tools, hosts): (Vec<String>, Vec<String>) = specs
+            .iter()
+            .cloned()
+            .partition(|s| m.tool.packages.contains(s));
+        let missing = m.remove_host(&hosts);
         if !missing.is_empty() {
             bail!(
                 "{} not added with nx add (nx list shows what was)",
                 missing.join(", ")
             );
         }
+        m.tool.packages.retain(|a| !tools.contains(a));
         Ok(())
     })?;
     let resolved = session.resolve_manifest(ui, &session.manifest.host.packages.clone(), &[])?;
@@ -43,15 +48,35 @@ pub fn run(
         .manifest
         .scriptlets
         .retain(|a| names.contains(a.package.as_str()));
-    let manifest = session.manifest.clone();
     let keep: HashSet<String> = resolved.all.iter().map(|p| p.package.nevra()).collect();
-    let dropped: Vec<LockedPackage> = session
+    let mut dropped: Vec<Dropped> = session
         .current
         .iter()
         .flat_map(|g| g.lock.host.iter())
         .filter(|p| !keep.contains(&p.nevra))
-        .cloned()
+        .map(|p| Dropped {
+            name: p.name.clone(),
+            version: p.evr().to_owned(),
+        })
         .collect();
+    // The tool tier needs no resolve: what is left is as it was.
+    let attrs = session.manifest.tool.packages.clone();
+    if let Some(tool) = session.tool.as_mut() {
+        for p in tool.packages.iter().filter(|p| !attrs.contains(&p.attr)) {
+            dropped.push(Dropped {
+                name: p.attr.clone(),
+                version: format!("{} · nixpkgs", p.version),
+            });
+        }
+        tool.packages.retain(|p| attrs.contains(&p.attr));
+        let unfree: HashSet<&str> = tool.packages.iter().map(|p| p.name.as_str()).collect();
+        session
+            .manifest
+            .tool
+            .unfree
+            .retain(|n| unfree.contains(n.as_str()));
+    }
+    let manifest = session.manifest.clone();
     if dry_run {
         render(&mut ui.out, &dropped, None, started.elapsed().as_secs_f64());
         return Ok(());
@@ -66,16 +91,22 @@ pub fn run(
     Ok(())
 }
 
-/// One `-` line per package that left the host tier, then the total;
+/// A package that left: its name and version.
+struct Dropped {
+    name: String,
+    version: String,
+}
+
+/// One `-` line per package that left either tier, then the total;
 /// `generation` is `None` for a dry run.
-fn render(out: &mut Stream, dropped: &[LockedPackage], generation: Option<u32>, secs: f64) {
+fn render(out: &mut Stream, dropped: &[Dropped], generation: Option<u32>, secs: f64) {
     let style = out.style;
     for p in dropped {
         out.line(format_args!(
             "{} {} {}",
             style.red(ui::SYM_REMOVED),
             p.name,
-            style.dim(p.evr())
+            style.dim(&p.version)
         ));
     }
     let what = if dropped.is_empty() {
@@ -97,15 +128,14 @@ mod tests {
     use super::*;
     use crate::ui::SharedBuf;
 
-    fn package(name: &str) -> LockedPackage {
-        LockedPackage {
+    fn package(name: &str) -> Dropped {
+        Dropped {
             name: name.into(),
-            nevra: format!("{name}-1-1.fc45.x86_64"),
-            ..LockedPackage::default()
+            version: "1-1.fc45".into(),
         }
     }
 
-    fn text(dropped: &[LockedPackage], generation: Option<u32>) -> String {
+    fn text(dropped: &[Dropped], generation: Option<u32>) -> String {
         let buf = SharedBuf::default();
         let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
         render(&mut ui.out, dropped, generation, 0.25);

@@ -70,6 +70,7 @@ fn layout(tmp: &Tmp, selinux: bool) -> std::io::Result<Layout> {
         root,
         file_contexts: selinux.then_some(contexts),
         image: Image::None,
+        nix_conf: None,
     })
 }
 

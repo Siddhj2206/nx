@@ -18,6 +18,8 @@ pub struct Validated {
     pub sysext: PathBuf,
     /// What its packages ask of systemd.
     pub activation: nx_core::Activation,
+    /// The extra Nix caches its manifest trusts.
+    pub caches: Vec<nx_core::CacheEntry>,
 }
 
 /// The uids of the members of group `wheel` under `root`: those it lists
@@ -97,6 +99,7 @@ pub fn validate(layout: &Layout, number: u32, allowed: &dyn Fn(u32) -> bool) -> 
     Ok(Validated {
         sysext,
         activation: generation.activation,
+        caches: generation.manifest.caches,
     })
 }
 

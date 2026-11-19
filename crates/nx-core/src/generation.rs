@@ -168,6 +168,17 @@ impl Generation {
     pub fn sysext(&self) -> PathBuf {
         self.dir.join("sysext")
     }
+
+    /// Where the tool tier's commands are: on `PATH` through
+    /// `/var/lib/nx/current/bin`.
+    pub fn bin(&self) -> PathBuf {
+        self.dir.join("bin")
+    }
+
+    /// Where the tool tier's outputs are registered as GC roots.
+    pub fn gcroots(&self) -> PathBuf {
+        self.dir.join("gcroots")
+    }
 }
 
 /// What [`Generation::readable`] found.
@@ -190,6 +201,9 @@ pub struct Spec<'a> {
     /// Whether the image has a package of this name: a trigger watching it
     /// can fire.
     pub image_has: &'a dyn Fn(&str) -> bool,
+    /// The shim every tool-tier command is a link to; needed only when the
+    /// lock has tool-tier commands.
+    pub shim: Option<&'a Path>,
 }
 
 /// A built generation, and what was left out of it.
@@ -320,6 +334,8 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
         write(&sysext.join(rel), text)?;
     }
 
+    write_tool_tier(&tmp, spec)?;
+
     let release = sysext.join(EXTENSION_RELEASE);
     write(
         &release,
@@ -350,6 +366,51 @@ pub fn build(state: &State, _lock: &state::Lock, spec: &Spec) -> Result<Built> {
         outside_usr,
         allowed,
     })
+}
+
+/// The tool tier's part of a generation (design, *Exposing binaries*):
+/// `bin/<name>`, a link to the shim, and `shims/<name>`, the store file it
+/// runs, for every exposed command; and `gcroots/`, where the CLI registers
+/// the outputs as GC roots once the generation has its final name.
+fn write_tool_tier(dir: &Path, spec: &Spec) -> Result<()> {
+    let Some(tool) = &spec.lock.tool else {
+        return Ok(());
+    };
+    if tool.packages.is_empty() {
+        return Ok(());
+    }
+    let (bin, shims) = (dir.join("bin"), dir.join("shims"));
+    state::create_dir(&bin)?;
+    state::create_dir(&shims)?;
+    state::create_dir(&dir.join("gcroots"))?;
+    let mut seen = HashSet::new();
+    for (p, b) in tool.bins() {
+        let plain = !b.name.is_empty() && !b.name.starts_with('.') && !b.name.contains(['/', '\0']);
+        if !plain || !b.path.starts_with("/nix/store/") || b.path.contains('\n') {
+            return Err(Error::Invalid(format!(
+                "{} exposes a command nx can't link: {:?} → {:?}",
+                p.attr, b.name, b.path
+            )));
+        }
+        if !seen.insert(b.name.as_str()) {
+            return Err(Error::Conflict(format!(
+                "two tool-tier packages expose {}",
+                b.name
+            )));
+        }
+        let shim = spec.shim.ok_or_else(|| {
+            Error::Invalid("the tool tier needs nx-shim, which wasn't found".into())
+        })?;
+        let to = bin.join(&b.name);
+        if std::fs::hard_link(shim, &to).is_err() {
+            std::fs::copy(shim, &to).map_err(|source| Error::Write {
+                path: to.clone(),
+                source,
+            })?;
+        }
+        write(&shims.join(&b.name), &format!("{}\n", b.path))?;
+    }
+    Ok(())
 }
 
 /// The `.conf` files a package ships in `usr/lib/<dir>` (or `lib/<dir>`).
@@ -796,7 +857,66 @@ mod tests {
             image_root,
             os_id: "fedora",
             image_has: &|_| false,
+            shim: None,
         }
+    }
+
+    #[test]
+    fn links_tool_tier_commands_to_the_shim() -> Result<()> {
+        use crate::lockfile::{Bin, LockedTool, ToolOutput, ToolPackage};
+        let tmp = TempDir::new("gen-tool");
+        let (state, mut lock) = setup(&tmp, &[])?;
+        let image_root = image(&tmp, &[])?;
+        let shim = tmp.0.join("nx-shim");
+        write(&shim, "#!shim")?;
+        let out = "/nix/store/whbrk657qmih065xal60m4khwf6cb9pj-ripgrep-15.2.0";
+        let package = ToolPackage {
+            attr: "ripgrep".into(),
+            name: "ripgrep".into(),
+            version: "15.2.0".into(),
+            drv: String::new(),
+            outputs: vec![ToolOutput {
+                name: "out".into(),
+                path: out.into(),
+            }],
+            bins: vec![Bin {
+                name: "rg".into(),
+                path: format!("{out}/bin/rg"),
+            }],
+            unfree: false,
+        };
+        lock.tool = Some(LockedTool {
+            packages: vec![package.clone()],
+            ..LockedTool::default()
+        });
+        let manifest = Manifest::default();
+        let guard = state.lock()?;
+        let mut with_shim = spec(&manifest, &lock, &image_root);
+        with_shim.shim = Some(&shim);
+        let g = build(&state, &guard, &with_shim)?.generation;
+        assert_eq!(read(&g.bin().join("rg"))?, "#!shim");
+        assert_eq!(read(&g.dir.join("shims/rg"))?, format!("{out}/bin/rg\n"));
+        assert!(g.gcroots().is_dir());
+        assert_eq!(g.lock.tool, lock.tool);
+        // A name two packages expose, or one that isn't a plain name, is refused.
+        let mut twice = lock.clone();
+        if let Some(t) = &mut twice.tool {
+            t.packages.push(ToolPackage {
+                attr: "ripgrep-all".into(),
+                ..package.clone()
+            });
+        }
+        let mut s = spec(&manifest, &twice, &image_root);
+        s.shim = Some(&shim);
+        assert!(matches!(build(&state, &guard, &s), Err(Error::Conflict(_))));
+        let mut odd = lock.clone();
+        if let Some(t) = &mut odd.tool {
+            t.packages[0].bins[0].name = "../rg".into();
+        }
+        let mut s = spec(&manifest, &odd, &image_root);
+        s.shim = Some(&shim);
+        assert!(matches!(build(&state, &guard, &s), Err(Error::Invalid(_))));
+        Ok(())
     }
 
     fn script(body: &str) -> nx_scriptlet::Script {
