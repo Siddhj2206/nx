@@ -598,6 +598,7 @@ The biggest risk is the sysext backend on bootc. That is why the prefix backend 
 
 **Open questions**
 
+- [x] Where an image relative's exact build comes from once `updates` has moved on: Fedora 45 enables `updates-archive`, which keeps older update builds, so the resolver finds most of them there before Koji is needed. The resolver hides every other build of an image package's source (`Universe::hidden`).
 - [ ] Benchmark `systemd-sysext refresh` latency on the actual image, with the nx extension at realistic size.
 - [ ] Confirm the systemd version on the image handles `refresh` and daemon-reload correctly (fedora-sysexts recommended `systemctl restart systemd-sysext.service` before systemd v257).
 - [ ] Best way to read a staged deployment's rpmdb before reboot.
@@ -630,7 +631,7 @@ None of these covers live install of host-ABI `-devel` packages on bootc, which 
 Build in this order, riskiest first. Each milestone ends with a working, tested command, not scaffolding. Develop and test in a bootc VM built from the user's own image, never on the daily driver until M5: Neptuno rebuilds daily, so the image digest changes almost every day and a host tier without the M5 lifecycle breaks on the next update.
 
 1. **M0 — Spike: activation on the real image.** Hand-build a directory sysext containing one `-devel` package (`spike/m0-sysext.sh`); measure `merge`/`refresh` time; confirm SELinux labels and overlay headroom; build a Bevy hello-world against it. Write the result into this doc. *Exit:* backend decision confirmed with numbers.
-2. **M1 — Host-tier resolver.** Repo metadata download and caching, libsolv bindings, installed-set `.solv` from the image rpmdb, `nx search` / `nx info` / `nx add --dry-run`. *Exit:* dry-run on `libxkbcommon-devel` lists only the missing RPMs, in < 1 s with warm cache.
+2. **M1 — Host-tier resolver.** Repo metadata download and caching, libsolv bindings, installed-set `.solv` from the image rpmdb, `nx search` / `nx info` / `nx add --dry-run`. *Exit:* dry-run on `libxkbcommon-devel` lists only the missing RPMs, in < 1 s with warm cache. *Status:* resolver done. On Neptuno 45.20261118 the dry-run lists only `libxkbcommon-devel` (the image has `libxkbcommon` and `pkgconf`) in 0.57 s warm (installed set and three repos from `.solv` caches); cold, it is bound by the metadata download (~45 MB). `nx repo add` moved to M2, since repos are recorded in `manifest.toml`; until then the resolver uses the repos the image enables (`fedora`, `updates`, `updates-archive`).
 3. **M2 — Store and generations.** Download, verify, unpack into the store; assemble generations; manifest and lockfile; `nx list`, `nx why`. *Exit:* generations build correctly without activation.
 4. **M3 — Activation and nxd.** Sysext and prefix backends with probing; nxd with polkit; `nx add`, `nx remove`, `nx rollback` live. *Exit:* `nx add wayland-devel` then `cargo build` of a Bevy app succeeds with no reboot.
 5. **M4 — Scriptlets and services.** Translator for sysusers/tmpfiles/presets/triggers with a test corpus; unit enable/start/stop. *Exit:* `nx add syncthing` installs and runs the service; unknown scriptlets are refused with a clear message.
