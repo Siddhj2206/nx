@@ -484,14 +484,14 @@ pub fn check(
             .copied()
             .filter(|n| !overrides.iter().any(|o| o == n))
             .collect();
-        // The tool tier exposes commands and nothing else. One the image
-        // has all of, overridden, still counts: it is exposed once the
-        // image drops them.
+        // The tool tier exposes commands and nothing else.
         let lost = exposure.clashes.iter().any(|(_, _, r)| r == attr);
-        if package.bins.is_empty() && hidden.is_empty() && !lost {
-            problems.push(format!(
-                "{attr} has no commands, and the tool tier exposes only commands"
-            ));
+        if package.bins.is_empty() && !lost {
+            problems.push(match hidden.len() {
+                0 => format!("{attr} has no commands, and the tool tier exposes only commands"),
+                1 => format!("{} already exists on this system", hidden[0]),
+                _ => format!("{} already exist on this system", hidden.join(", ")),
+            });
             continue;
         }
         if hidden.is_empty() {
@@ -813,8 +813,13 @@ mod tests {
         };
         let only_git = |out: &str| bins(&["git"], out);
         let e = expose(&mut tool, &image, &[], &only_git);
-        assert!(check(&mut ui, &tool, &e, &["git".into()], None, &[]).is_err());
-        assert!(check(&mut ui, &tool, &e, &["git".into()], None, &["git".into()]).is_ok());
+        for overrides in [vec![], vec!["git".to_owned()]] {
+            let err = check(&mut ui, &tool, &e, &["git".into()], None, &overrides)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert_eq!(err, "git already exists on this system");
+        }
         // Nothing to expose at all.
         let mut tool = LockedTool {
             packages: vec![package("requests", &["/nix/store/e-requests"])],
