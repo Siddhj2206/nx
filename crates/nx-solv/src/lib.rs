@@ -359,6 +359,37 @@ impl Pool {
         Ok(pkgs.ids().map(SolvableId).collect())
     }
 
+    /// A package's file list: every file for an installed package, the
+    /// ones `primary.xml` carries (`*/bin/*`, `/etc/*`) for a repo's.
+    pub fn files(&self, id: SolvableId) -> Vec<String> {
+        let mut out = Vec::new();
+        // SAFETY: an all-zero Dataiterator is plain data (ints and null
+        // pointers), and dataiterator_init sets every field before use; the
+        // id comes from this pool; each path is copied out of libsolv's
+        // temporary space before the next step reuses it; the iterator is
+        // freed on every path out.
+        unsafe {
+            let mut di: sys::Dataiterator = std::mem::zeroed();
+            if sys::dataiterator_init(
+                &mut di,
+                self.p(),
+                std::ptr::null_mut(),
+                id.0,
+                sys::SOLVABLE_FILELIST as i32,
+                std::ptr::null(),
+                0,
+            ) != 0
+            {
+                return out;
+            }
+            while sys::dataiterator_step(&mut di) != 0 {
+                out.push(owned(sys::repodata_dir2str(di.data, di.kv.id, di.kv.str_)));
+            }
+            sys::dataiterator_free(&mut di);
+        }
+        out
+    }
+
     /// Reads a package's details.
     pub fn package(&self, id: SolvableId) -> Package {
         // SAFETY: ids come from this pool (all/select/solve), so they index

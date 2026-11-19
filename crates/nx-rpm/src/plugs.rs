@@ -3,42 +3,123 @@
 //! tier. Everything here reads repo metadata only (name, provides,
 //! requires), which `primary.xml` carries for every package.
 
-/// Compilers, linkers and interpreters: they build or load native code
-/// against the host's libraries, so they never go to the tool tier.
-const TOOLCHAINS: &[&str] = &[
+/// The commands of compilers, linkers, interpreters and the build tools
+/// that find host libraries: they build or load native code against the
+/// image's libraries, so they never go to the tool tier (design, *Tool
+/// tier*). One list for both tiers: an RPM ships one in a `bin` directory,
+/// a nixpkgs package names one as its `mainProgram`. A trailing `*` matches
+/// a prefix (`python3.*`: every versioned interpreter). The manifest adds to
+/// it (`routing.toolchains`) and takes from it (`routing.standalone`).
+pub const TOOLCHAINS: &[&str] = &[
+    // C, C++ and friends
+    "cc",
+    "c++",
     "gcc",
-    "gcc-c++",
-    "gcc-gfortran",
+    "g++",
+    "gfortran",
+    "gccgo",
     "clang",
-    "llvm",
+    "clang++",
+    "tcc",
+    // linkers and assemblers
+    "ld",
+    "ld.lld",
     "lld",
-    "binutils",
-    "cargo",
-    "rust",
+    "as",
+    // compiled languages with their own toolchains
     "rustc",
-    "golang",
+    "cargo",
     "go",
-    "python3",
+    "zig",
+    "ghc",
+    "ocaml",
+    "nim",
+    "crystal",
+    "swift",
+    "dotnet",
+    // interpreters and runtimes that load native extensions
     "python",
-    "nodejs",
+    "python3",
+    "python3.*",
     "node",
+    "deno",
+    "bun",
     "perl",
     "ruby",
     "php",
     "lua",
     "luajit",
     "java",
-    "openjdk",
-    "ghc",
-    "ocaml",
+    "javac",
+    "julia",
+    "erl",
+    "guile",
+    // build tools that find the host's libraries
     "make",
     "cmake",
     "meson",
-    "ninja-build",
-    "pkgconf",
+    "ninja",
     "pkg-config",
-    "zig",
+    "pkgconf",
 ];
+
+/// [`TOOLCHAINS`] with the manifest's additions and exceptions.
+#[derive(Debug, Clone)]
+pub struct Toolchains {
+    commands: Vec<String>,
+}
+
+impl Default for Toolchains {
+    fn default() -> Self {
+        Self::new(&[], &[])
+    }
+}
+
+impl Toolchains {
+    /// nx's list plus `extra`, less the entries `standalone` names.
+    pub fn new(extra: &[String], standalone: &[String]) -> Self {
+        let commands = TOOLCHAINS
+            .iter()
+            .map(|c| (*c).to_owned())
+            .chain(extra.iter().cloned())
+            .filter(|c| !standalone.contains(c))
+            .collect();
+        Self { commands }
+    }
+
+    /// The entry `command` matches, if any.
+    pub fn matching(&self, command: &str) -> Option<&str> {
+        self.commands
+            .iter()
+            .find(|c| match c.strip_suffix('*') {
+                Some(prefix) => command.starts_with(prefix),
+                None => *c == command,
+            })
+            .map(String::as_str)
+    }
+
+    /// The toolchain command among an RPM's files, if it ships one in a
+    /// directory on `PATH`.
+    pub fn in_files<'a>(&self, files: &'a [String]) -> Option<&'a str> {
+        files.iter().find_map(|f| {
+            let (dir, name) = f.rsplit_once('/')?;
+            let on_path = matches!(dir, "/usr/bin" | "/usr/sbin" | "/bin" | "/sbin");
+            (on_path && self.matching(name).is_some()).then_some(name)
+        })
+    }
+
+    /// Whether a nixpkgs package is one: by its `mainProgram`, or, when
+    /// it names none, by its `pname` (cc-wrapper's packages end in
+    /// `-wrapper`).
+    pub fn nixpkg(&self, main_program: &str, pname: &str) -> bool {
+        let command = if main_program.is_empty() {
+            pname.strip_suffix("-wrapper").unwrap_or(pname)
+        } else {
+            main_program
+        };
+        self.matching(command).is_some()
+    }
+}
 
 /// Sonames whose presence among a package's requirements means it talks to
 /// the GPU, the display server or the sound server: those must load the
@@ -65,17 +146,32 @@ const SESSION_LIBS: &[&str] = &[
     "libSDL3",
 ];
 
-/// Why a package with this `name`, `provides` and `requires` (as rpm
-/// prints them) plugs into the system, or `None` for a standalone one.
-pub fn plugs_in(name: &str, provides: &[String], requires: &[String]) -> Option<String> {
+/// What repo metadata says about a package.
+#[derive(Debug, Clone, Copy)]
+pub struct Meta<'a> {
+    pub name: &'a str,
+    /// Provides and requires as rpm prints them.
+    pub provides: &'a [String],
+    pub requires: &'a [String],
+    /// The files `primary.xml` lists (those in `bin` directories and `/etc`).
+    pub files: &'a [String],
+}
+
+/// Why a package plugs into the system, or `None` for a standalone one.
+pub fn plugs_in(p: Meta<'_>, toolchains: &Toolchains) -> Option<String> {
+    let Meta {
+        name,
+        provides,
+        requires,
+        files,
+    } = p;
     for suffix in ["-devel", "-static", "-headers", "-libs"] {
         if name.ends_with(suffix) {
             return Some(format!("a {suffix} package"));
         }
     }
-    let base = toolchain_base(name);
-    if TOOLCHAINS.contains(&base) {
-        return Some("a compiler, linker or interpreter".to_owned());
+    if let Some(command) = toolchains.in_files(files) {
+        return Some(format!("a compiler, linker or interpreter ({command})"));
     }
     // A library package. A tool that carries its own library (jq ships
     // libjq) is still a tool.
@@ -104,45 +200,6 @@ pub fn plugs_in(name: &str, provides: &[String], requires: &[String]) -> Option<
     None
 }
 
-/// `python3.14` → `python3`, `java-21-openjdk` → `openjdk`, `gcc` → `gcc`:
-/// the name a toolchain goes by across versions.
-/// Whether a nixpkgs attribute or package name is a compiler, linker or
-/// interpreter (design, *Tool tier*: those never go there). nixpkgs names
-/// versions with digits and underscores (`go_1_23`, `python312`,
-/// `nodejs_22`, `lua5_4`, `gcc14`, `jdk21`), and has a few names of its own.
-pub fn nix_toolchain(name: &str) -> bool {
-    const NIX_ONLY: &[&str] = &[
-        "gnumake",
-        "jdk",
-        "gfortran",
-        "llvmPackages",
-        "rustc",
-        "gcc-unwrapped",
-    ];
-    let leaf = name.rsplit('.').next().unwrap_or(name);
-    let base = leaf.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_' || c == '.');
-    let base = base.strip_suffix("Packages").unwrap_or(base);
-    TOOLCHAINS.contains(&base)
-        || NIX_ONLY.contains(&base)
-        || NIX_ONLY.contains(&leaf)
-        || TOOLCHAINS.contains(&toolchain_base(leaf))
-}
-
-fn toolchain_base(name: &str) -> &str {
-    if name.starts_with("java-") && name.contains("openjdk") {
-        return "openjdk";
-    }
-    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    if trimmed.len() < name.len() && TOOLCHAINS.contains(&trimmed) {
-        return trimmed;
-    }
-    // python3.14 → python3: keep the major digit some names carry.
-    match name.split_once('.') {
-        Some((head, _)) if TOOLCHAINS.contains(&head) => head,
-        _ => name,
-    }
-}
-
 /// `libxkbcommon.so.0()(64bit)` → `libxkbcommon.so.0`.
 fn soname(provide: &str) -> Option<&str> {
     let name = provide.split('(').next()?;
@@ -154,66 +211,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn knows_nixpkgs_toolchain_names() {
-        for t in [
-            "go",
-            "go_1_23",
-            "python312",
-            "python3",
-            "nodejs_22",
-            "lua5_4",
-            "gcc14",
-            "jdk21",
-            "gnumake",
-            "rustc",
-            "zig_0_13",
-            "clang_19",
+    fn one_command_list_serves_both_tiers() {
+        let t = Toolchains::default();
+        // nixpkgs: (attr) mainProgram, pname, as the catalog has them.
+        for (main, pname) in [
+            ("go", "go"),
+            ("python3.12", "python3"),
+            ("node", "nodejs"),
+            ("gcc", "gcc-wrapper"),
+            ("java", "openjdk"),
+            ("make", "gnumake"),
+            ("zig", "zig"),
+            ("", "ghc"),
+            ("", "lld"),
         ] {
-            assert!(nix_toolchain(t), "{t}");
+            assert!(t.nixpkg(main, pname), "{main} {pname}");
         }
-        for t in [
-            "ripgrep",
-            "gopls",
-            "rustup",
-            "golangci-lint",
-            "python3Packages.black",
-            "nodePackages.prettier",
-        ] {
-            assert!(!nix_toolchain(t), "{t}");
+        for (main, pname) in [("rg", "ripgrep"), ("gopls", "gopls"), ("", "rustup")] {
+            assert!(!t.nixpkg(main, pname), "{main} {pname}");
         }
+        // RPMs: what they ship on PATH.
+        assert_eq!(t.in_files(&v(&["/usr/bin/python3.14"])), Some("python3.14"));
+        assert_eq!(t.in_files(&v(&["/usr/bin/ld", "/usr/bin/ar"])), Some("ld"));
+        assert_eq!(t.in_files(&v(&["/usr/lib/app/bin/node"])), None);
+        assert_eq!(t.in_files(&v(&["/usr/bin/rg"])), None);
+        // The manifest's additions and exceptions.
+        let t = Toolchains::new(&["dmd".into()], &["zig".into()]);
+        assert!(t.nixpkg("dmd", "dmd") && !t.nixpkg("zig", "zig"));
     }
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    fn meta(name: &str) -> Meta<'_> {
+        Meta {
+            name,
+            provides: &[],
+            requires: &[],
+            files: &[],
+        }
+    }
+
+    fn plugs(m: Meta<'_>) -> Option<String> {
+        plugs_in(m, &Toolchains::default())
+    }
+
+    /// A package with no files on `PATH`.
+    fn by_deps(name: &str, provides: &[String], requires: &[String]) -> Option<String> {
+        plugs(Meta {
+            provides,
+            requires,
+            ..meta(name)
+        })
+    }
+
     #[test]
     fn libraries_headers_and_toolchains_plug_in() {
         assert_eq!(
-            plugs_in("wayland-devel", &[], &[]).as_deref(),
+            by_deps("wayland-devel", &[], &[]).as_deref(),
             Some("a -devel package")
         );
         assert_eq!(
-            plugs_in("libxkbcommon", &v(&["libxkbcommon.so.0()(64bit)"]), &[]).as_deref(),
+            by_deps("libxkbcommon", &v(&["libxkbcommon.so.0()(64bit)"]), &[]).as_deref(),
             Some("provides the library libxkbcommon.so.0")
         );
         assert_eq!(
-            plugs_in("foo", &v(&["pkgconfig(foo) = 1.0"]), &[]).as_deref(),
+            by_deps("foo", &v(&["pkgconfig(foo) = 1.0"]), &[]).as_deref(),
             Some("provides pkgconfig(foo)")
         );
-        for name in ["cargo", "python3.14", "gcc", "java-21-openjdk", "nodejs22"] {
-            assert!(plugs_in(name, &[], &[]).is_some(), "{name}");
-        }
+        assert_eq!(
+            plugs(Meta {
+                files: &v(&["/usr/bin/go", "/usr/bin/gofmt"]),
+                ..meta("golang-bin")
+            })
+            .as_deref(),
+            Some("a compiler, linker or interpreter (go)")
+        );
     }
 
     #[test]
     fn session_libraries_and_services_plug_in() {
         assert_eq!(
-            plugs_in("foot", &[], &v(&["libwayland-client.so.0()(64bit)"])).as_deref(),
+            by_deps("foot", &[], &v(&["libwayland-client.so.0()(64bit)"])).as_deref(),
             Some("links libwayland-client.so.0, which must be the host's")
         );
         assert_eq!(
-            plugs_in("syncthing", &[], &v(&["systemd"])).as_deref(),
+            by_deps("syncthing", &[], &v(&["systemd"])).as_deref(),
             Some("ships system services")
         );
     }
@@ -221,10 +305,10 @@ mod tests {
     #[test]
     fn a_plain_command_line_tool_is_standalone() {
         let requires = v(&["libc.so.6()(64bit)", "libpcre2-8.so.0()(64bit)"]);
-        assert_eq!(plugs_in("ripgrep", &v(&["ripgrep"]), &requires), None);
+        assert_eq!(by_deps("ripgrep", &v(&["ripgrep"]), &requires), None);
         let provides = v(&["jq", "libjq.so.1()(64bit)"]);
         assert_eq!(
-            plugs_in("jq", &provides, &v(&["libonig.so.5()(64bit)"])),
+            by_deps("jq", &provides, &v(&["libonig.so.5()(64bit)"])),
             None
         );
     }

@@ -1384,6 +1384,13 @@ pub struct s_Repodata {
     pub localpool: ::std::os::raw::c_int,
     pub dirpool: Dirpool,
 }
+unsafe extern "C" {
+    pub fn repodata_dir2str(
+        data: *mut Repodata,
+        did: Id,
+        suf: *const ::std::os::raw::c_char,
+    ) -> *const ::std::os::raw::c_char;
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct s_KeyValue {
@@ -1405,6 +1412,126 @@ pub struct s_Datamatcher {
     pub error: ::std::os::raw::c_int,
 }
 pub type Datamatcher = s_Datamatcher;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct s_Dataiterator {
+    pub state: ::std::os::raw::c_int,
+    pub flags: ::std::os::raw::c_int,
+    pub pool: *mut Pool,
+    pub repo: *mut Repo,
+    pub data: *mut Repodata,
+    pub dp: *mut ::std::os::raw::c_uchar,
+    pub ddp: *mut ::std::os::raw::c_uchar,
+    pub idp: *mut Id,
+    pub keyp: *mut Id,
+    pub key: *mut s_Repokey,
+    pub kv: KeyValue,
+    pub matcher: Datamatcher,
+    pub keyname: Id,
+    pub repodataid: Id,
+    pub solvid: Id,
+    pub repoid: Id,
+    pub keynames: [Id; 4usize],
+    pub nkeynames: ::std::os::raw::c_int,
+    pub rootlevel: ::std::os::raw::c_int,
+    pub parents: [s_Dataiterator_di_parent; 3usize],
+    pub nparents: ::std::os::raw::c_int,
+    pub vert_ddp: *mut ::std::os::raw::c_uchar,
+    pub vert_off: Id,
+    pub vert_len: Id,
+    pub vert_storestate: Id,
+    pub dupstr: *mut ::std::os::raw::c_char,
+    pub dupstrn: ::std::os::raw::c_int,
+    pub keyskip: *mut Id,
+    pub oldkeyskip: *mut Id,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct s_Dataiterator_di_parent {
+    pub kv: KeyValue,
+    pub dp: *mut ::std::os::raw::c_uchar,
+    pub keyp: *mut Id,
+}
+pub type Dataiterator = s_Dataiterator;
+unsafe extern "C" {
+    pub fn dataiterator_init(
+        di: *mut Dataiterator,
+        pool: *mut Pool,
+        repo: *mut Repo,
+        p: Id,
+        keyname: Id,
+        match_: *const ::std::os::raw::c_char,
+        flags: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub fn dataiterator_init_clone(di: *mut Dataiterator, from: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_set_search(di: *mut Dataiterator, repo: *mut Repo, p: Id);
+}
+unsafe extern "C" {
+    pub fn dataiterator_set_keyname(di: *mut Dataiterator, keyname: Id);
+}
+unsafe extern "C" {
+    pub fn dataiterator_set_match(
+        di: *mut Dataiterator,
+        match_: *const ::std::os::raw::c_char,
+        flags: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub fn dataiterator_prepend_keyname(di: *mut Dataiterator, keyname: Id);
+}
+unsafe extern "C" {
+    pub fn dataiterator_free(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_step(di: *mut Dataiterator) -> ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub fn dataiterator_setpos(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_setpos_parent(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_match(di: *mut Dataiterator, ma: *mut Datamatcher)
+    -> ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub fn dataiterator_skip_attribute(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_skip_repo(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_skip_solvable(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_final_repo(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_final_solvable(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_jump_to_repo(di: *mut Dataiterator, repo: *mut Repo);
+}
+unsafe extern "C" {
+    pub fn dataiterator_jump_to_solvid(di: *mut Dataiterator, solvid: Id);
+}
+unsafe extern "C" {
+    pub fn dataiterator_entersub(di: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_clonepos(di: *mut Dataiterator, from: *mut Dataiterator);
+}
+unsafe extern "C" {
+    pub fn dataiterator_seek(di: *mut Dataiterator, whence: ::std::os::raw::c_int);
+}
+unsafe extern "C" {
+    pub fn dataiterator_strdup(di: *mut Dataiterator);
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct s_Repo {

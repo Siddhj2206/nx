@@ -4,6 +4,8 @@
 //! repos and the catalog say, so the order is tested without either.
 
 use nx_core::CliTools;
+use nx_core::manifest::Routing;
+use nx_rpm::plugs::Toolchains;
 
 /// `--host` or `--tool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,25 @@ pub struct Nixpkg {
     /// A compiler, linker or interpreter: never the tool tier unless asked
     /// for with `--tool` (design, *Tool tier*).
     pub toolchain: bool,
+}
+
+impl Nixpkg {
+    /// What the catalog says about `p`; `allowed` if its license is.
+    pub fn new(p: &nx_nix::catalog::Package, allowed: bool, toolchains: &Toolchains) -> Self {
+        Self {
+            attr: p.attr.clone(),
+            pname: p.pname.clone(),
+            unfree: p.unfree,
+            allowed,
+            broken: p.broken || p.unavailable,
+            toolchain: toolchains.nixpkg(&p.main_program, &p.pname),
+        }
+    }
+}
+
+/// The toolchain commands as the manifest's `[routing]` adjusts them.
+pub fn toolchains(routing: &Routing) -> Toolchains {
+    Toolchains::new(&routing.toolchains, &routing.standalone)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

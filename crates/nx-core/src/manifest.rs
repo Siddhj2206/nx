@@ -104,10 +104,18 @@ pub enum CliTools {
     Fedora,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Routing {
     #[serde(default)]
     pub cli_tools: CliTools,
+    /// Commands to treat as compilers, linkers or interpreters besides
+    /// nx's own list (`nx_rpm::plugs::TOOLCHAINS`); `*` ends a prefix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchains: Vec<String>,
+    /// Commands from that list to treat as standalone tools instead
+    /// (`zig`, say, for nixpkgs' copy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standalone: Vec<String>,
 }
 
 impl Routing {
@@ -268,6 +276,8 @@ key = "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
 
 [routing]
 cli_tools = "fedora"
+toolchains = ["dmd"]
+standalone = ["zig"]
 
 [[repo]]
 name = "copr:atim/lazygit"
@@ -291,6 +301,8 @@ priority = 50
         assert_eq!(m.tool.unfree, ["terraform"]);
         assert_eq!(m.caches.len(), 1);
         assert_eq!(m.routing.cli_tools, CliTools::Fedora);
+        assert_eq!(m.routing.toolchains, ["dmd"]);
+        assert_eq!(m.routing.standalone, ["zig"]);
         assert!(m.has("ripgrep") && m.has("wayland-devel") && !m.has("nope"));
         assert_eq!(
             m.repo("copr:atim/lazygit").and_then(|r| r.priority),

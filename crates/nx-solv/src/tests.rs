@@ -289,6 +289,11 @@ fn finds_image_owners_of_a_file() -> Result<()> {
     };
     assert_eq!(names("/usr/bin/rg")?, vec!["ripgrep"]);
     assert!(names("/usr/bin/fd")?.is_empty(), "fd is not in the image");
+    // Any package's file list, installed or not.
+    let fd = f.pool.select("fd")?;
+    assert_eq!(f.pool.files(fd[0]), vec!["/usr/bin/fd"]);
+    let rg = f.pool.select("ripgrep")?;
+    assert_eq!(f.pool.files(rg[0]), vec!["/usr/bin/rg"]);
     Ok(())
 }
 

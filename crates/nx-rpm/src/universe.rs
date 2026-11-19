@@ -227,11 +227,15 @@ impl Universe {
 
     /// Why `p` plugs into the system and so belongs in the host tier
     /// ([`crate::plugs::plugs_in`]), or `None` for a standalone package.
-    pub fn plugs_in(&self, p: &Package) -> Option<String> {
+    pub fn plugs_in(&self, p: &Package, toolchains: &crate::plugs::Toolchains) -> Option<String> {
         crate::plugs::plugs_in(
-            &p.name,
-            &self.pool.deps(p.id, nx_solv::Deps::Provides),
-            &self.pool.deps(p.id, nx_solv::Deps::Requires),
+            crate::plugs::Meta {
+                name: &p.name,
+                provides: &self.pool.deps(p.id, nx_solv::Deps::Provides),
+                requires: &self.pool.deps(p.id, nx_solv::Deps::Requires),
+                files: &self.pool.files(p.id),
+            },
+            toolchains,
         )
     }
 

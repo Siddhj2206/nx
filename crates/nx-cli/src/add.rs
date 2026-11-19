@@ -70,6 +70,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     let use_tool = opts.forced != Some(Forced::Host)
         && tool::available()
         && (manifest.routing.cli_tools == CliTools::Nix || opts.forced == Some(Forced::Tool));
+    let toolchains = route::toolchains(&manifest.routing);
     let mut tier: Option<Tier> = None;
     let (mut fresh_host, mut fresh_tool, mut problems) = (Vec::new(), Vec::new(), Vec::new());
     for spec in specs {
@@ -80,7 +81,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             None
         } else {
             session.universe.info(spec)?.map(|p| Rpm {
-                plugs: session.universe.plugs_in(&p),
+                plugs: session.universe.plugs_in(&p, &toolchains),
                 name: p.name,
                 installed: p.installed,
             })
@@ -92,14 +93,9 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
                 None => tier.insert(Tier::open(ui, session.tool.as_ref(), false)?),
             };
             let catalog = t.catalog(ui)?;
-            nix = catalog.find(spec).map(|p| Nixpkg {
-                attr: p.attr.clone(),
-                pname: p.pname.clone(),
-                unfree: p.unfree,
-                allowed: opts.allow_unfree || manifest.tool.unfree.contains(&p.pname),
-                broken: p.broken || p.unavailable,
-                toolchain: nx_rpm::plugs::nix_toolchain(&p.attr)
-                    || nx_rpm::plugs::nix_toolchain(&p.pname),
+            nix = catalog.find(spec).map(|p| {
+                let allowed = opts.allow_unfree || manifest.tool.unfree.contains(&p.pname);
+                Nixpkg::new(p, allowed, &toolchains)
             });
             if rpm.is_none() && nix.is_none() {
                 similar = catalog.similar(spec, 3);

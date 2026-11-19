@@ -21,6 +21,7 @@ pub fn run(
     let nix = catalog
         .filter(|_| !route::host_only(spec))
         .and_then(|c| c.find(spec));
+    let toolchains = route::toolchains(&manifest.routing);
     let route = route::decide(
         spec,
         None,
@@ -29,19 +30,11 @@ pub fn run(
             .map(|p| Rpm {
                 name: p.name.clone(),
                 installed: p.installed,
-                plugs: universe.plugs_in(p),
+                plugs: universe.plugs_in(p, &toolchains),
             })
             .as_ref(),
-        nix.map(|p| route::Nixpkg {
-            attr: p.attr.clone(),
-            pname: p.pname.clone(),
-            unfree: p.unfree,
-            allowed: manifest.tool.unfree.contains(&p.pname),
-            broken: p.broken || p.unavailable,
-            toolchain: nx_rpm::plugs::nix_toolchain(&p.attr)
-                || nx_rpm::plugs::nix_toolchain(&p.pname),
-        })
-        .as_ref(),
+        nix.map(|p| route::Nixpkg::new(p, manifest.tool.unfree.contains(&p.pname), &toolchains))
+            .as_ref(),
         &[],
     );
     let release = catalog.map(|c| c.release.clone()).unwrap_or_default();
