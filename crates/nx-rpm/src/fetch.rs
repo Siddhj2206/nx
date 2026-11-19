@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use nx_http::ureq;
 use sha2::{Digest, Sha256};
 
 use crate::repo::Repo;
@@ -20,38 +21,14 @@ pub trait Http: Sync {
     fn get(&self, url: &str) -> Result<Vec<u8>>;
 }
 
-/// HTTP over ureq.
+/// HTTP over ureq, with nx's agent and retry policy ([`nx_http`]).
 pub struct Ureq(ureq::Agent);
 
 impl Ureq {
     pub fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            .user_agent(concat!("nx/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(Some(std::time::Duration::from_secs(10)))
-            .timeout_global(Some(std::time::Duration::from_secs(300)))
-            // The system trust store, so a CA the image or the user adds
-            // applies to nx too.
-            .tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                    .build(),
-            )
-            .build();
-        Self(config.into())
+        Self(nx_http::agent(true))
     }
-}
 
-impl Default for Ureq {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Attempts per request; mirrors.fedoraproject.org resets connections now
-/// and then, and one reset shouldn't drop a whole repo.
-const ATTEMPTS: u32 = 3;
-
-impl Ureq {
     fn get_once(&self, url: &str) -> Result<Vec<u8>, ureq::Error> {
         self.0
             .get(url)
@@ -63,12 +40,9 @@ impl Ureq {
     }
 }
 
-/// Worth another try: the network, not the answer, failed.
-fn transient(e: &ureq::Error) -> bool {
-    match e {
-        ureq::Error::StatusCode(code) => *code >= 500 || *code == 429,
-        ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => true,
-        _ => false,
+impl Default for Ureq {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -78,8 +52,8 @@ impl Http for Ureq {
         loop {
             match self.get_once(url) {
                 Ok(body) => return Ok(body),
-                Err(e) if attempt < ATTEMPTS && transient(&e) => {
-                    std::thread::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)));
+                Err(e) if attempt < nx_http::ATTEMPTS && nx_http::transient(&e) => {
+                    nx_http::back_off(attempt);
                     attempt += 1;
                 }
                 Err(e) => {

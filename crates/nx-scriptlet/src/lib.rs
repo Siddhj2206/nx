@@ -22,7 +22,8 @@ pub use units::valid_unit;
 /// A scriptlet as the header records it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Script {
-    /// The interpreter; empty means `/bin/sh`.
+    /// The interpreter as rpm records it (`/bin/sh` for a shell script);
+    /// empty when it records none, which also means the shell.
     pub interpreter: String,
     pub body: String,
 }
@@ -223,15 +224,12 @@ impl Intents {
     }
 }
 
-const SHELLS: [&str; 7] = [
-    "",
-    "/bin/sh",
-    "/bin/bash",
-    "/usr/bin/sh",
-    "/usr/bin/bash",
-    "sh",
-    "bash",
-];
+/// Whether `interp` runs a script as the shell would: none, or `sh` or
+/// `bash`, bare or in `/bin` or `/usr/bin` (the same file on Fedora).
+fn is_shell(interp: &str) -> bool {
+    let (dir, name) = interp.rsplit_once('/').unwrap_or(("", interp));
+    interp.is_empty() || (matches!(name, "sh" | "bash") && matches!(dir, "" | "/bin" | "/usr/bin"))
+}
 
 fn run(source: &str, script: &Script, t: &mut Translation) {
     let lines = shell::lines(&script.body);
@@ -244,7 +242,7 @@ fn run(source: &str, script: &Script, t: &mut Translation) {
         }
         return;
     }
-    if !SHELLS.contains(&interp) {
+    if !is_shell(interp) {
         t.leftovers.push(Leftover {
             source: format!("{source} (-p {interp})"),
             lines,

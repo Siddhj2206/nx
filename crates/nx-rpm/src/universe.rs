@@ -62,8 +62,8 @@ pub struct Universe {
     /// Hidden builds of image relatives whose exact build no repo has; the
     /// exact build comes from Koji when a plan needs one.
     missing: HashSet<SolvableId>,
-    /// Source package name → the image's build of it
-    /// (`wayland-1.24.0-1.fc45.src.rpm`).
+    /// Source package name → the image's build of it, as
+    /// `version-release` (`1.24.0-1.fc45`).
     image_sources: HashMap<String, String>,
     /// Package files added from Koji, and where they are.
     koji: Option<RepoId>,
@@ -349,7 +349,7 @@ impl Universe {
         };
         let id = self.pool.add_rpm(repo, &file)?;
         let got = self.pool.package(id);
-        let exact = self.image_sources.get(got.source_name()) == Some(&got.source);
+        let exact = self.image_sources.get(&got.source_name) == Some(&got.source_evr);
         if got.name != rel.name || got.arch != rel.arch || !exact {
             return Err(Error::Invalid(format!(
                 "Koji served {} for {}",
@@ -369,14 +369,12 @@ impl Universe {
 
     /// The image's build of the source `p` comes from, as a Koji path.
     fn relative(&self, p: &Package) -> Option<Relative> {
-        let srpm = self.image_sources.get(p.source_name())?;
-        let stem = srpm.strip_suffix(".src.rpm").unwrap_or(srpm);
-        let mut parts = stem.rsplitn(3, '-');
-        let (release, version, source) = (parts.next()?, parts.next()?, parts.next()?);
+        let evr = self.image_sources.get(&p.source_name)?;
+        let (version, release) = evr.rsplit_once('-')?;
         Some(Relative {
             name: p.name.clone(),
             arch: p.arch.clone(),
-            source: source.to_owned(),
+            source: p.source_name.clone(),
             version: version.to_owned(),
             release: release.to_owned(),
         })
@@ -522,18 +520,15 @@ impl Relatives {
             let p = pool.package(id);
             if p.installed {
                 installed_names.insert((p.name.clone(), p.arch.clone()));
-                image
-                    .entry(p.source_name().to_owned())
-                    .or_default()
-                    .insert(p.source);
+                image.entry(p.source_name).or_default().insert(p.source_evr);
             } else {
                 available.push(p);
             }
         }
         let other_build = |p: &Package| {
             image
-                .get(p.source_name())
-                .is_some_and(|builds| !builds.contains(&p.source))
+                .get(&p.source_name)
+                .is_some_and(|builds| !builds.contains(&p.source_evr))
         };
         let mut hidden = HashSet::new();
         let mut exact = HashSet::new();

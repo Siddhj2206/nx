@@ -45,7 +45,7 @@ pub fn add(
         let url = repo
             .gpgkey
             .first()
-            .filter(|k| k.starts_with("https://"))
+            .filter(|k| nx_core::Https::parse(k).is_some())
             .with_context(|| {
                 format!("{} needs a key served over https (--key <url>)", entry.name)
             })?;
@@ -68,6 +68,17 @@ pub fn add(
     let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
         for f in &fetched {
             let name = &f.entry.name;
+            if let Some(r) = m.repo(name)
+                && (r.baseurl != f.entry.baseurl || r.metalink != f.entry.metalink)
+            {
+                bail!(
+                    "repo {name} is already added, from {}; nx repo remove {name} first",
+                    r.baseurl
+                        .as_deref()
+                        .or(r.metalink.as_deref())
+                        .unwrap_or(name)
+                );
+            }
             match (m.repo(name).is_some(), new_key) {
                 (true, false) => {
                     bail!("repo {name} is already added (--new-key replaces its key)")
@@ -175,10 +186,10 @@ fn entries(
         }
         return Ok(vec![entry(source)]);
     }
-    if !source.starts_with("https://") {
+    let Some(url) = nx_core::Https::parse(source) else {
         bail!("{source} is neither copr:owner/project nor an https:// URL");
-    }
-    if source.ends_with(".repo") {
+    };
+    if url.path.ends_with(".repo") {
         let text = String::from_utf8_lossy(&http.get(source)?).into_owned();
         // Keep $releasever and $basearch unexpanded, so the entry follows
         // the image to its next release.
@@ -204,10 +215,7 @@ fn entries(
     if key.is_none() {
         bail!("a repo URL needs its key: nx repo add {source} --key <url>");
     }
-    let name = source
-        .trim_start_matches("https://")
-        .trim_end_matches('/')
-        .replace('/', "-");
+    let name = url.repo_id();
     Ok(vec![RepoEntry {
         baseurl: Some(source.to_owned()),
         ..entry(&name)
@@ -356,6 +364,10 @@ mod tests {
         )?;
         assert_eq!(code.len(), 1);
         assert_eq!(code[0].name, "code");
+        let token = entries(&file, &vars, "https://x.org/a.repo?token=1", None, None)?;
+        assert_eq!(token[0].name, "code", "a .repo URL with a query");
+        let plain = entries(&none, &vars, "https://x.org/b/c/", Some("https://k"), None)?;
+        assert_eq!(plain[0].name, "x.org_b_c");
         assert_eq!(
             code[0].gpgkey.as_deref(),
             Some("https://packages.microsoft.com/keys/microsoft.asc")

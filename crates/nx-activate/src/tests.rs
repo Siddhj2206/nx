@@ -524,7 +524,10 @@ fn with_service(l: &Layout, n: u32, name: &str, nevra: &str, unit: &str) -> std:
     let dir = l.state.root().join(format!("generations/{n}"));
     let units = dir.join("sysext/usr/lib/systemd/system");
     std::fs::create_dir_all(&units)?;
-    std::fs::write(units.join(unit), "[Service]\nExecStart=/usr/bin/tool\n")?;
+    std::fs::write(
+        units.join(unit),
+        "[Service]\nExecStart=/usr/bin/tool\n\n[Install]\nWantedBy=multi-user.target\n",
+    )?;
     let sysusers = dir.join("sysext/usr/lib/sysusers.d");
     std::fs::create_dir_all(&sysusers)?;
     std::fs::write(sysusers.join("svc.conf"), "u svc - \"Svc\" - -\n")?;
@@ -570,6 +573,31 @@ fn a_package_that_appears_gets_users_and_presets_after_the_merge() -> Result<()>
             "created users and groups from svc.conf",
             "enabled and started svc.service"
         ]
+    );
+    assert_eq!(got.services.warnings, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn a_unit_without_an_install_section_is_not_preset() -> Result<()> {
+    let tmp = Tmp::new("static");
+    let io = |e| Error::Io {
+        path: tmp.0.clone(),
+        source: e,
+    };
+    let l = layout(&tmp, false).map_err(io)?;
+    with_service(&l, 2, "svc", "svc-1-1.fc45.x86_64", "svc.service").map_err(io)?;
+    let unit = l
+        .state
+        .root()
+        .join("generations/2/sysext/usr/lib/systemd/system/svc.service");
+    std::fs::write(&unit, "[Service]\nExecStart=/usr/bin/tool\n").map_err(io)?;
+    let run = Scripted::new(|_| None);
+    let got = activate(&l, &run, 2, None, &only_uid())?;
+    assert!(
+        index(&run.calls(), "systemctl preset").is_none(),
+        "{:?}",
+        run.calls()
     );
     assert_eq!(got.services.warnings, Vec::<String>::new());
     Ok(())

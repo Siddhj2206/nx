@@ -37,10 +37,14 @@ impl Release {
         format!("{}/packages.json.br", self.url)
     }
 
-    /// `nixpkgs-26.11pre1122334.e21fec321d73` → `26.11pre1122334`.
+    /// `nixpkgs-26.11pre1122334.e21fec321d73` → `26.11pre1122334`: the
+    /// name less the channel's prefix and the revision it ends with. A
+    /// name of another shape is shown whole.
     pub fn version(&self) -> &str {
         let v = self.name.strip_prefix("nixpkgs-").unwrap_or(&self.name);
-        v.rsplit_once('.').map_or(v, |(head, _)| head)
+        v.strip_suffix(self.short())
+            .and_then(|v| v.strip_suffix('.'))
+            .unwrap_or(v)
     }
 }
 

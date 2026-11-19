@@ -57,10 +57,19 @@ pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
     } else {
         match image.info(what)? {
             Some(p) => Some(p),
-            None => image
-                .image_owners(&format!("/usr/bin/{what}"))?
-                .into_iter()
-                .next(),
+            None => {
+                let mut owner = None;
+                for dir in nx_rpm::COMMAND_DIRS {
+                    owner = image
+                        .image_owners(&format!("/{dir}/{what}"))?
+                        .into_iter()
+                        .next();
+                    if owner.is_some() {
+                        break;
+                    }
+                }
+                owner
+            }
         }
     };
     match found {
@@ -73,15 +82,16 @@ pub fn run(ui: &mut Ui, machine: &Machine, what: &str) -> Result<()> {
 }
 
 /// The host-tier package that provides `what`: a package name, a path in
-/// the extension, or a command in `/usr/bin`.
+/// the extension, or a command ([`nx_rpm::COMMAND_DIRS`]).
 fn in_generation(state: &State, g: &Generation, what: &str) -> Result<Option<Owner>> {
     let found = if what.contains('/') {
         owner_of_path(state, g, what)
     } else {
-        g.lock
-            .package(what)
-            .cloned()
-            .or_else(|| owner_of_path(state, g, &format!("/usr/bin/{what}")))
+        g.lock.package(what).cloned().or_else(|| {
+            nx_rpm::COMMAND_DIRS
+                .iter()
+                .find_map(|dir| owner_of_path(state, g, &format!("/{dir}/{what}")))
+        })
     };
     let Some(package) = found else {
         return Ok(None);

@@ -333,7 +333,7 @@ impl<'m> Session<'m> {
         }
         let store = self.state.store();
         let owner = |name: &str| -> Option<String> {
-            let dirs = ["usr/bin", "usr/sbin", "bin", "sbin"];
+            let dirs = nx_rpm::COMMAND_DIRS;
             if dirs
                 .iter()
                 .any(|d| std::fs::symlink_metadata(image_root.join(d).join(name)).is_ok())

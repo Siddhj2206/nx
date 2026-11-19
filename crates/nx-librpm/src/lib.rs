@@ -457,7 +457,7 @@ impl Package {
             scripts.phases.push((
                 phase,
                 Script {
-                    interpreter: normal_interpreter(&interpreter),
+                    interpreter: interpreter.trim().to_owned(),
                     body,
                 },
             ));
@@ -503,7 +503,7 @@ impl Package {
                 kind: kind.to_owned(),
                 target: target.to_owned(),
                 script: Script {
-                    interpreter: normal_interpreter(progs.get(index).copied().unwrap_or("")),
+                    interpreter: progs.get(index).copied().unwrap_or("").trim().to_owned(),
                     body: (*body).to_owned(),
                 },
             });
@@ -686,17 +686,6 @@ impl Drop for Package {
                 sys::Fclose(self.fd);
             }
         }
-    }
-}
-
-/// rpm records `/bin/sh` for every shell scriptlet; nx-scriptlet takes an
-/// empty interpreter to mean it.
-fn normal_interpreter(prog: &str) -> String {
-    let prog = prog.trim();
-    if prog == "/bin/sh" {
-        String::new()
-    } else {
-        prog.to_owned()
     }
 }
 

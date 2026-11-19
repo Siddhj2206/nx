@@ -182,9 +182,14 @@ pub fn command(line: &str, guard: Guard, out: &mut Intents) -> bool {
     }
 }
 
-/// Commands that rebuild a cache. The merged `/usr` is read-only, so they
-/// could not write their output there anyway, and nothing in the host
-/// tier depends on one (design, *Scriptlet translation*).
+/// Commands that rebuild a cache under `/usr` from files the packages
+/// ship (schemas, icon and MIME databases, fonts, GIO modules). The merged
+/// `/usr` is read-only, so they could not write their output there anyway,
+/// and nothing in the host tier depends on one (design, *Scriptlet
+/// translation*). The list is an allowlist on purpose: a command not on it
+/// is a leftover the user sees, never skipped unread. `update-ca-trust`
+/// must stay off it (it changes what the system trusts). An entry is added
+/// with the recorded scriptlet that needs it (`tests/fixtures/scriptlets`).
 const CACHES: [&str; 8] = [
     "glib-compile-schemas",
     "gtk-update-icon-cache",

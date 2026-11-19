@@ -15,23 +15,19 @@ use crate::ui::{self, Stream, Ui};
 /// whitespace (nxd refuses anything else, so say it here first).
 fn entry(url: &str, key: &str) -> Result<CacheEntry> {
     let url = url.trim_end_matches('/');
-    let plain = |s: &str| !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control());
-    if !plain(url) || !url.starts_with("https://") {
+    if nx_core::Https::parse(url).is_none() {
         bail!("a cache is an https URL, not {url}");
     }
-    if !plain(key)
-        || !key
-            .split_once(':')
-            .is_some_and(|(n, k)| !n.is_empty() && !k.is_empty())
-    {
+    let entry = CacheEntry {
+        url: url.to_owned(),
+        key: key.to_owned(),
+    };
+    if !entry.acceptable() {
         bail!(
             "a cache's public key looks like name-1:base64…, as the cache publishes it; not {key}"
         );
     }
-    Ok(CacheEntry {
-        url: url.to_owned(),
-        key: key.to_owned(),
-    })
+    Ok(entry)
 }
 
 pub fn add(ui: &mut Ui, machine: &Machine, url: &str, key: &str) -> Result<()> {

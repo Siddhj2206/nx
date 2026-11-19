@@ -19,20 +19,6 @@ use crate::{Runner, Services};
 pub const FILE: &str = "nx.conf";
 const INCLUDE: &str = "!include nx.conf";
 
-/// Whether an entry is safe to write into the daemon's configuration: an
-/// https URL and a `name:key` with no whitespace, so nothing a client wrote
-/// can add a line of its own.
-fn acceptable(c: &CacheEntry) -> bool {
-    let plain =
-        |s: &str| !s.is_empty() && !s.chars().any(|ch| ch.is_whitespace() || ch.is_control());
-    plain(&c.url)
-        && c.url.starts_with("https://")
-        && plain(&c.key)
-        && c.key
-            .split_once(':')
-            .is_some_and(|(n, k)| !n.is_empty() && !k.is_empty())
-}
-
 /// What `nx.conf` says for `caches`; empty for none.
 pub fn render(caches: &[CacheEntry]) -> String {
     if caches.is_empty() {
@@ -54,7 +40,7 @@ pub fn render(caches: &[CacheEntry]) -> String {
 /// only the extra caches aren't.
 pub fn apply(dir: &Path, runner: &dyn Runner, caches: &[CacheEntry], services: &mut Services) {
     let (ok, bad): (Vec<CacheEntry>, Vec<CacheEntry>) =
-        caches.iter().cloned().partition(acceptable);
+        caches.iter().cloned().partition(CacheEntry::acceptable);
     for c in &bad {
         services.warnings.push(format!(
             "skipped the extra cache {:?}: not an https URL with a name:key",
@@ -236,12 +222,9 @@ mod tests {
 
     #[test]
     fn refuses_what_could_add_a_line() {
-        assert!(!acceptable(&cache(
-            "https://x.org\ntrusted-users = *",
-            "a:b"
-        )));
-        assert!(!acceptable(&cache("http://x.org", "a:b")));
-        assert!(!acceptable(&cache("https://x.org", "nokey")));
-        assert!(acceptable(&cache("https://x.org", "x.org-1:abc=")));
+        assert!(!cache("https://x.org\ntrusted-users = *", "a:b").acceptable());
+        assert!(!cache("http://x.org", "a:b").acceptable());
+        assert!(!cache("https://x.org", "nokey").acceptable());
+        assert!(cache("https://x.org", "x.org-1:abc=").acceptable());
     }
 }

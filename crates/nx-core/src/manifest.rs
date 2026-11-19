@@ -31,6 +31,8 @@ pub struct Manifest {
     pub routing: Routing,
     #[serde(default, skip_serializing_if = "Overrides::is_empty")]
     pub overrides: Overrides,
+    #[serde(default, skip_serializing_if = "Gc::is_default")]
+    pub gc: Gc,
     /// Sections this nx doesn't know yet, kept as written.
     #[serde(flatten)]
     pub rest: toml::Table,
@@ -51,6 +53,7 @@ impl Default for Manifest {
             caches: Vec::new(),
             routing: Routing::default(),
             overrides: Overrides::default(),
+            gc: Gc::default(),
             rest: toml::Table::new(),
         }
     }
@@ -93,6 +96,64 @@ pub struct CacheEntry {
     pub key: String,
 }
 
+impl CacheEntry {
+    /// Safe to write into the Nix daemon's configuration: an https URL
+    /// and a `name:key`, neither with whitespace, so nothing a client wrote
+    /// can add a line of its own. `nx cache add` and nxd both check it.
+    pub fn acceptable(&self) -> bool {
+        Https::parse(&self.url).is_some()
+            && plain(&self.key)
+            && self
+                .key
+                .split_once(':')
+                .is_some_and(|(n, k)| !n.is_empty() && !k.is_empty())
+    }
+}
+
+fn plain(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// An https URL as nx takes one from the user: no whitespace or control
+/// characters, a host, and its path apart from any query or fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Https<'a> {
+    pub host: &'a str,
+    /// From the first `/` after the host, without query or fragment;
+    /// empty for none.
+    pub path: &'a str,
+}
+
+impl<'a> Https<'a> {
+    pub fn parse(url: &'a str) -> Option<Self> {
+        if !plain(url) {
+            return None;
+        }
+        let rest = url.strip_prefix("https://")?;
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+        let (host, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+        (!host.is_empty()).then_some(Self { host, path })
+    }
+
+    /// A repo id for a base URL: host and path, `/` as `_` (dnf allows
+    /// `[A-Za-z0-9-_.:]`, and a host has no `_`), anything else as `-`.
+    pub fn repo_id(&self) -> String {
+        let path = self.path.trim_matches('/');
+        let raw = if path.is_empty() {
+            self.host.to_owned()
+        } else {
+            format!("{}/{path}", self.host)
+        };
+        raw.chars()
+            .map(|c| match c {
+                '/' => '_',
+                c if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':') => c,
+                _ => '-',
+            })
+            .collect()
+    }
+}
+
 /// Where a standalone command-line tool goes when both tiers have it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -121,6 +182,33 @@ pub struct Routing {
 impl Routing {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// What `nx gc` keeps besides the generations deployed images need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gc {
+    /// The newest generations kept, so `nx rollback` still has somewhere
+    /// to go.
+    #[serde(default = "Gc::default_keep")]
+    pub keep: usize,
+}
+
+impl Gc {
+    fn default_keep() -> usize {
+        5
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for Gc {
+    fn default() -> Self {
+        Self {
+            keep: Self::default_keep(),
+        }
     }
 }
 
@@ -279,6 +367,9 @@ cli_tools = "fedora"
 toolchains = ["dmd"]
 standalone = ["zig"]
 
+[gc]
+keep = 10
+
 [[repo]]
 name = "copr:atim/lazygit"
 priority = 50
@@ -303,6 +394,8 @@ priority = 50
         assert_eq!(m.routing.cli_tools, CliTools::Fedora);
         assert_eq!(m.routing.toolchains, ["dmd"]);
         assert_eq!(m.routing.standalone, ["zig"]);
+        assert_eq!(m.gc.keep, 10);
+        assert_eq!(Manifest::default().gc.keep, 5);
         assert!(m.has("ripgrep") && m.has("wayland-devel") && !m.has("nope"));
         assert_eq!(
             m.repo("copr:atim/lazygit").and_then(|r| r.priority),
@@ -318,5 +411,34 @@ priority = 50
             matches!(err, Err(Error::Newer { version: 99, .. })),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn https_urls_and_their_repo_ids() {
+        let u = Https::parse("https://a.org/b-c/?t=1");
+        assert_eq!(u.map(|u| (u.host, u.path)), Some(("a.org", "/b-c/")));
+        assert_eq!(u.map(|u| u.repo_id()).as_deref(), Some("a.org_b-c"));
+        assert_eq!(
+            Https::parse("https://a.org/b/c")
+                .map(|u| u.repo_id())
+                .as_deref(),
+            Some("a.org_b_c")
+        );
+        for bad in [
+            "http://a.org",
+            "https://",
+            "https:///x",
+            "https://a.org/x y",
+            "https://a\n",
+        ] {
+            assert_eq!(Https::parse(bad), None, "{bad}");
+        }
+        let cache = |url: &str, key: &str| CacheEntry {
+            url: url.into(),
+            key: key.into(),
+        };
+        assert!(cache("https://x.org", "x.org-1:abc=").acceptable());
+        assert!(!cache("https://x.org", "nokey").acceptable());
+        assert!(!cache("https://x.org\ntrusted-users = *", "x:y").acceptable());
     }
 }

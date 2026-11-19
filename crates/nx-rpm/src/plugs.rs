@@ -103,7 +103,7 @@ impl Toolchains {
     pub fn in_files<'a>(&self, files: &'a [String]) -> Option<&'a str> {
         files.iter().find_map(|f| {
             let (dir, name) = f.rsplit_once('/')?;
-            let on_path = matches!(dir, "/usr/bin" | "/usr/sbin" | "/bin" | "/sbin");
+            let on_path = crate::COMMAND_DIRS.contains(&dir.trim_start_matches('/'));
             (on_path && self.matching(name).is_some()).then_some(name)
         })
     }

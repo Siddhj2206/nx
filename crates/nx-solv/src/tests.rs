@@ -172,7 +172,10 @@ fn package_details_and_solv_roundtrip() -> Result<()> {
     let id = f.pool.select("pkgconf")?;
     let p = f.pool.package(id[0]);
     assert_eq!(p.source, "pkgconf-2.4-1.fc45.src.rpm");
-    assert_eq!(p.source_name(), "pkgconf");
+    assert_eq!(
+        (p.source_name.as_str(), p.source_evr.as_str()),
+        ("pkgconf", "2.4-1.fc45")
+    );
     assert_eq!(p.location, "Packages/pkgconf-2.4-1.fc45.x86_64.rpm");
     assert!(!p.installed);
 
@@ -183,15 +186,6 @@ fn package_details_and_solv_roundtrip() -> Result<()> {
     again.prepare();
     assert_eq!(again.select("pkgconf")?.len(), 1);
     Ok(())
-}
-
-#[test]
-fn source_names() {
-    assert_eq!(source_name("wayland-1.24.0-1.fc45.src.rpm"), "wayland");
-    assert_eq!(
-        source_name("xorg-x11-proto-devel-2024.1-3.fc45.src.rpm"),
-        "xorg-x11-proto-devel"
-    );
 }
 
 #[test]

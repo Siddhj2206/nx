@@ -8,6 +8,11 @@ pub mod repo;
 pub mod repomd;
 pub mod universe;
 
+/// Where a package's commands go: the directories on `PATH`, relative to
+/// a root. Fedora 42 and later link `/usr/sbin` to `bin` and `/bin` and
+/// `/sbin` into `/usr`, but a package's file list still names them.
+pub const COMMAND_DIRS: [&str; 4] = ["usr/bin", "usr/sbin", "bin", "sbin"];
+
 pub use fetch::{Freshness, Http, Refresh, Synced, Ureq, sync};
 pub use nx_solv::Package;
 pub use packages::{Relative, RepoKeys, download, download_all, keyring, koji};

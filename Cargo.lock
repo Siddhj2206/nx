@@ -437,6 +437,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nx-http"
+version = "1.0.0-alpha.0"
+dependencies = [
+ "ureq",
+]
+
+[[package]]
 name = "nx-librpm"
 version = "1.0.0-alpha.0"
 dependencies = [
@@ -451,10 +458,10 @@ name = "nx-nix"
 version = "1.0.0-alpha.0"
 dependencies = [
  "brotli-decompressor",
+ "nx-http",
  "serde",
  "serde_json",
  "thiserror",
- "ureq",
 ]
 
 [[package]]
@@ -471,12 +478,12 @@ dependencies = [
 name = "nx-rpm"
 version = "1.0.0-alpha.0"
 dependencies = [
+ "nx-http",
  "nx-librpm",
  "nx-solv",
  "quick-xml",
  "sha2",
  "thiserror",
- "ureq",
 ]
 
 [[package]]

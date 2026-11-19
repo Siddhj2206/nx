@@ -360,3 +360,21 @@ fn more_service_packages_translate_and_migration_scripts_do_not() {
         ["/usr/libexec/migrate_redis_to_valkey.sh"]
     );
 }
+
+#[test]
+fn knows_the_shell_by_any_of_its_paths() {
+    for shell in [
+        "",
+        "/bin/sh",
+        "/usr/bin/sh",
+        "/bin/bash",
+        "/usr/bin/bash",
+        "sh",
+        "bash",
+    ] {
+        assert!(is_shell(shell), "{shell}");
+    }
+    for other in ["/usr/bin/lua", "<lua>", "/sbin/ldconfig", "/opt/x/bin/sh"] {
+        assert!(!is_shell(other), "{other}");
+    }
+}

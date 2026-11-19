@@ -9,6 +9,8 @@ nx() { runuser -l tester -c "nx $*"; }
 header=/usr/include/xkbcommon/xkbcommon.h
 merged() { systemd-sysext status --json=short | grep -q '"hierarchy":"/usr","extensions":\["nx"\]'; }
 
+# From a clean start: an earlier run may have left it added.
+nx list | grep -q '^  libxkbcommon-devel ' && nx remove libxkbcommon-devel >/dev/null
 nx add libxkbcommon-devel
 [[ -e $header ]] || fail "add: $header is not in /usr"
 merged || fail "add: nx is not merged over /usr"
@@ -18,6 +20,7 @@ added=$(readlink /var/lib/nx/current)
 
 nx remove libxkbcommon-devel
 [[ ! -e $header ]] || fail "remove: $header is still in /usr"
+removed=$(readlink /var/lib/nx/current)
 
 nx rollback
 [[ -e $header ]] || fail "rollback: $header is not back"
@@ -43,7 +46,7 @@ nx shell -- env | grep -q '^CPATH=/var/lib/nx/current/sysext/usr/include' || fai
 [[ -e /var/lib/nx/current/sysext/usr/include/xkbcommon/xkbcommon.h ]] || fail "prefix: no header in the prefix"
 
 # Unforced, the next activation goes back to sysext.
-nx rollback 1 >/dev/null
+nx rollback "${removed##*/}" >/dev/null
 nx rollback "${before##*/}"
 merged || fail "sysext is not back"
 echo "m3: ok"

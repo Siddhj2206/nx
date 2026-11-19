@@ -66,7 +66,7 @@ gc)
 	if [[ -e $ngrok ]]; then
 		grep -lq "$ngrok" /var/lib/nx/generations/[0-9]*/lock.toml ||
 			fail "$ngrok survived nix store gc with no generation using it"
-		echo "$ngrok is still used by a kept generation (the five newest are kept)"
+		echo "$ngrok is still used by a kept generation (gc.keep, 5 by default)"
 	else
 		echo "$ngrok is gone"
 	fi

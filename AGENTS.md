@@ -92,7 +92,8 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   `nix eval` (ADR-0009), narinfo closures, `nix` behind the `Nix` trait
   (tests use `Fake`), and the internal-json log. `crates/nx-shim`: the shim
   every exposed command is a hard link to (std only). `shell/`: the PATH
-  snippets an image installs.
+  snippets an image installs. `crates/nx-http`: the ureq agent and retry
+  policy both tiers download with.
 - `spike/`: throwaway scripts that answer a design question (M0). Their
   results go into `docs/design.md`; the script can go once they have.
 - `testdata/`: nx 0.x's recorded Nix internal-json logs, kept for the M6

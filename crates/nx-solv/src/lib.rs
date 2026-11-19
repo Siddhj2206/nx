@@ -68,6 +68,10 @@ pub struct Package {
     pub summary: String,
     /// `name-version-release.src.rpm`.
     pub source: String,
+    /// The source package's name (`wayland` for `wayland-devel`) and its
+    /// `version-release`, as the metadata records them.
+    pub source_name: String,
+    pub source_evr: String,
     pub license: String,
     pub url: String,
     /// Path relative to the repo base (`Packages/l/…rpm`).
@@ -84,22 +88,6 @@ impl Package {
     pub fn nevra(&self) -> String {
         format!("{}-{}.{}", self.name, self.evr, self.arch)
     }
-
-    /// The source package's name: `wayland` for `wayland-devel`.
-    pub fn source_name(&self) -> &str {
-        source_name(&self.source)
-    }
-}
-
-/// `wayland-1.24.0-1.fc45.src.rpm` → `wayland`.
-pub fn source_name(source: &str) -> &str {
-    let stem = source
-        .strip_suffix(".src.rpm")
-        .or_else(|| source.strip_suffix(".nosrc.rpm"))
-        .unwrap_or(source);
-    let mut parts = stem.rsplitn(3, '-');
-    let (_release, _version) = (parts.next(), parts.next());
-    parts.next().unwrap_or(stem)
 }
 
 /// The outcome of a solve.
@@ -412,8 +400,28 @@ impl Pool {
             } else {
                 String::new()
             };
+            // libsolv leaves the source name and evr out when they are the
+            // package's own, as solvable_lookup_sourcepkg does.
+            let source_id = |key: u32, own: sys::Id| match sys::solvable_lookup_id(s, key as i32) {
+                0 => own,
+                id => id,
+            };
+            let source_evr = owned(sys::pool_id2str(
+                p,
+                source_id(sys::SOLVABLE_SOURCEEVR, (*s).evr),
+            ));
+            // A source package's file name has no epoch.
+            let source_evr = match source_evr.split_once(':') {
+                Some((epoch, rest)) if epoch.bytes().all(|b| b.is_ascii_digit()) => rest.to_owned(),
+                _ => source_evr,
+            };
             Package {
                 id,
+                source_name: owned(sys::pool_id2str(
+                    p,
+                    source_id(sys::SOLVABLE_SOURCENAME, (*s).name),
+                )),
+                source_evr,
                 name: owned(sys::pool_id2str(p, (*s).name)),
                 evr: owned(sys::pool_id2str(p, (*s).evr)),
                 arch: owned(sys::pool_id2str(p, (*s).arch)),

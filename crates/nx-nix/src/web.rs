@@ -1,16 +1,13 @@
 //! HTTP for the tool tier: the channel, the package list and narinfos.
 
 use std::io::Read;
-use std::time::Duration;
 
+use nx_http::{ATTEMPTS, ureq};
 use ureq::ResponseExt;
 
 use crate::{Error, Result};
 
-/// Attempts per request: one reset connection shouldn't fail a command.
-const ATTEMPTS: u32 = 3;
-
-/// HTTP over ureq, with the system's trust store.
+/// HTTP over ureq, with nx's agent and retry policy ([`nx_http`]).
 #[derive(Clone)]
 pub struct Web(ureq::Agent);
 
@@ -22,18 +19,7 @@ impl Default for Web {
 
 impl Web {
     pub fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            .user_agent(concat!("nx/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(600)))
-            .http_status_as_error(false)
-            .tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                    .build(),
-            )
-            .build();
-        Self(config.into())
+        Self(nx_http::agent(false))
     }
 
     /// GETs `url`, retrying a transient failure. `Ok(None)` for a 404 or
@@ -48,14 +34,12 @@ impl Web {
             match self.0.get(url).call() {
                 Ok(r) if r.status().is_success() => return Ok(Some(r)),
                 Ok(r) if matches!(r.status().as_u16(), 403 | 404) => return Ok(None),
-                Ok(r)
-                    if attempt < ATTEMPTS
-                        && (r.status().is_server_error() || r.status() == 429) => {}
+                Ok(r) if attempt < ATTEMPTS && nx_http::transient_status(r.status().as_u16()) => {}
                 Ok(r) => return Err(fail(format!("HTTP {}", r.status()))),
-                Err(e) if attempt < ATTEMPTS && transient(&e) => {}
+                Err(e) if attempt < ATTEMPTS && nx_http::transient(&e) => {}
                 Err(e) => return Err(fail(e.to_string())),
             }
-            std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+            nx_http::back_off(attempt);
             attempt += 1;
         }
     }
@@ -86,11 +70,4 @@ impl Web {
         })?;
         Ok(Box::new(r.into_body().into_reader()))
     }
-}
-
-fn transient(e: &ureq::Error) -> bool {
-    matches!(
-        e,
-        ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed
-    )
 }

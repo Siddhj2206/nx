@@ -31,33 +31,58 @@ pub fn lines(body: &str) -> Vec<String> {
 }
 
 /// Removes what macros append to a command and which changes nothing about
-/// what it does here: output redirections to `/dev/null` and `|| :`.
+/// what it does here: `|| :` or `|| true`, and redirections of its output
+/// to `/dev/null` (`>/dev/null`, `2> /dev/null`, `&>/dev/null`, `2>&1`), in
+/// any order and spacing.
 pub fn strip_noise(line: &str) -> &str {
-    const NOISE: [&str; 12] = [
-        "||:",
-        "|| :",
-        "|| true",
-        "||true",
-        ">/dev/null 2>&1",
-        "> /dev/null 2>&1",
-        "&>/dev/null",
-        "&> /dev/null",
-        "2>/dev/null",
-        "2> /dev/null",
-        ">/dev/null",
-        "> /dev/null",
-    ];
     let mut line = line.trim();
     loop {
         let before = line;
-        for noise in NOISE {
-            if let Some(rest) = line.strip_suffix(noise) {
-                line = rest.trim_end();
-            }
-        }
+        line = strip_or_true(line);
+        line = strip_redirect(line);
         if line == before {
             return line;
         }
+    }
+}
+
+/// `cmd || :` or `cmd || true` → `cmd`.
+fn strip_or_true(line: &str) -> &str {
+    for word in [":", "true"] {
+        if let Some(rest) = line.strip_suffix(word)
+            && let Some(rest) = rest.trim_end().strip_suffix("||")
+        {
+            return rest.trim_end();
+        }
+    }
+    line
+}
+
+/// One trailing `[n|&]>[ ]/dev/null` or `[n]>&m`, if there is one.
+fn strip_redirect(line: &str) -> &str {
+    if let Some(rest) = line.strip_suffix("/dev/null")
+        && let Some(rest) = rest.trim_end().strip_suffix('>')
+    {
+        return drop_fd(rest.strip_suffix('&').unwrap_or(rest));
+    }
+    if let Some((rest, fd)) = line.rsplit_once(">&")
+        && !fd.is_empty()
+        && fd.bytes().all(|b| b.is_ascii_digit())
+    {
+        return drop_fd(rest);
+    }
+    line
+}
+
+/// What comes before a redirection, less its file descriptor: digits
+/// right before `>` are one only as a word of their own (`cmd 2>`, not
+/// `cmd12>`).
+fn drop_fd(rest: &str) -> &str {
+    let bare = rest.trim_end_matches(|c: char| c.is_ascii_digit());
+    if bare.len() < rest.len() && (bare.is_empty() || bare.ends_with(char::is_whitespace)) {
+        bare.trim_end()
+    } else {
+        rest.trim_end()
     }
 }
 
@@ -147,6 +172,16 @@ mod tests {
             "systemctl stop x.service"
         );
         assert_eq!(strip_noise("ldconfig"), "ldconfig");
+        for line in [
+            "x --y >/dev/null 2>/dev/null",
+            "x --y &> /dev/null ||true",
+            "x --y 2>&1 >/dev/null || :",
+            "x --y 1>/dev/null 2>&1",
+        ] {
+            assert_eq!(strip_noise(line), "x --y", "{line}");
+        }
+        assert_eq!(strip_noise("echo a12>&1"), "echo a12");
+        assert_eq!(strip_noise("x ||y"), "x ||y");
     }
 
     #[test]

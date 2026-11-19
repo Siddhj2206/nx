@@ -11,10 +11,6 @@ use crate::lockfile::Lock;
 use crate::state::{self, State};
 use crate::{Error, Result};
 
-/// Generations kept beyond the ones deployed images need, newest first, so
-/// `nx rollback` still has somewhere to go.
-pub const RETAIN: usize = 5;
-
 /// One generation's lockfile, for the questions that don't need the rest.
 pub fn read_lock(state: &State, number: u32) -> Result<Lock> {
     let path = state
@@ -100,9 +96,9 @@ pub struct GcPlan {
 }
 
 /// Generations to keep: the current one, the newest for each deployed
-/// digest (booted, staged and rollback), and the [`RETAIN`] newest. Those a
-/// newer nx wrote are never dropped.
-pub fn gc_plan(state: &State, deployed: &[String]) -> Result<GcPlan> {
+/// digest (booted, staged and rollback), and the `keep` newest (the
+/// manifest's `gc.keep`). Those a newer nx wrote are never dropped.
+pub fn gc_plan(state: &State, deployed: &[String], keep_newest: usize) -> Result<GcPlan> {
     let all = locks(state)?;
     let mut keep: BTreeSet<u32> = state.generations()?.into_iter().collect();
     let readable: HashSet<u32> = all.iter().map(|(n, _)| *n).collect();
@@ -116,7 +112,7 @@ pub fn gc_plan(state: &State, deployed: &[String]) -> Result<GcPlan> {
                 .map(|(n, _)| *n),
         );
     }
-    keep.extend(all.iter().rev().take(RETAIN).map(|(n, _)| *n));
+    keep.extend(all.iter().rev().take(keep_newest).map(|(n, _)| *n));
     let drop = all
         .iter()
         .map(|(n, _)| *n)
@@ -219,11 +215,11 @@ mod tests {
             generation(&state, n, Some("sha256:new"), &[])?;
         }
         state.set_current(9)?;
-        let plan = gc_plan(&state, &["sha256:new".into(), "sha256:old".into()])?;
+        let plan = gc_plan(&state, &["sha256:new".into(), "sha256:old".into()], 5)?;
         assert_eq!(plan.keep, vec![1, 5, 6, 7, 8, 9]);
         assert_eq!(plan.drop, vec![2, 3, 4]);
         // With the old image no longer deployed, 1 goes too.
-        let plan = gc_plan(&state, &["sha256:new".into()])?;
+        let plan = gc_plan(&state, &["sha256:new".into()], 5)?;
         assert_eq!(plan.drop, vec![1, 2, 3, 4]);
         Ok(())
     }
@@ -236,7 +232,7 @@ mod tests {
             generation(&state, n, Some("sha256:x"), &[])?;
         }
         state.set_current(1)?;
-        let plan = gc_plan(&state, &[])?;
+        let plan = gc_plan(&state, &[], 5)?;
         assert!(plan.keep.contains(&1));
         assert!(!plan.drop.contains(&1));
         Ok(())

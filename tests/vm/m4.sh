@@ -12,7 +12,9 @@ id tester2 >/dev/null 2>&1 || useradd -m -G wheel tester2
 setfacl -R -m g:wheel:rwX,d:g:wheel:rwX /var/lib/nx
 
 # Services: install, run, remove.
-as tester "nx add syncthing"
+# Fedora's syncthing (its units) rather than nixpkgs': its metadata shows no
+# unit, so routing alone would pick the tool tier.
+as tester "nx add --host syncthing"
 [[ -x /usr/bin/syncthing ]] || fail "syncthing was not installed"
 systemctl cat syncthing@.service >/dev/null || fail "syncthing@.service is not visible"
 systemctl start syncthing@tester || fail "the instance would not start"
@@ -41,7 +43,7 @@ as tester "nx remove memcached"
 # The second administrator reuses the shared cache instead of downloading.
 [[ -d /var/lib/nx/cache ]] || fail "no shared cache"
 start=$(date +%s)
-as tester2 "nx add syncthing"
+as tester2 "nx add --host syncthing"
 (($(date +%s) - start < 20)) || fail "tester2 appears to have re-downloaded metadata"
 as tester2 "nx remove syncthing"
 echo "m4: ok"

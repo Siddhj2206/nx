@@ -103,11 +103,15 @@ fn run(runner: &dyn Runner, program: &str, args: &[&str], s: &mut Services) -> O
 
 /// The units of `scope` in `want` that are well-formed and shipped by the
 /// extension at `ext`.
-fn shipped(ext: &Path, scope: Scope, want: &[UnitRef], s: &mut Services) -> Vec<String> {
-    let dir = match scope {
+fn unit_dir(scope: Scope) -> &'static str {
+    match scope {
         Scope::System => "usr/lib/systemd/system",
         Scope::User => "usr/lib/systemd/user",
-    };
+    }
+}
+
+fn shipped(ext: &Path, scope: Scope, want: &[UnitRef], s: &mut Services) -> Vec<String> {
+    let dir = unit_dir(scope);
     let mut out: Vec<String> = Vec::new();
     for u in want.iter().filter(|u| u.scope == scope) {
         if !valid_unit(&u.name) {
@@ -134,6 +138,26 @@ fn shipped(ext: &Path, scope: Scope, want: &[UnitRef], s: &mut Services) -> Vec<
         }
     }
     out
+}
+
+/// The units among `names` whose file has an `[Install]` section: the
+/// ones `systemctl preset` can enable. An alias is read through to its
+/// unit in the same directory.
+fn installable(ext: &Path, scope: Scope, names: Vec<String>) -> Vec<String> {
+    let dir = ext.join(unit_dir(scope));
+    names
+        .into_iter()
+        .filter(|n| {
+            let mut path = dir.join(n.replace("@*", "@"));
+            if let Ok(target) = std::fs::read_link(&path)
+                && let Some(name) = target.file_name()
+            {
+                path = dir.join(name);
+            }
+            std::fs::read_to_string(&path)
+                .is_ok_and(|text| text.lines().any(|l| l.trim() == "[Install]"))
+        })
+        .collect()
 }
 
 /// The uids with a running user manager.
@@ -305,17 +329,18 @@ pub(crate) fn start(runner: &dyn Runner, new_ext: &Path, t: &Transition, s: &mut
         }
     }
 
-    let system = shipped(new_ext, Scope::System, &t.preset, s);
+    // A unit with no [Install] section (polkit.service) can't be enabled,
+    // and systemctl preset fails on it; the macros skip it, and so does
+    // this.
+    let system = installable(
+        new_ext,
+        Scope::System,
+        shipped(new_ext, Scope::System, &t.preset, s),
+    );
     if !system.is_empty() {
         let mut args = vec!["preset"];
         args.extend(system.iter().map(String::as_str));
-        // A unit with no [Install] section (polkit.service) can't be
-        // enabled; the macros hide that, and so does this.
-        match sh(runner, "systemctl", &args) {
-            Ok(out) if out.success || out.stderr.contains("no installation config") => {}
-            Ok(out) => s.warnings.push(problem("systemctl", &args, &out)),
-            Err(e) => s.warnings.push(format!("systemctl: can't run it: {e}")),
-        }
+        run(runner, "systemctl", &args, s);
         // The preset says whether the unit is wanted; a package installed
         // live is wanted now, not at the next boot. A template has no
         // instance to start.
@@ -333,15 +358,15 @@ pub(crate) fn start(runner: &dyn Runner, new_ext: &Path, t: &Transition, s: &mut
             }
         }
     }
-    let user = shipped(new_ext, Scope::User, &t.preset, s);
+    let user = installable(
+        new_ext,
+        Scope::User,
+        shipped(new_ext, Scope::User, &t.preset, s),
+    );
     if !user.is_empty() {
         let mut args = vec!["--global", "preset"];
         args.extend(user.iter().map(String::as_str));
-        match sh(runner, "systemctl", &args) {
-            Ok(out) if out.success || out.stderr.contains("no installation config") => {}
-            Ok(out) => s.warnings.push(problem("systemctl", &args, &out)),
-            Err(e) => s.warnings.push(format!("systemctl: can't run it: {e}")),
-        }
+        run(runner, "systemctl", &args, s);
         for n in user.iter().filter(|n| !n.contains('@')) {
             if state(runner, &["--global", "is-enabled", n]) == "enabled" {
                 s.events
