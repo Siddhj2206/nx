@@ -214,6 +214,10 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   deployment's own tree; only the booted image's generation is activated.
 - A scriptlet allowance (`[[scriptlets]]`) is dropped by `nx remove` when its
   package leaves.
+- `environment.d` snippets with `${PATH}` belong in `/usr/lib/environment.d`
+  only: pam_env (pam 1.7 with libeconf) reads `/etc/environment.d/*.conf` as
+  drop-ins of `/etc/environment`, unexpanded, and a login's PATH becomes the
+  literal `${PATH}:…` (no `bash`, no `grep`).
 
 - Fedora's nix ships only `nix`: no `nix-store`, `nix-env` or `nix-build`.
   Realise with `nix build <path> --out-link <link>` (an indirect root that

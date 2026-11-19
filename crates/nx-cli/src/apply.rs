@@ -275,7 +275,14 @@ impl<'m> Session<'m> {
         let mut files = self.fetch(ui, all)?;
         let host = self.unpack(&guard, all, &mut files)?;
         let store = self.state.store();
-        let image_only = image_only(&host, &|sha| store.path(sha));
+        let asked = |name: &str| {
+            manifest
+                .host
+                .packages
+                .iter()
+                .any(|s| s.split('@').next() == Some(name))
+        };
+        let image_only = image_only(&host, &asked, &|sha| store.path(sha));
         if !image_only.is_empty() {
             return Err(image_hint(&image_only));
         }
@@ -539,9 +546,14 @@ impl<'m> Session<'m> {
     }
 }
 
-/// What only the image can use, by the directory a package ships: content
-/// read before `systemd-sysext` merges anything, or loaded into the kernel.
+/// What only the image can use, by the directory a package ships (as the
+/// RPM names it: the kernel's are under `/lib`): content read before
+/// `systemd-sysext` merges anything, or loaded into the kernel.
 const IMAGE_ONLY: &[(&str, &str)] = &[
+    (
+        "lib/modules",
+        "ships kernel modules, which only the image's kernel can load",
+    ),
     (
         "usr/lib/modules",
         "ships kernel modules, which only the image's kernel can load",
@@ -556,13 +568,17 @@ const IMAGE_ONLY: &[(&str, &str)] = &[
     ),
 ];
 
-/// The packages of `host` that only work from the image, with the reason;
-/// `root` is where a package's files are.
+/// The packages of `host` the manifest names (`asked`) that only work
+/// from the image, with the reason; `root` is where a package's files are.
+/// A dependency with such content (memcached's `memcached-selinux`) is
+/// left to the scriptlet translator, whose refusal an allowance can lift.
 fn image_only(
     host: &[LockedPackage],
+    asked: &dyn Fn(&str) -> bool,
     root: &dyn Fn(&str) -> PathBuf,
 ) -> Vec<(String, &'static str)> {
     host.iter()
+        .filter(|p| asked(&p.name))
         .filter_map(|p| {
             let dir = root(&p.sha256);
             IMAGE_ONLY
@@ -883,7 +899,7 @@ mod tests {
     fn kernel_modules_get_the_image_hint() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("nx-image-only-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("kmod/usr/lib/modules/7.3.3/extra"))?;
+        std::fs::create_dir_all(dir.join("kmod/lib/modules/7.3.3/extra"))?;
         std::fs::create_dir_all(dir.join("devel/usr/include"))?;
         std::fs::create_dir_all(dir.join("empty/usr/lib/modules"))?;
         let package = |name: &str| LockedPackage {
@@ -893,8 +909,14 @@ mod tests {
             sha256: name.into(),
             requested: Vec::new(),
         };
-        let host = [package("kmod"), package("devel"), package("empty")];
-        let found = image_only(&host, &|sha| dir.join(sha));
+        std::fs::create_dir_all(dir.join("dep/usr/share/selinux/packages/x.pp"))?;
+        let host = [
+            package("kmod"),
+            package("devel"),
+            package("empty"),
+            package("dep"),
+        ];
+        let found = image_only(&host, &|n| n != "dep", &|sha| dir.join(sha));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             image_hint(&found).to_string(),

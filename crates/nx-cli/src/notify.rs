@@ -42,6 +42,8 @@ impl Notifier for Busctl {
         let out = Command::new("busctl")
             .args([
                 "--user",
+                // The expiry, -1, would read as an option.
+                "--",
                 "call",
                 "org.freedesktop.Notifications",
                 "/org/freedesktop/Notifications",
