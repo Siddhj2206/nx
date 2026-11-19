@@ -96,6 +96,9 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
         for sha in &store {
             state.store().remove(guard, sha)?;
         }
+        // What an earlier gc set aside: removable now if this is root
+        // (nx sync runs gc as root every day).
+        state.purge_trash(guard);
     }
     Ok((plan.drop, store.len(), plan.keep))
 }

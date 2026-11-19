@@ -297,7 +297,7 @@ impl Store {
         if !valid {
             return Err(Error::Invalid(format!("not a SHA-256: {sha256:?}")));
         }
-        remove_tree(&self.path(sha256))
+        discard(&self.path(sha256))
     }
 
     /// What the package's signed header said about its scriptlets and
@@ -477,6 +477,49 @@ pub(crate) fn remove_tree(dir: &Path) -> Result<()> {
         path: dir.to_owned(),
         source,
     })
+}
+
+/// Removes `dir`, or, when this user can't (a tree root built: `nx sync`
+/// runs as root, and a package's directory modes leave wheel's ACL mask
+/// without write), renames it to a `.trash-` name beside it, which every
+/// listing skips, for [`State::purge_trash`] as root to finish. Renaming
+/// within the same directory needs write access only to the parent.
+pub(crate) fn discard(dir: &Path) -> Result<()> {
+    match remove_tree(dir) {
+        Err(Error::Write { source, .. })
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let trash = dir.with_file_name(format!(".trash-{name}-{}", std::process::id()));
+            rename(dir, &trash)
+        }
+        other => other,
+    }
+}
+
+impl State {
+    /// Removes what [`discard`] couldn't, as far as this user can: the
+    /// `.trash-` entries among the generations and in the store. Needs the
+    /// state lock. Returns how many are left.
+    pub fn purge_trash(&self, _lock: &Lock) -> usize {
+        let mut left = 0;
+        for dir in [self.generations_dir(), self.store_dir()] {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().starts_with(".trash-")
+                    && remove_tree(&e.path()).is_err()
+                {
+                    left += 1;
+                }
+            }
+        }
+        left
+    }
 }
 
 fn make_writable(dir: &Path) {

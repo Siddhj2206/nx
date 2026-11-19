@@ -47,20 +47,33 @@ unfree)
 	echo "unfree: ok"
 	;;
 gc)
-	ngrok=$(cat /var/lib/nx/generations/*/shims/ngrok 2>/dev/null | head -1)
+	ngrok=""
+	for shim in /var/lib/nx/generations/*/shims/ngrok; do
+		[[ -e $shim ]] && ngrok=$(<"$shim") && break
+	done
 	ngrok=${ngrok%/bin/ngrok}
 	[[ -n $ngrok ]] || fail "no generation has ngrok; run the unfree phase first"
 	if as tester "nx list" | grep -q '^  ngrok '; then
 		as tester "nx remove ngrok"
 	fi
 	grep -q 'ngrok' /var/lib/nx/current/manifest.toml && fail "the allowance stayed in the manifest"
-	# Older generations still root ngrok: keep only what gc must keep. As root:
-	# generations nx-sync.service built (as root) aren't removable by wheel.
-	nx gc 2>&1 | tee /tmp/m6-gc.txt
+	# A wheel user's gc: generations nx-sync.service built as root can't be
+	# removed by tester, so gc sets them aside for root's next gc.
+	as tester "nx gc" 2>&1 | tee /tmp/m6-gc.txt
+	for g in /var/lib/nx/generations/[0-9]*; do
+		[[ -e $g/lock.toml ]] || fail "$g is left without its lockfile"
+	done
 	if [[ -e $ngrok ]]; then
-		echo "$ngrok is still rooted by a kept generation (the five newest are kept)"
+		grep -lq "$ngrok" /var/lib/nx/generations/[0-9]*/lock.toml ||
+			fail "$ngrok survived nix store gc with no generation using it"
+		echo "$ngrok is still used by a kept generation (the five newest are kept)"
 	else
 		echo "$ngrok is gone"
+	fi
+	nx gc >/dev/null
+	if compgen -G '/var/lib/nx/generations/.trash-*' >/dev/null ||
+		compgen -G '/var/lib/nx/store/.trash-*' >/dev/null; then
+		fail "root's nx gc left what tester's set aside"
 	fi
 	bare rg --version >/dev/null || fail "gc broke ripgrep"
 	grep -q 'freed\|nix store gc' /tmp/m6-gc.txt || fail "nx gc did not run nix store gc"

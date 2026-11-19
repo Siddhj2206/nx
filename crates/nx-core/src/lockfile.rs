@@ -1,5 +1,6 @@
 //! `lock.toml`: what nx resolved the manifest to, for one image digest.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,11 @@ pub struct Lock {
     /// release yet). `nx sync` tries them again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Why `nx add` put each manifest entry in its tier, keyed as the
+    /// manifest names it. Carried from generation to generation; an entry
+    /// added before nx recorded reasons has none.
+    #[serde(default, rename = "route", skip_serializing_if = "BTreeMap::is_empty")]
+    pub routes: BTreeMap<String, String>,
     #[serde(default, rename = "repo")]
     pub repos: Vec<LockedRepo>,
     #[serde(default, rename = "host")]
@@ -142,6 +148,7 @@ impl Lock {
             parent: None,
             pending: false,
             skipped: Vec::new(),
+            routes: BTreeMap::new(),
             repos: Vec::new(),
             host: Vec::new(),
             tool: None,
@@ -230,8 +237,12 @@ mod tests {
                 unfree: false,
             }],
         });
+        lock.routes.insert("jq".into(), "a standalone tool".into());
+        lock.routes
+            .insert("pkgconfig(x11)".into(), "a file, provide or repo".into());
         let text = lock.to_toml()?;
         assert!(text.contains("[[host]]"), "{text}");
+        assert!(text.contains("[route]"), "{text}");
         assert!(text.contains("[[tool.package]]"), "{text}");
         assert_eq!(Lock::parse(&text, Path::new("l"))?, lock);
         assert_eq!(

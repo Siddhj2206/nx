@@ -227,8 +227,10 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   sets `XDG_DATA_DIRS`: `dev/vm-install` bind-mounts a copy of
   `/usr/share/fish/vendor_conf.d` for `nx.fish`.
 - Generations `nx-sync.service` builds as root have extension directories
-  without wheel's ACL, so a wheel user's `nx gc` can't remove them yet; the
-  M6 VM test runs `nx gc` as root.
+  without wheel's ACL (package modes cut the ACL mask), so a wheel user
+  can't delete them: `state::discard` renames them to `.trash-*` beside
+  themselves (renaming needs write access to the parent only), and the next
+  gc as root (`nx sync`'s) purges them. Every listing skips dot names.
 
 Nix log pitfalls from nx 0.x:
 

@@ -155,7 +155,7 @@ pub fn remove_generation(state: &State, _lock: &state::Lock, number: u32) -> Res
             "generation {number} is current and cannot be removed"
         )));
     }
-    state::remove_tree(&state.generations_dir().join(number.to_string()))
+    state::discard(&state.generations_dir().join(number.to_string()))
 }
 
 #[cfg(test)]

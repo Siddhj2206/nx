@@ -3,7 +3,7 @@
 //! tool tier's commands, assemble. Shared by every command that changes
 //! the manifest.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -47,6 +47,9 @@ pub struct Session<'m> {
     /// Tool-tier packages this command adds: their commands must not
     /// clash ([`crate::tool::check`]).
     pub fresh_tools: Vec<String>,
+    /// Why each manifest entry is in its tier (`nx why`): the current
+    /// generation's, plus what this command routed.
+    pub routes: BTreeMap<String, String>,
     /// Resolve without preferring the current generation's builds
     /// (`nx upgrade`).
     unlocked: bool,
@@ -124,6 +127,10 @@ impl<'m> Session<'m> {
         let universe = host::load(ui, machine, refresh, &manifest)?;
         let keys = Keys::new(machine, &state, current.as_ref(), &manifest);
         let tool = current.as_ref().and_then(|g| g.lock.tool.clone());
+        let routes = current
+            .as_ref()
+            .map(|g| g.lock.routes.clone())
+            .unwrap_or_default();
         Ok(Self {
             machine,
             state,
@@ -137,6 +144,7 @@ impl<'m> Session<'m> {
             skipped: Vec::new(),
             tool,
             fresh_tools: Vec::new(),
+            routes,
             unlocked: false,
         })
     }
@@ -270,6 +278,12 @@ impl<'m> Session<'m> {
         let tool = self.expose(ui, manifest, &host, &image_root)?;
         let mut lock = self.lock(host)?;
         lock.tool = tool;
+        lock.routes = self
+            .routes
+            .iter()
+            .filter(|(entry, _)| manifest.has(entry))
+            .map(|(e, r)| (e.clone(), r.clone()))
+            .collect();
         let has_bins = lock
             .tool
             .as_ref()

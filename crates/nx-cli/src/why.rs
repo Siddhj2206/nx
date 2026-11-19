@@ -19,6 +19,8 @@ enum Owner {
         package: LockedPackage,
         current: u32,
         added: u32,
+        /// Why `nx add` put it in the host tier, if it was asked for.
+        route: Option<String>,
     },
     /// A tool-tier package, with the command asked about and the release.
     Tool {
@@ -27,6 +29,8 @@ enum Owner {
         release: String,
         current: u32,
         added: u32,
+        /// Why `nx add` put it in the tool tier.
+        route: Option<String>,
     },
     Image(Package),
 }
@@ -91,10 +95,12 @@ fn in_generation(state: &State, g: &Generation, what: &str) -> Result<Option<Own
         }
         added = n;
     }
+    let route = g.lock.routes.get(&package.name).cloned();
     Ok(Some(Owner::Host {
         package,
         current: g.number,
         added,
+        route,
     }))
 }
 
@@ -134,6 +140,7 @@ fn in_tool_tier(state: &State, g: &Generation, what: &str) -> Option<Owner> {
         release: tool.release.clone(),
         current: g.number,
         added,
+        route: g.lock.routes.get(&package.attr).cloned(),
     })
 }
 
@@ -168,6 +175,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             package,
             current,
             added,
+            route,
         } => {
             out.line(format_args!(
                 "{} {}",
@@ -184,7 +192,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             );
             out.row("Repo", &package.repo);
             let reason = if package.requested.contains(&package.name) {
-                "you added it".to_owned()
+                you_added(style, route.as_deref(), false)
             } else {
                 format!("needed by {}", package.requested.join(", "))
             };
@@ -197,6 +205,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             release,
             current,
             added,
+            route,
         } => {
             out.line(format_args!(
                 "{} {}",
@@ -221,11 +230,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             {
                 out.row("Runs", &c.path);
             }
-            let mut why = "you added it".to_owned();
-            if package.unfree {
-                why.push_str(&style.dim(" · unfree, allowed"));
-            }
-            out.row("Why", &why);
+            out.row("Why", &you_added(style, route.as_deref(), package.unfree));
             out.row("Generation", &generation_row(style, *current, *added));
         }
         Owner::Image(p) => {
@@ -246,6 +251,16 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
         }
     }
     out.blank();
+}
+
+/// `you added it · <why nx add routed it there>`. The recorded reason
+/// already says whether an unfree package was allowed.
+fn you_added(style: ui::Style, route: Option<&str>, unfree: bool) -> String {
+    match route {
+        Some(r) => format!("you added it {}", style.dim(&format!("· {r}"))),
+        None if unfree => format!("you added it {}", style.dim("· unfree, allowed")),
+        None => "you added it".to_owned(),
+    }
 }
 
 fn generation_row(style: ui::Style, current: u32, added: u32) -> String {
@@ -280,6 +295,7 @@ mod tests {
             },
             current: 3,
             added: 2,
+            route: None,
         };
         assert_eq!(
             text("/usr/include/ffi.h", &owner),
@@ -332,6 +348,7 @@ mod tests {
             release: "nixpkgs-26.11pre1122334.e21fec321d73".into(),
             current: 4,
             added: 4,
+            route: Some("a standalone tool".into()),
         };
         assert_eq!(
             text("rg", &owner),
@@ -344,7 +361,7 @@ mod tests {
                  \x20 Release     nixpkgs-26.11pre1122334.e21fec321d73\n\
                  \x20 Store       {rg}\n\
                  \x20 Runs        {rg}/bin/rg\n\
-                 \x20 Why         you added it\n\
+                 \x20 Why         you added it · a standalone tool\n\
                  \x20 Generation  4\n\
                  \n"
             )

@@ -106,6 +106,28 @@ pub fn plugs_in(name: &str, provides: &[String], requires: &[String]) -> Option<
 
 /// `python3.14` → `python3`, `java-21-openjdk` → `openjdk`, `gcc` → `gcc`:
 /// the name a toolchain goes by across versions.
+/// Whether a nixpkgs attribute or package name is a compiler, linker or
+/// interpreter (design, *Tool tier*: those never go there). nixpkgs names
+/// versions with digits and underscores (`go_1_23`, `python312`,
+/// `nodejs_22`, `lua5_4`, `gcc14`, `jdk21`), and has a few names of its own.
+pub fn nix_toolchain(name: &str) -> bool {
+    const NIX_ONLY: &[&str] = &[
+        "gnumake",
+        "jdk",
+        "gfortran",
+        "llvmPackages",
+        "rustc",
+        "gcc-unwrapped",
+    ];
+    let leaf = name.rsplit('.').next().unwrap_or(name);
+    let base = leaf.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_' || c == '.');
+    let base = base.strip_suffix("Packages").unwrap_or(base);
+    TOOLCHAINS.contains(&base)
+        || NIX_ONLY.contains(&base)
+        || NIX_ONLY.contains(&leaf)
+        || TOOLCHAINS.contains(&toolchain_base(leaf))
+}
+
 fn toolchain_base(name: &str) -> &str {
     if name.starts_with("java-") && name.contains("openjdk") {
         return "openjdk";
@@ -130,6 +152,36 @@ fn soname(provide: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_nixpkgs_toolchain_names() {
+        for t in [
+            "go",
+            "go_1_23",
+            "python312",
+            "python3",
+            "nodejs_22",
+            "lua5_4",
+            "gcc14",
+            "jdk21",
+            "gnumake",
+            "rustc",
+            "zig_0_13",
+            "clang_19",
+        ] {
+            assert!(nix_toolchain(t), "{t}");
+        }
+        for t in [
+            "ripgrep",
+            "gopls",
+            "rustup",
+            "golangci-lint",
+            "python3Packages.black",
+            "nodePackages.prettier",
+        ] {
+            assert!(!nix_toolchain(t), "{t}");
+        }
+    }
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()

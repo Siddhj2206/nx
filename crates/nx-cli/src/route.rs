@@ -33,6 +33,9 @@ pub struct Nixpkg {
     pub allowed: bool,
     /// Broken, or not available on this platform.
     pub broken: bool,
+    /// A compiler, linker or interpreter: never the tool tier unless asked
+    /// for with `--tool` (design, *Tool tier*).
+    pub toolchain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,10 +60,11 @@ pub fn host_only(spec: &str) -> bool {
 /// 2. `--tool` → tool, if nixpkgs has it;
 /// 3. in the image → host (nothing to install);
 /// 4. plugs into the system → host;
-/// 5. a usable nixpkgs package, unless `routing.cli_tools = "fedora"` → tool;
+/// 5. a usable nixpkgs package that isn't a toolchain, unless
+///    `routing.cli_tools = "fedora"` → tool;
 /// 6. an RPM → host;
-/// 7. a nixpkgs package that needs allowing (unfree) or can't build → refuse
-///    and say why;
+/// 7. a nixpkgs toolchain, or a package that needs allowing (unfree) or
+///    can't build → refuse and say why;
 /// 8. nothing → refuse, with names that are close.
 pub fn decide(
     spec: &str,
@@ -92,17 +96,27 @@ pub fn decide(
         }
     }
     if cli_tools == CliTools::Nix
-        && let Some(n) = nix.filter(|n| usable(n))
+        && let Some(n) = nix.filter(|n| usable(n) && !n.toolchain)
     {
         return tool(n, "a standalone tool");
     }
     if rpm.is_some() {
-        let why = if cli_tools == CliTools::Fedora {
+        let why = if nix.is_some_and(|n| n.toolchain) {
+            "a compiler, linker or interpreter"
+        } else if cli_tools == CliTools::Fedora {
             "a standalone tool; routing.cli_tools is fedora"
         } else {
             "a standalone tool nixpkgs doesn't have"
         };
         return Route::Host(why.into());
+    }
+    if let Some(n) = nix.filter(|n| n.toolchain) {
+        return Route::Refuse(format!(
+            "{} is a compiler, linker or interpreter, which nx takes from Fedora so it builds \
+             against the image's libraries, and no RPM is called {spec} (nx search {spec}); \
+             nx add --tool {spec} installs nixpkgs' all the same",
+            n.attr
+        ));
     }
     match nix {
         Some(n) => refuse_nix(n),
@@ -313,6 +327,37 @@ mod tests {
         assert_eq!(
             decide("ngrok", None, CliTools::Nix, None, Some(&ngrok), &[]),
             tool_route("ngrok", "a standalone tool; unfree, allowed")
+        );
+    }
+
+    #[test]
+    fn toolchains_stay_out_of_the_tool_tier_unless_forced() {
+        let go = Nixpkg {
+            toolchain: true,
+            ..nixpkg("go")
+        };
+        let golang = Rpm {
+            name: "golang".into(),
+            ..rpm(None)
+        };
+        assert!(matches!(
+            decide("go", None, CliTools::Nix, None, Some(&go), &[]),
+            Route::Refuse(m) if m.starts_with("go is a compiler")
+        ));
+        assert_eq!(
+            decide("go", None, CliTools::Nix, Some(&golang), Some(&go), &[]),
+            Route::Host("a compiler, linker or interpreter".into())
+        );
+        assert_eq!(
+            decide(
+                "go",
+                Some(Forced::Tool),
+                CliTools::Nix,
+                None,
+                Some(&go),
+                &[]
+            ),
+            tool_route("go", "--tool")
         );
     }
 

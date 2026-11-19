@@ -234,8 +234,25 @@ impl Tier {
         nx_nix::nix::realise(&self.nix, &plan.installables, &urls, &mut |note| {
             draw(ui, note);
         })
-        .context("realising the tool tier")
+        .with_context(|| realise_failed(&plan.build))
     }
+}
+
+/// What a failed realise says. A package no cache has was built here, and
+/// for an unfree one that is the vendor's download repackaged: the vendor
+/// may have an RPM repo or an installer that works without the build.
+fn realise_failed(built: &[String]) -> String {
+    if built.is_empty() {
+        return "realising the tool tier".to_owned();
+    }
+    let names = built.join(", ");
+    format!(
+        "realising the tool tier, which builds {names} here since no binary cache has \
+         {them}; if the vendor publishes an RPM repo, nx repo add <its .repo URL> and then \
+         nx add --host <its package> take it from there; otherwise use the vendor's \
+         installer",
+        them = if built.len() == 1 { "it" } else { "them" }
+    )
 }
 
 /// The catalog for a command that only reads (search, info): at the pinned
@@ -448,10 +465,14 @@ pub fn check(
             ));
         }
     }
+    // A new package whose command the image or the host tier has is
+    // refused (design, *Name ownership*) unless every such name is
+    // overridden: then it is added without them, since what comes first on
+    // PATH would run anyway.
     for attr in fresh {
-        let Some(p) = tool.package(attr) else {
+        if tool.package(attr).is_none() {
             continue;
-        };
+        }
         let hidden: Vec<&str> = exposure
             .hidden
             .iter()
@@ -461,19 +482,25 @@ pub fn check(
         if hidden.is_empty() {
             continue;
         }
-        let allowed = hidden.iter().all(|n| overrides.iter().any(|o| o == n));
-        if p.bins.is_empty() && !allowed {
-            problems.push(format!(
-                "{attr} would expose nothing: the image or the host tier already has {}, \
-                 and it comes first on PATH (--override {} adds it all the same)",
-                hidden.join(", "),
-                hidden.join(" --override ")
-            ));
-        } else {
+        let owned: Vec<&str> = hidden
+            .iter()
+            .copied()
+            .filter(|n| !overrides.iter().any(|o| o == n))
+            .collect();
+        if owned.is_empty() {
             ui.warn(format_args!(
-                "{attr}: {} not exposed; the image or the host tier has {}",
+                "{attr}: {} not exposed; the image or the host tier has {}, as you allowed",
                 hidden.join(", "),
                 if hidden.len() == 1 { "it" } else { "them" }
+            ));
+        } else {
+            problems.push(format!(
+                "{attr} has {}, which the image or the host tier already has (it comes first on \
+                 PATH, so nx can't expose {}); nx add {attr} --override {} adds it without {}",
+                owned.join(", "),
+                if owned.len() == 1 { "it" } else { "them" },
+                owned.join(" --override "),
+                if owned.len() == 1 { "it" } else { "them" },
             ));
         }
     }
@@ -718,7 +745,18 @@ mod tests {
     }
 
     #[test]
-    fn a_new_package_may_not_take_or_lose_everything() {
+    fn a_failed_build_points_to_the_vendor() {
+        assert_eq!(realise_failed(&[]), "realising the tool tier");
+        assert_eq!(
+            realise_failed(&["ngrok".into()]),
+            "realising the tool tier, which builds ngrok here since no binary cache has it; \
+             if the vendor publishes an RPM repo, nx repo add <its .repo URL> and then nx add \
+             --host <its package> take it from there; otherwise use the vendor's installer"
+        );
+    }
+
+    #[test]
+    fn a_new_package_may_not_take_or_lose_a_command() {
         let buf = crate::ui::SharedBuf::default();
         let mut ui = Ui::plain(crate::ui::SharedBuf::default(), buf.clone());
         let mut tool = three();
@@ -736,6 +774,27 @@ mod tests {
         assert_eq!(
             buf.text(),
             "  ! tig and gitFull both have scalar; gitFull's is exposed\n"
+        );
+        // One of its commands is the image's: refused, unless overridden.
+        let err = check(&mut ui, &tool, &e, &["gitFull".into()], None, &[])
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            err,
+            "gitFull has git, which the image or the host tier already has (it comes first on \
+             PATH, so nx can't expose it); nx add gitFull --override git adds it without it"
+        );
+        assert!(
+            check(
+                &mut ui,
+                &tool,
+                &e,
+                &["gitFull".into()],
+                None,
+                &["git".into()]
+            )
+            .is_ok()
         );
         // Everything it has, the image has.
         let mut tool = LockedTool {

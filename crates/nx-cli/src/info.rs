@@ -38,6 +38,8 @@ pub fn run(
             unfree: p.unfree,
             allowed: manifest.tool.unfree.contains(&p.pname),
             broken: p.broken || p.unavailable,
+            toolchain: nx_rpm::plugs::nix_toolchain(&p.attr)
+                || nx_rpm::plugs::nix_toolchain(&p.pname),
         })
         .as_ref(),
         &[],

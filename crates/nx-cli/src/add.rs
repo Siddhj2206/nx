@@ -98,6 +98,8 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
                 unfree: p.unfree,
                 allowed: opts.allow_unfree || manifest.tool.unfree.contains(&p.pname),
                 broken: p.broken || p.unavailable,
+                toolchain: nx_rpm::plugs::nix_toolchain(&p.attr)
+                    || nx_rpm::plugs::nix_toolchain(&p.pname),
             });
             if rpm.is_none() && nix.is_none() {
                 similar = catalog.similar(spec, 3);
@@ -113,9 +115,21 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         );
         match route {
             // Without the catalog, the solver has the last word on a name.
-            Route::Refuse(_) if !use_tool => fresh_host.push(spec.clone()),
-            Route::Host(_) => fresh_host.push(spec.clone()),
-            Route::Tool { attr, .. } => {
+            Route::Refuse(_) if !use_tool => {
+                let why = if tool::available() {
+                    "routing.cli_tools is fedora"
+                } else {
+                    "the image has no Nix"
+                };
+                session.routes.insert(spec.clone(), why.into());
+                fresh_host.push(spec.clone());
+            }
+            Route::Host(why) => {
+                session.routes.insert(spec.clone(), why);
+                fresh_host.push(spec.clone());
+            }
+            Route::Tool { attr, reason } => {
+                session.routes.insert(attr.clone(), reason);
                 if let Some(n) = nix.as_ref().filter(|n| n.unfree)
                     && !manifest.tool.unfree.contains(&n.pname)
                 {
