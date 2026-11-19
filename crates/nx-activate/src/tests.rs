@@ -233,6 +233,9 @@ fn a_forced_sysext_does_not_fall_back() -> Result<()> {
         "{err:?}"
     );
     assert_eq!(l.state.backend()?, None);
+    // Nothing was live before, so nothing is now: no current, no link.
+    assert_eq!(l.state.current_number()?, None);
+    assert!(std::fs::symlink_metadata(l.link()).is_err());
     Ok(())
 }
 

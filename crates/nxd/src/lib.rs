@@ -12,6 +12,27 @@ use std::path::PathBuf;
 use nx_activate::{Layout, Runner, System};
 use nx_core::State;
 
+/// Why a request was not carried out.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// polkit (or nxd, unable to ask it) said no.
+    #[error("{0}")]
+    Denied(String),
+    #[error("can't identify the caller: {0}")]
+    Peer(std::io::Error),
+    #[error(transparent)]
+    Request(#[from] nx_proto::Error),
+    #[error(transparent)]
+    Activate(#[from] nx_activate::Error),
+    #[error("{path}: {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
 /// The polkit action for making a generation live.
 pub const ACTION_ACTIVATE: &str = "org.nx.activate";
 
@@ -24,8 +45,8 @@ pub struct Peer {
 
 /// Decides whether a peer may do an action.
 pub trait Authorizer {
-    /// `Ok` to allow; `Err` carries what to tell the client.
-    fn check(&self, peer: Peer, action: &str) -> Result<(), String>;
+    /// `Ok` to allow; `Err(Error::Denied)` says what to tell the client.
+    fn check(&self, peer: Peer, action: &str) -> Result<()>;
 }
 
 /// Asks polkit through `pkcheck`, which lets the session's agent prompt
@@ -33,28 +54,29 @@ pub trait Authorizer {
 pub struct Polkit;
 
 impl Authorizer for Polkit {
-    fn check(&self, peer: Peer, action: &str) -> Result<(), String> {
+    fn check(&self, peer: Peer, action: &str) -> Result<()> {
         if peer.uid == 0 {
             return Ok(());
         }
         // pid alone can be reused; the start time pins the process.
-        let start = start_time(peer.pid).ok_or("can't identify the calling process")?;
+        let start = start_time(peer.pid)
+            .ok_or_else(|| Error::Denied("can't identify the calling process".into()))?;
         let subject = format!("{},{start},{}", peer.pid, peer.uid);
         let out = std::process::Command::new("pkcheck")
             .args(["--action-id", action, "--process", &subject])
             .arg("--allow-user-interaction")
             .output()
-            .map_err(|e| format!("can't run pkcheck: {e}"))?;
+            .map_err(|e| Error::Denied(format!("can't run pkcheck: {e}")))?;
         if out.status.success() {
             return Ok(());
         }
         let said = String::from_utf8_lossy(&out.stderr);
         let said = said.trim();
-        Err(if said.is_empty() {
+        Err(Error::Denied(if said.is_empty() {
             "not authorized".to_owned()
         } else {
             format!("not authorized: {said}")
-        })
+        }))
     }
 }
 

@@ -15,6 +15,11 @@ pub struct Lock {
     /// The image's `VERSION_ID`.
     pub release: String,
     pub arch: String,
+    /// The generation this one was built from (the current one at the
+    /// time), so `nx rollback` undoes a change even after earlier
+    /// rollbacks made the numbers say otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
     #[serde(default, rename = "repo")]
     pub repos: Vec<LockedRepo>,
     #[serde(default, rename = "host")]
@@ -55,6 +60,7 @@ impl Lock {
             image,
             release: release.to_owned(),
             arch: arch.to_owned(),
+            parent: None,
             repos: Vec::new(),
             host: Vec::new(),
         }

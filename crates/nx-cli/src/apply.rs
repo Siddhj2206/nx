@@ -301,6 +301,7 @@ impl<'m> Session<'m> {
             self.universe.arch(),
         );
         lock.host = host;
+        lock.parent = self.current.as_ref().map(|g| g.number);
         for l in &self.universe.repos {
             let added = self.keys.is_added(&l.repo.id);
             let keys = match self.keys.get(&l.repo) {

@@ -79,6 +79,9 @@ enum Command {
         /// the generation to go to (default: the one before the current)
         #[arg(value_name = "N")]
         generation: Option<u32>,
+        /// say which generation it would activate; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// a shell (or command) with the host tier on its paths
     Shell {
@@ -197,9 +200,10 @@ fn main() -> ExitCode {
         }
         Command::List => list::run(&mut ui),
         Command::Generations => generations::run(&mut ui),
-        Command::Rollback { generation } => {
-            machine().and_then(|m| rollback::run(&mut ui, &m, generation))
-        }
+        Command::Rollback {
+            generation,
+            dry_run,
+        } => machine().and_then(|m| rollback::run(&mut ui, &m, generation, dry_run)),
         Command::Shell { command } => shell::run(&mut ui, &command),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {
@@ -219,7 +223,13 @@ fn main() -> ExitCode {
         Command::Info { package, metadata } => metadata
             .load(&mut ui)
             .and_then(|u| info::run(&mut ui, &u, &package)),
-        Command::Status => status::run(&mut ui, &RpmOstree, Path::new("/"), Path::new("/sysroot")),
+        Command::Status => status::run(
+            &mut ui,
+            &RpmOstree,
+            &host::state(),
+            Path::new("/"),
+            Path::new("/sysroot"),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

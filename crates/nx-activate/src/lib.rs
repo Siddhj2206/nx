@@ -175,19 +175,26 @@ pub fn activate(
 }
 
 /// Labels, points `current` at `number`, links the extension and merges.
-/// A failed merge puts the previous generation back before returning.
+/// Any failure puts back what was there before: the previous generation
+/// (or no `current` and no link, for the first one), re-merged best-effort.
 fn sysext(layout: &Layout, runner: &dyn Runner, number: u32, valid: &Validated) -> Result<()> {
     label(layout, runner, &valid.sysext)?;
     let previous = layout.state.current_number()?;
     layout.state.set_current(number)?;
-    let merged = link(layout).and_then(|()| refresh(runner, true));
+    let merged = link(layout)
+        .and_then(|()| refresh(runner))
+        .and_then(|()| check_merged(runner));
     if let Err(e) = merged {
-        // Leave what was merged before in place: back to the old
-        // generation, and a best-effort re-merge of it.
-        if let Some(previous) = previous {
-            let _ = layout.state.set_current(previous);
-            let _ = refresh(runner, false);
+        match previous {
+            Some(previous) => {
+                let _ = layout.state.set_current(previous);
+            }
+            None => {
+                let _ = std::fs::remove_file(layout.link());
+                let _ = std::fs::remove_file(layout.state.root().join("current"));
+            }
         }
+        let _ = refresh(runner);
         return Err(e);
     }
     layout.state.set_backend(Backend::Sysext)?;
@@ -199,8 +206,12 @@ fn prefix(layout: &Layout, runner: &dyn Runner, number: u32) -> Result<()> {
     let link = layout.link();
     let linked = std::fs::symlink_metadata(&link).is_ok();
     if linked {
-        remove(&link)?;
-        refresh(runner, false)?;
+        std::fs::remove_file(&link).map_err(|source| Error::Io {
+            path: link.clone(),
+            source,
+        })?;
+        sync_dir(&layout.extensions)?;
+        refresh(runner)?;
     }
     layout.state.set_current(number)?;
     layout.state.set_backend(Backend::Prefix)?;
@@ -267,37 +278,31 @@ fn link(layout: &Layout) -> Result<()> {
         path: tmp.clone(),
         source,
     })?;
-    std::fs::rename(&tmp, &link).map_err(|source| Error::Io { path: link, source })
-}
-
-fn remove(path: &Path) -> Result<()> {
-    std::fs::remove_file(path).map_err(|source| Error::Io {
-        path: path.to_owned(),
+    std::fs::rename(&tmp, &link).map_err(|source| Error::Io {
+        path: link.clone(),
         source,
-    })
+    })?;
+    sync_dir(&layout.extensions)
 }
 
-/// `systemd-sysext refresh`, and, when `expect` is set, a check that nx's
-/// extension is the one merged over `/usr`. systemd 262 reloads the
-/// service manager itself.
-fn refresh(runner: &dyn Runner, expect: bool) -> Result<()> {
-    let run = |args: &[&str]| {
-        let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-        runner
-            .run("systemd-sysext", &args)
-            .map_err(|e| spawn("systemd-sysext", &e))
-    };
-    let out = run(&["refresh"])?;
-    if !out.success {
-        return Err(Error::Command {
+/// `systemd-sysext refresh`. systemd 262 reloads the service manager
+/// itself.
+fn refresh(runner: &dyn Runner) -> Result<()> {
+    let out = sysext_cmd(runner, &["refresh"])?;
+    if out.success {
+        Ok(())
+    } else {
+        Err(Error::Command {
             program: "systemd-sysext",
             detail: detail(&out),
-        });
+        })
     }
-    if !expect {
-        return Ok(());
-    }
-    let status = run(&["status", "--json=short"])?;
+}
+
+/// Checks nx's extension is the one merged over `/usr`: a refresh can
+/// succeed and merge nothing.
+fn check_merged(runner: &dyn Runner) -> Result<()> {
+    let status = sysext_cmd(runner, &["status", "--json=short"])?;
     if status.success && merged_over_usr(&status.stdout) {
         Ok(())
     } else {
@@ -306,6 +311,23 @@ fn refresh(runner: &dyn Runner, expect: bool) -> Result<()> {
             detail: "refresh succeeded but nx's extension is not merged over /usr".into(),
         })
     }
+}
+
+fn sysext_cmd(runner: &dyn Runner, args: &[&str]) -> Result<Output> {
+    let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+    runner
+        .run("systemd-sysext", &args)
+        .map_err(|e| spawn("systemd-sysext", &e))
+}
+
+/// Makes a rename or removal in `dir` durable.
+fn sync_dir(dir: &Path) -> Result<()> {
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|source| Error::Io {
+            path: dir.to_owned(),
+            source,
+        })
 }
 
 /// Whether `systemd-sysext status --json` lists `nx` under `/usr`.

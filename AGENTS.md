@@ -128,6 +128,11 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   read-only in the VM; `dev/vm-install` bind-mounts a copy (until reboot,
   run it again). An ssh login is not a local, active session, so the wheel
   rule can't allow it: the VM has a rule for `tester` (`dev/vm-test.rules`).
+- `nx rollback` follows `parent` in `lock.toml`, not the numbering: after a
+  rollback, the next generation is numbered past the abandoned ones.
+- nxd runs as root in a directory wheel can write: it writes `current`
+  and `backend` beside their names (`create_new` or a fresh symlink, never
+  a plain `write` that follows a planted link), flushes, then renames.
 - Run as root in the dev container, every file is root's, so a test of
   "someone else owns it" can't run there.
 - `setfiles -r` fails with "Not a directory" on a path through the `current`

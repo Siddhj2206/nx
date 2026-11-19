@@ -4,11 +4,17 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use nx_core::{Deployment, DeploymentSource, OsRelease};
+use nx_core::{Deployment, DeploymentSource, OsRelease, State};
 
 use crate::ui::Ui;
 
-pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, root: &Path, sysroot: &Path) -> Result<()> {
+pub fn run(
+    ui: &mut Ui,
+    source: &dyn DeploymentSource,
+    state: &State,
+    root: &Path,
+    sysroot: &Path,
+) -> Result<()> {
     let deployments = source
         .deployments()
         .context("reading deployments (is this a bootc system?)")?;
@@ -56,13 +62,20 @@ pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, root: &Path, sysroot: &Pa
         };
         s.row(key, &value);
     }
-    s.row(
-        "Host tier",
-        &st.dim("builds generations (nx add); activates from M3"),
-    );
+    s.row("Host tier", &host_tier(state, st));
     s.row("Tool tier", &st.dim("not built yet (M6)"));
     s.blank();
     Ok(())
+}
+
+/// The current generation and the backend that made it live.
+fn host_tier(state: &State, st: crate::ui::Style) -> String {
+    match (state.current_number(), state.backend()) {
+        (Ok(Some(n)), Ok(Some(backend))) => format!("generation {n} · {}", backend.name()),
+        (Ok(Some(n)), _) => format!("generation {n} {}", st.dim("· not made live")),
+        (Ok(None), _) => st.dim("nothing added yet"),
+        (Err(e), _) => st.yellow(&format!("unreadable: {e}")),
+    }
 }
 
 /// `sha256:92409d3fcf8435…` → `sha256:92409d3fcf84`, as short as nx 0.x
@@ -108,7 +121,14 @@ mod tests {
         let root = fake_root(tag, rollback_release)?;
         let out = SharedBuf::default();
         let mut ui = Ui::plain(out.clone(), SharedBuf::default());
-        let result = run(&mut ui, &Deployments::from_json(STATUS)?, &root, &root);
+        let state = State::new(root.join("var-lib-nx"));
+        let result = run(
+            &mut ui,
+            &Deployments::from_json(STATUS)?,
+            &state,
+            &root,
+            &root,
+        );
         let _ = std::fs::remove_dir_all(&root);
         result.map(|()| out.text())
     }
@@ -123,7 +143,7 @@ mod tests {
 
   Staged      none
   Rollback    45.20261117 from sha256:292ee1bfc6d4
-  Host tier   builds generations (nx add); activates from M3
+  Host tier   nothing added yet
   Tool tier   not built yet (M6)
 
 "

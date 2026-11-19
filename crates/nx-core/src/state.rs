@@ -140,15 +140,28 @@ impl State {
         }
     }
 
-    /// Records the backend in use, for `nx shell` and the next activation.
+    /// Records the backend in use, for `nx shell`. Written beside its name
+    /// with `create_new` (which never follows a symlink: nxd runs this as
+    /// root in a directory others can write) and flushed before the rename.
     pub fn set_backend(&self, backend: Backend) -> Result<()> {
+        use std::io::Write;
         let path = self.backend_file();
         let tmp = path.with_file_name(".backend.part");
-        std::fs::write(&tmp, format!("{}\n", backend.name())).map_err(|source| Error::Write {
+        let write = |source| Error::Write {
             path: tmp.clone(),
             source,
-        })?;
-        rename(&tmp, &path)
+        };
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(write)?;
+        file.write_all(format!("{}\n", backend.name()).as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(write)?;
+        rename(&tmp, &path)?;
+        sync_dir(&self.root)
     }
 
     fn backend_file(&self) -> PathBuf {

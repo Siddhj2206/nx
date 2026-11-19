@@ -14,7 +14,6 @@ use crate::{Error, Layout, Result};
 /// A generation that passed.
 #[derive(Debug)]
 pub struct Validated {
-    pub generation: Generation,
     /// The extension tree's real path (no symlink in it).
     pub sysext: PathBuf,
 }
@@ -42,19 +41,21 @@ pub fn validate(layout: &Layout, number: u32, allowed: &[u32]) -> Result<Validat
             )));
         }
     }
-    let generation = Generation::read(&layout.state, number)
-        .map_err(|e| refuse(format!("can't read it: {e}")))?;
+    Generation::read(&layout.state, number).map_err(|e| refuse(format!("can't read it: {e}")))?;
     let sysext = root.join("sysext");
     let m = std::fs::symlink_metadata(&sysext)
         .map_err(|e| refuse(format!("no extension tree: {e}")))?;
-    if !m.is_dir() {
-        return Err(refuse("its extension tree is not a directory".into()));
+    if !m.is_dir() || !owned(m.uid()) || m.mode() & 0o002 != 0 {
+        return Err(refuse(
+            "its extension tree must be a directory of root, nx or you, not writable by others"
+                .into(),
+        ));
     }
     let sysext = std::fs::canonicalize(&sysext)
         .map_err(|e| refuse(format!("can't resolve {}: {e}", sysext.display())))?;
     walk(&sysext, &owned).map_err(refuse)?;
     check_release(layout, &sysext).map_err(refuse)?;
-    Ok(Validated { generation, sysext })
+    Ok(Validated { sysext })
 }
 
 fn walk(dir: &Path, owned: &dyn Fn(u32) -> bool) -> Result<(), String> {

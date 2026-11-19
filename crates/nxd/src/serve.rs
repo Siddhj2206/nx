@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use nx_proto::{Request, Response};
 
-use crate::{ACTION_ACTIVATE, Context, Peer};
+use crate::{ACTION_ACTIVATE, Context, Error, Peer, Result};
 
 /// A client that connects and says nothing must not hold nxd forever.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,7 +36,9 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
 pub fn handle(stream: UnixStream, ctx: &Context) {
     let response = match respond(&stream, ctx) {
         Ok(r) => r,
-        Err(message) => Response::Failed { message },
+        Err(e) => Response::Failed {
+            message: e.to_string(),
+        },
     };
     if let Response::Failed { message } = &response {
         eprintln!("nxd: refused or failed: {message}");
@@ -48,12 +50,12 @@ pub fn handle(stream: UnixStream, ctx: &Context) {
     let _ = out.flush();
 }
 
-fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response, String> {
-    let peer = peer(stream).map_err(|e| format!("can't identify the caller: {e}"))?;
+fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
+    let peer = peer(stream).map_err(Error::Peer)?;
     stream
         .set_read_timeout(Some(READ_TIMEOUT))
-        .map_err(|e| e.to_string())?;
-    let request = nx_proto::read_request(stream).map_err(|e| e.to_string())?;
+        .map_err(Error::Peer)?;
+    let request = nx_proto::read_request(stream)?;
     eprintln!("nxd: uid {} pid {}: {request:?}", peer.uid, peer.pid);
     match request {
         Request::Activate {
@@ -64,8 +66,12 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response, String> {
             let _guard = lock(&ctx.lock)?;
             // Root, the owner of the state directory (nx) and the caller
             // may own what they hand over.
-            let nx = std::fs::metadata(ctx.layout.state.root())
-                .map_err(|e| format!("can't read the state directory: {e}"))?
+            let state = ctx.layout.state.root();
+            let nx = std::fs::metadata(state)
+                .map_err(|source| Error::Io {
+                    path: state.display().to_string(),
+                    source,
+                })?
                 .uid();
             let done = nx_activate::activate(
                 &ctx.layout,
@@ -73,8 +79,7 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response, String> {
                 generation,
                 backend,
                 &[nx, peer.uid],
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
             Ok(Response::Activated {
                 backend: done.backend,
                 fallback: done.fallback,
@@ -91,17 +96,37 @@ fn peer(stream: &UnixStream) -> std::io::Result<Peer> {
     })
 }
 
-/// Takes the exclusive lock on `path`; dropped with the file.
-fn lock(path: &Path) -> Result<File, String> {
+/// How long a request waits for another to finish before giving up.
+const LOCK_WAIT: Duration = Duration::from_secs(60);
+
+/// Takes the exclusive lock on `path`, waiting up to [`LOCK_WAIT`]; it is
+/// released when the file is dropped.
+fn lock(path: &Path) -> Result<File> {
+    let io = |source| Error::Io {
+        path: path.display().to_string(),
+        source,
+    };
     let file = File::options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path)
-        .map_err(|e| format!("opening {}: {e}", path.display()))?;
-    file.lock()
-        .map_err(|e| format!("locking {}: {e}", path.display()))?;
-    Ok(file)
+        .map_err(io)?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(io(std::io::Error::other(
+                    "another nxd request is still running",
+                )));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(io(e)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -118,12 +143,12 @@ mod tests {
 
     struct Allow(bool);
     impl Authorizer for Allow {
-        fn check(&self, _: Peer, action: &str) -> Result<(), String> {
+        fn check(&self, _: Peer, action: &str) -> Result<()> {
             assert_eq!(action, ACTION_ACTIVATE);
             if self.0 {
                 Ok(())
             } else {
-                Err("not authorized: no".into())
+                Err(Error::Denied("not authorized: no".into()))
             }
         }
     }
@@ -187,20 +212,15 @@ mod tests {
     }
 
     /// Serves one connection on a temp socket while `client` talks to it.
-    fn exchange<T>(
-        tag: &str,
-        allow: bool,
-        client: impl FnOnce(&Path) -> T,
-    ) -> std::io::Result<(T, Layout)> {
+    fn exchange<T>(tag: &str, allow: bool, client: impl FnOnce(&Path) -> T) -> std::io::Result<T> {
         let (tmp, layout) = fixture(tag)?;
         let socket = tmp.0.join("nxd.sock");
         let listener = bind(&socket)?;
-        let served = layout.clone();
         let lock = tmp.0.join("nxd.lock");
         let result = std::thread::scope(|s| {
             let server = s.spawn(move || {
                 let ctx = Context {
-                    layout: served,
+                    layout,
                     runner: Box::new(Merges),
                     authorizer: Box::new(Allow(allow)),
                     lock,
@@ -214,13 +234,13 @@ mod tests {
             out
         });
         drop(tmp);
-        Ok((result, layout))
+        Ok(result)
     }
 
     /// Asks to activate generation 1; returns the answer and whether
     /// `current` exists afterwards (read while the fixture is still there).
     fn activate(tag: &str, allow: bool) -> std::io::Result<(nx_proto::Result<Response>, bool)> {
-        let (out, _) = exchange(tag, allow, |socket| {
+        let out = exchange(tag, allow, |socket| {
             let response = nx_proto::call(
                 socket,
                 &Request::Activate {
@@ -266,7 +286,7 @@ mod tests {
 
     #[test]
     fn garbage_is_answered_not_obeyed() -> std::io::Result<()> {
-        let (reply, _) = exchange("garbage", true, |socket| {
+        let reply = exchange("garbage", true, |socket| {
             use std::io::{BufRead, BufReader};
             let mut stream = UnixStream::connect(socket)?;
             stream.write_all(b"{\"request\":\"rm_rf\"}\n")?;

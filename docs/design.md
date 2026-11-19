@@ -309,7 +309,7 @@ names = []
 **Operations**
 
 - Every mutating command builds generation N+1 in full, verifies it, then swaps `current` and refreshes. A crash mid-build leaves `current` untouched.
-- `nx rollback` swaps to N−1 and refreshes. `nx generations` lists them with diffs.
+- `nx rollback [N]` makes generation N current, by default the one the current generation was built from (`parent` in `lock.toml`), so it undoes the last change even after earlier rollbacks; with no parent it takes the newest earlier number. It refuses a generation built for another image digest until M5's compatibility check. `nx generations` lists them with diffs.
 - `nx apply` makes the system match `manifest.toml`, for declarative use and for new machines.
 
 ## Image upgrade lifecycle
@@ -478,6 +478,8 @@ The `nx` CLI runs unprivileged. A small root daemon, `nxd`, does only the steps 
 - *Extension link.* `/var/lib/extensions/nx -> /var/lib/nx/current/sysext`, created by `tmpfiles.d`. `man systemd-sysext` names `/var/lib/extensions` the primary place to install extensions and `/run` and `/etc` suitable only for symlinks to them; only `/var/lib/extensions` is merged at boot without extra setup, and the link name `nx` is what matches `extension-release.nx`. On Neptuno the link merged, kept `usr_t` labels, and was merged again after a reboot. `setfiles -r` wants the resolved directory (`realpath`), not a path through `current`.
 - *The `nx` user.* A system user from `sysusers.d` (`u!`, no login shell, home `/var/lib/nx`) owns the state directory and runs the unprivileged background services (refresh timer, staging). `tmpfiles.d` creates `/var/lib/nx` setgid with a default ACL for group `wheel`, so interactive wheel users, who may call nxd without a password, write generations as themselves without being members of a group nx has to manage. nxd accepts a generation whose files are owned by root, the owner of the state directory (`nx`) or the calling uid (`SO_PEERCRED`). It refuses setuid and setgid files, file capabilities, device nodes, FIFOs and sockets, and files writable by everyone, and an extension-release that doesn't match the running system. It never follows a symlink: a link in a package is just a link in the merged `/usr`. It does not use `DynamicUser=`: state under `/var/lib/nx` must outlive the service and be owned by a stable uid.
 - *No wider trust.* A wheel user can already activate without a password, so a tree they own widens nothing for them. A user outside wheel is refused by polkit before nxd opens the tree, so what they own never reaches `/usr`.
+
+- *One admin per store, for now.* nxd accepts files owned by root, `nx` and the caller, so a second wheel user can't activate a generation that links a package the first one unpacked. Until nxd (running as `nx`) does the unpacking, one account per machine adds packages.
 
 **Trust boundaries**
 
