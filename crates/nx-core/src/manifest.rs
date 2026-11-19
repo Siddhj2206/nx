@@ -63,17 +63,21 @@ pub struct ScriptletAllow {
     pub digest: String,
 }
 
+/// Hex digits of a leftover text's fingerprint that name it in
+/// `--allow-scriptlets`: enough that two texts don't collide.
+pub const DIGEST_PREFIX: usize = 16;
+
 impl ScriptletAllow {
     /// Whether this entry covers leftover text with fingerprint `digest`.
-    /// Sixteen hex digits are enough to name it.
+    /// [`DIGEST_PREFIX`] hex digits are enough to name it.
     pub fn matches(&self, digest: &str) -> bool {
-        self.digest.len() >= 16 && digest.starts_with(&self.digest)
+        self.digest.len() >= DIGEST_PREFIX && digest.starts_with(&self.digest)
     }
 
     /// Parses `package=digest`.
     pub fn parse(text: &str) -> Option<Self> {
         let (package, digest) = text.split_once('=')?;
-        let ok = digest.len() >= 16 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+        let ok = digest.len() >= DIGEST_PREFIX && digest.bytes().all(|b| b.is_ascii_hexdigit());
         (ok && !package.is_empty()).then(|| Self {
             package: package.to_owned(),
             digest: digest.to_ascii_lowercase(),

@@ -39,17 +39,35 @@ pub fn run(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<()> {
     Ok(())
 }
 
-/// What a deployed image needs: its role, the deployment, and whether its
-/// generation is live.
-fn wanted(machine: &Machine) -> Vec<(&'static str, Deployment)> {
+/// Which deployment an image is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Booted,
+    Staged,
+    Rollback,
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Role::Booted => "booted",
+            Role::Staged => "staged",
+            Role::Rollback => "rollback",
+        })
+    }
+}
+
+/// What a deployed image needs: its role and the deployment. Only the
+/// booted image's generation is made live.
+fn wanted(machine: &Machine) -> Vec<(Role, Deployment)> {
     let Some(deployments) = machine.deployments() else {
         return Vec::new();
     };
-    let mut out: Vec<(&'static str, Deployment)> = Vec::new();
+    let mut out: Vec<(Role, Deployment)> = Vec::new();
     for (role, d) in [
-        ("booted", deployments.booted()),
-        ("staged", deployments.staged()),
-        ("rollback", deployments.rollback()),
+        (Role::Booted, deployments.booted()),
+        (Role::Staged, deployments.staged()),
+        (Role::Rollback, deployments.rollback()),
     ] {
         let Some(d) = d else { continue };
         // A digest shared by two deployments needs one generation.
@@ -134,7 +152,7 @@ fn matches(
 fn build(
     ui: &mut Ui,
     machine: &Machine,
-    role: &str,
+    role: Role,
     d: &Deployment,
     refresh: Refresh,
 ) -> Result<()> {
@@ -144,7 +162,7 @@ fn build(
         "resolving the host tier for the {role} image {version} ({})",
         crate::ui::short_digest(digest)
     ));
-    let booted = d.booted;
+    let booted = role == Role::Booted;
     let target;
     let machine = if booted {
         machine
@@ -270,8 +288,8 @@ mod tests {
             "ID=fedora\nVERSION_ID=45\n",
         )?;
         let machine = Machine::read(&root, &Deployments::from_json(STATUS)?)?;
-        let roles: Vec<&str> = wanted(&machine).iter().map(|(role, _)| *role).collect();
-        assert_eq!(roles, ["booted", "rollback"]);
+        let roles: Vec<Role> = wanted(&machine).iter().map(|(role, _)| *role).collect();
+        assert_eq!(roles, [Role::Booted, Role::Rollback]);
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }

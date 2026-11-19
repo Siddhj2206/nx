@@ -25,7 +25,10 @@ pub fn run(
         .iter()
         .map(|a| {
             ScriptletAllow::parse(a).with_context(|| {
-                format!("--allow-scriptlets wants package=digest (16 or more hex digits), not {a}")
+                format!(
+                    "--allow-scriptlets wants package=digest ({} or more hex digits), not {a}",
+                    nx_core::manifest::DIGEST_PREFIX
+                )
             })
         })
         .collect::<Result<_>>()?;

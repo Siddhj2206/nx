@@ -170,6 +170,8 @@ pub fn sync(
         }
     }
 
+    // Only reachable with nothing cached: `Never` always answers from the
+    // cache when there is one, above.
     if refresh == Refresh::Never {
         return Err(Error::Invalid(format!(
             "no cached metadata for {}, and not going to the network",

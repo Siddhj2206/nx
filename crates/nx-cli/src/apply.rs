@@ -386,7 +386,13 @@ fn refusal_error(e: nx_core::Error) -> anyhow::Error {
     msg.push_str("or, if you read the text above and it is safe to skip, add it anyway:\n");
     let flags: Vec<String> = refusals
         .iter()
-        .map(|r| format!("--allow-scriptlets {}={}", r.name, &r.digest[..16]))
+        .map(|r| {
+            format!(
+                "--allow-scriptlets {}={}",
+                r.name,
+                &r.digest[..nx_core::manifest::DIGEST_PREFIX]
+            )
+        })
         .collect();
     msg.push_str(&format!(
         "  nx add <what you asked for> {}",
