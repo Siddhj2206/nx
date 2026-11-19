@@ -80,6 +80,8 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   `crates/nxd`: the daemon (authorization, one request per process).
   `systemd/` and `polkit/` hold the units, sysusers, tmpfiles and polkit
   files an image installs; `dev/vm-install` puts them in the test VM.
+- `crates/nx-cli/src/sync.rs`, `boot.rs`, `compat.rs`, `gc.rs`: the image
+  lifecycle (`nx sync`, `nx select`, the invariant 2 check, `nx gc`).
 - `crates/nx-cli/src/apply.rs`: manifest → generation (resolve, download,
   verify, unpack, assemble), shared by every command that changes the
   manifest. `host.rs` holds `Machine`, the system as one value (root,
@@ -183,6 +185,17 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   `nx-<pkg>.conf` tmpfiles file; never write into `/etc` directly.
 - The metadata cache is `/var/lib/nx/cache` when the caller can write it.
   Wheel membership asks NSS (`getent`, `id -G`) after the local files.
+- Staging an update in the VM: the registry is slow, so `podman save --format
+  oci-archive` the host's image, copy it to the VM and
+  `bootc switch --transport oci-archive <file>` (as a `systemd-run` unit, so
+  it outlives ssh). The VM's `/boot` is an autofs: `ls /boot` first, or
+  `ostree-finalize-staged` fails at shutdown with "Remounting /boot
+  read-write: Invalid argument" and the update is dropped.
+- `nx select` runs before `systemd-sysext` with no rpm-ostree daemon: the
+  booted deployment comes from `ostree=` on the kernel command line and its
+  digest from `ostree show --print-metadata-key=ostree.manifest-digest`.
+  `Machine::targeting` re-points the resolver at a staged or rollback
+  deployment's own tree; only the booted image's generation is activated.
 - A scriptlet allowance (`[[scriptlets]]`) is dropped by `nx remove` when its
   package leaves.
 

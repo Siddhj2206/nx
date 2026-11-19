@@ -34,10 +34,12 @@ sys.exit(0 if any(d.get("staged") for d in json.load(sys.stdin)["deployments"]) 
 	echo "$status"
 	grep -q 'host tier: generation' <<<"$status" || fail "nx status shows no host tier for the staged image"
 	# A change while an update is staged resolves for both images (invariant 6).
+	as tester "nx remove libxkbcommon-devel" >/dev/null 2>&1 || true
 	as tester "nx add libxkbcommon-devel" 2>&1 | tee /tmp/m5-add.txt
 	grep -q 'for the staged image' /tmp/m5-add.txt || fail "the change did not reach the staged image"
 	[[ $(current_digest) == "$(booted_digest)" ]] || fail "current is not for the booted image"
-	as tester "nx sync" | grep -q 'match the manifest' || fail "sync found more to do"
+	out=$(as tester "nx sync" 2>&1)
+	grep -q 'matches the manifest' <<<"$out" || fail "sync found more to do: $out"
 	echo "stage: ok; now reboot"
 	;;
 booted)
