@@ -292,7 +292,7 @@ impl<'m> Session<'m> {
             },
         )
         .map_err(refusal_error)?;
-        crate::tool::add_roots(ui, &built.generation);
+        crate::tool::add_roots(&built.generation)?;
         Ok(built)
     }
 
@@ -308,15 +308,14 @@ impl<'m> Session<'m> {
         let Some(mut tool) = self.tool.clone() else {
             return Ok(None);
         };
-        if let Some(p) = tool
-            .packages
-            .iter()
-            .find(|p| p.paths().any(|path| !Path::new(path).exists()))
+        // Collected since it was realised: fetch it again. If that fails,
+        // the host tier still gets its generation, without those commands.
+        if crate::tool::incomplete(&tool)
+            && let Err(e) = crate::tool::restore(ui, &tool, &manifest.caches)
         {
-            bail!(
-                "{} is not in the Nix store (collected since?); nx upgrade --tool realises the tool tier again",
-                p.attr
-            );
+            ui.warn(format_args!(
+                "tool-tier commands whose Nix paths are gone are left out until nx upgrade --tool: {e:#}"
+            ));
         }
         let store = self.state.store();
         let owner = |name: &str| -> Option<String> {

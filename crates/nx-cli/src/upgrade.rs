@@ -73,7 +73,11 @@ pub fn run(
     if do_tool && tool::available() && !manifest.tool.packages.is_empty() {
         let tier = Tier::open(ui, session.tool.as_ref(), true)?;
         let was = session.tool.as_ref().map(|t| t.rev.clone());
-        if was.as_deref() != Some(tier.release.rev.as_str()) {
+        let same_pin = was.as_deref() == Some(tier.release.rev.as_str());
+        // At the same pin, only paths the store lost need doing: evaluate
+        // everything again (their derivations may be gone too) and realise.
+        let lost = session.tool.as_ref().is_some_and(tool::incomplete);
+        if !same_pin || lost {
             let system = tool::system(session.universe.arch());
             let locked = tier.resolve(ui, &manifest, None, &system)?;
             let version = |t: &nx_core::LockedTool| -> BTreeMap<String, String> {
@@ -88,7 +92,11 @@ pub fn run(
                 let plan = tier.plan(&locked, &manifest.caches)?;
                 tier.realise(ui, &locked, &plan, &manifest, &system)?;
             }
-            moved = Some(tier.release.version().to_owned());
+            moved = Some(if same_pin {
+                format!("{}, realised again", tier.release.version())
+            } else {
+                tier.release.version().to_owned()
+            });
             session.tool = Some(locked);
         }
     }

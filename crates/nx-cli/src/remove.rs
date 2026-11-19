@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use nx_rpm::Refresh;
 
 use crate::apply::Session;
-use crate::host::Machine;
+use crate::host::{self, Machine};
 use crate::ui::{self, Stream, Ui};
 
 pub fn run(
@@ -21,7 +21,13 @@ pub fn run(
     refresh: Refresh,
 ) -> Result<()> {
     let started = Instant::now();
+    // `nx add rg` added ripgrep: `nx remove rg` means it too. Only names to
+    // look up; the manifest itself is changed under the lock.
+    let tool_names = host::readable(ui, &host::state())?
+        .and_then(|g| g.lock.tool)
+        .unwrap_or_default();
     let mut session = Session::open(ui, machine, refresh, dry_run, |m| {
+        let specs: Vec<String> = specs.iter().map(|s| attr_for(m, &tool_names, s)).collect();
         let (tools, hosts): (Vec<String>, Vec<String>) = specs
             .iter()
             .cloned()
@@ -62,19 +68,22 @@ pub fn run(
     // The tool tier needs no resolve: what is left is as it was.
     let attrs = session.manifest.tool.packages.clone();
     if let Some(tool) = session.tool.as_mut() {
-        for p in tool.packages.iter().filter(|p| !attrs.contains(&p.attr)) {
+        let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut tool.packages)
+            .into_iter()
+            .partition(|p| attrs.contains(&p.attr));
+        tool.packages = kept;
+        // A removed package's unfree allowance goes with it, unless a package
+        // that stays has the same name. Only those: an entry nx can't match
+        // to a package is the user's to remove.
+        for p in &gone {
             dropped.push(Dropped {
                 name: p.attr.clone(),
                 version: format!("{} · nixpkgs", p.version),
             });
+            if !tool.packages.iter().any(|k| k.name == p.name) {
+                session.manifest.tool.unfree.retain(|n| *n != p.name);
+            }
         }
-        tool.packages.retain(|p| attrs.contains(&p.attr));
-        let unfree: HashSet<&str> = tool.packages.iter().map(|p| p.name.as_str()).collect();
-        session
-            .manifest
-            .tool
-            .unfree
-            .retain(|n| unfree.contains(n.as_str()));
     }
     let manifest = session.manifest.clone();
     if dry_run {
@@ -89,6 +98,18 @@ pub fn run(
         started.elapsed().as_secs_f64(),
     );
     Ok(())
+}
+
+/// The manifest entry `spec` means: itself, or the tool-tier attribute
+/// whose name or exposed command it is.
+fn attr_for(m: &nx_core::Manifest, tool: &nx_core::LockedTool, spec: &str) -> String {
+    if m.has(spec) {
+        return spec.to_owned();
+    }
+    tool.packages
+        .iter()
+        .find(|p| p.name == spec || p.bins.iter().any(|b| b.name == spec))
+        .map_or_else(|| spec.to_owned(), |p| p.attr.clone())
 }
 
 /// A package that left: its name and version.
@@ -140,6 +161,28 @@ mod tests {
         let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
         render(&mut ui.out, dropped, generation, 0.25);
         buf.text()
+    }
+
+    #[test]
+    fn a_command_names_its_package() {
+        let mut m = nx_core::Manifest::default();
+        m.add_tool(&["ripgrep".into()]);
+        m.add_host(&["wayland-devel".into()]);
+        let tool = nx_core::LockedTool {
+            packages: vec![nx_core::ToolPackage {
+                attr: "ripgrep".into(),
+                name: "ripgrep".into(),
+                bins: vec![nx_core::Bin {
+                    name: "rg".into(),
+                    path: String::new(),
+                }],
+                ..nx_core::ToolPackage::default()
+            }],
+            ..nx_core::LockedTool::default()
+        };
+        assert_eq!(attr_for(&m, &tool, "rg"), "ripgrep");
+        assert_eq!(attr_for(&m, &tool, "wayland-devel"), "wayland-devel");
+        assert_eq!(attr_for(&m, &tool, "nope"), "nope");
     }
 
     #[test]

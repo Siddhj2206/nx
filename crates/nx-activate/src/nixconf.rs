@@ -8,6 +8,7 @@
 //! `--option extra-substituters` on its own calls.
 
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use nx_core::CacheEntry;
@@ -98,8 +99,7 @@ pub fn apply(dir: &Path, runner: &dyn Runner, caches: &[CacheEntry], services: &
     }
 }
 
-/// Replaces `nx.conf` through a fresh name (never following a planted
-/// link), or removes it for no caches.
+/// Replaces `nx.conf`, or removes it for no caches.
 fn write(dir: &Path, text: &str) -> std::io::Result<()> {
     let file = dir.join(FILE);
     if text.is_empty() {
@@ -108,35 +108,50 @@ fn write(dir: &Path, text: &str) -> std::io::Result<()> {
             _ => Ok(()),
         };
     }
-    let tmp = dir.join(format!(".{FILE}.{}", std::process::id()));
+    replace(&file, text, 0o644)
+}
+
+/// Writes `text` to a fresh name beside `file` (`create_new` never follows
+/// a planted link), flushes it, and renames it over `file`, which replaces
+/// a link rather than writing through it.
+fn replace(file: &Path, text: &str, mode: u32) -> std::io::Result<()> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = file.with_file_name(format!(".{name}.nx.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp)?;
     f.write_all(text.as_bytes())?;
+    f.set_permissions(std::fs::Permissions::from_mode(mode))?;
     f.sync_all()?;
-    std::fs::rename(&tmp, &file)
+    std::fs::rename(&tmp, file)
 }
 
 /// Makes `nix.conf` include `nx.conf`, once. A missing include is no error
 /// for Nix (`!include`), so the line can stay when there are no caches.
+/// The file is replaced, not appended to: nxd runs as root and never writes
+/// through a link.
 fn include(dir: &Path) -> std::io::Result<()> {
     let conf = dir.join("nix.conf");
+    let meta = std::fs::symlink_metadata(&conf)?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a plain file",
+            conf.display()
+        )));
+    }
     let text = std::fs::read_to_string(&conf)?;
     if text.lines().any(|l| l.trim() == INCLUDE) {
         return Ok(());
     }
-    let mut f = std::fs::OpenOptions::new().append(true).open(&conf)?;
     let sep = if text.ends_with('\n') || text.is_empty() {
         ""
     } else {
         "\n"
     };
-    write!(
-        f,
-        "{sep}\n# Extra caches nx trusts (nx cache add).\n{INCLUDE}\n"
-    )
+    let new = format!("{text}{sep}\n# Extra caches nx trusts (nx cache add).\n{INCLUDE}\n");
+    replace(&conf, &new, meta.permissions().mode() & 0o7777)
 }
 
 #[cfg(test)]
@@ -203,6 +218,19 @@ mod tests {
         apply(&dir, &runner, &[], &mut s);
         assert!(!dir.join(FILE).exists());
         assert_eq!(runner.0.borrow().len(), 2);
+        std::fs::remove_dir_all(&dir)
+    }
+
+    #[test]
+    fn never_writes_through_a_link() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-nixconf-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, "untouched\n")?;
+        std::os::unix::fs::symlink(&target, dir.join("nix.conf"))?;
+        assert!(include(&dir).is_err());
+        assert_eq!(std::fs::read_to_string(&target)?, "untouched\n");
         std::fs::remove_dir_all(&dir)
     }
 

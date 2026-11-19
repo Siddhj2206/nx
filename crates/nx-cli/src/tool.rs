@@ -566,18 +566,53 @@ fn find_shim() -> Result<PathBuf> {
 }
 
 /// Registers `g`'s tool-tier outputs as GC roots, in `gcroots/` under its
-/// final name. A failure leaves the paths unrooted, so a warning: the next
-/// `nx gc` roots them first.
-pub fn add_roots(ui: &mut Ui, g: &Generation) {
+/// final name. A generation whose paths aren't rooted must not go live: a
+/// plain `nix store gc` would delete what its commands run.
+pub fn add_roots(g: &Generation) -> Result<()> {
     let Some(tool) = g.lock.tool.as_ref().filter(|t| !t.packages.is_empty()) else {
-        return;
+        return Ok(());
     };
-    if let Err(e) = root(&System, g, tool) {
-        ui.warn(format_args!(
-            "generation {}'s Nix paths are not GC roots yet ({e:#}); nx gc roots them",
+    root(&System, g, tool).with_context(|| {
+        format!(
+            "generation {} is built, but its Nix paths are not GC roots, so it was not made live",
             g.number
-        ));
+        )
+    })
+}
+
+/// Whether some output of `tool` isn't in the store (collected since it
+/// was realised).
+pub fn incomplete(tool: &LockedTool) -> bool {
+    tool.packages
+        .iter()
+        .flat_map(ToolPackage::paths)
+        .any(|p| !local(p))
+}
+
+/// Realises again the outputs of `tool` the store lost: from their
+/// derivation when it is still there (Nix substitutes what a cache has and
+/// builds the rest), else by store path from the caches.
+pub fn restore(ui: &mut Ui, tool: &LockedTool, caches: &[CacheEntry]) -> Result<()> {
+    let mut installables = Vec::new();
+    for p in &tool.packages {
+        let lost: Vec<&ToolOutput> = p.outputs.iter().filter(|o| !local(&o.path)).collect();
+        if lost.is_empty() {
+            continue;
+        }
+        if Path::new(&p.drv).exists() {
+            let names: Vec<&str> = p.outputs.iter().map(|o| o.name.as_str()).collect();
+            installables.push(format!("{}^{}", p.drv, names.join(",")));
+        } else {
+            installables.extend(lost.iter().map(|o| o.path.clone()));
+        }
     }
+    if installables.is_empty() {
+        return Ok(());
+    }
+    ui.step("fetching tool-tier paths the Nix store no longer has");
+    let urls: Vec<String> = caches.iter().map(|c| c.url.clone()).collect();
+    nx_nix::nix::realise(&System, &installables, &urls, &mut |note| draw(ui, note))
+        .context("realising the tool tier again")
 }
 
 /// Roots `tool`'s outputs that are still in the store at `g`'s
