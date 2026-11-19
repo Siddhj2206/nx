@@ -29,6 +29,7 @@ pub fn add(
     key: Option<&str>,
     priority: Option<i32>,
     new_key: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let vars = machine.vars();
     let image_ids: Vec<String> = repo::load(&machine.root, &vars)?
@@ -41,7 +42,7 @@ pub fn add(
         .map(|entry| fetch(ui, &http, &vars, &image_ids, entry))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
+    let mut session = Session::open(ui, machine, Refresh::IfMissing, dry_run, |m| {
         for f in &fetched {
             let name = &f.entry.name;
             if let Some(r) = same_id(m, name) {
@@ -83,10 +84,13 @@ pub fn add(
         }
     }
     // Under the lock, so nx gc can't take a pin before its generation names
-    // it; one left by a change that fails goes with the next gc.
-    pin_all(&mut session, &fetched)?;
+    // it; one left by a change that fails goes with the next gc. A dry run
+    // pins nothing.
+    if !dry_run {
+        pin_all(&mut session, &fetched)?;
+    }
     let outcome = session.plan(ui, &How::default())?;
-    let built = session.install(ui, &outcome.all)?;
+    let generation = install(ui, &mut session, &outcome, dry_run)?;
     let st = ui.out.style;
     for f in &fetched {
         ui.out.line(format_args!(
@@ -101,11 +105,35 @@ pub fn add(
     } else {
         format!("{} added", ui::plural(fetched.len(), "repo"))
     };
-    ui.done(format_args!(
-        "{what} · generation {}",
-        built.generation.number
-    ));
+    finished(ui, &what, generation);
     Ok(())
+}
+
+/// Builds and makes live what `outcome` planned, unless a dry run; the
+/// generation made live.
+pub fn install(
+    ui: &mut Ui,
+    session: &mut Session,
+    outcome: &crate::session::Outcome,
+    dry_run: bool,
+) -> Result<Option<u32>> {
+    if dry_run {
+        return Ok(None);
+    }
+    Ok(Some(session.install(ui, &outcome.all)?.generation.number))
+}
+
+/// `✓ <what> · generation N`, or for a dry run `<what> · dry run, nothing
+/// changed`.
+pub fn finished(ui: &mut Ui, what: &str, generation: Option<u32>) {
+    match generation {
+        Some(n) => ui.done(format_args!("{what} · generation {n}")),
+        None => {
+            let st = ui.out.style;
+            ui.out
+                .line(st.dim(&format!("{what} · dry run, nothing changed")));
+        }
+    }
 }
 
 /// `entry`'s key, from its https URL, shown before anything changes so the
@@ -268,8 +296,8 @@ fn entries(
     }])
 }
 
-pub fn remove(ui: &mut Ui, machine: &Machine, name: &str) -> Result<()> {
-    let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
+pub fn remove(ui: &mut Ui, machine: &Machine, name: &str, dry_run: bool) -> Result<()> {
+    let mut session = Session::open(ui, machine, Refresh::IfMissing, dry_run, |m| {
         if m.repo(name).is_none() {
             bail!("{name} was not added with nx repo add (nx repo list shows the repos)");
         }
@@ -281,14 +309,11 @@ pub fn remove(ui: &mut Ui, machine: &Machine, name: &str) -> Result<()> {
         .with_context(|| format!("packages still need {name}"))?;
     // Its pinned key stays while an earlier generation names it (a
     // rollback needs it); nx gc removes it after.
-    let built = session.install(ui, &outcome.all)?;
+    let generation = install(ui, &mut session, &outcome, dry_run)?;
     let st = ui.out.style;
     ui.out
         .line(format_args!("{} {name}", st.red(ui::SYM_REMOVED)));
-    ui.done(format_args!(
-        "repo removed · generation {}",
-        built.generation.number
-    ));
+    finished(ui, "repo removed", generation);
     Ok(())
 }
 

@@ -30,9 +30,9 @@ fn entry(url: &str, key: &str) -> Result<CacheEntry> {
     Ok(entry)
 }
 
-pub fn add(ui: &mut Ui, machine: &Machine, url: &str, key: &str) -> Result<()> {
+pub fn add(ui: &mut Ui, machine: &Machine, url: &str, key: &str, dry_run: bool) -> Result<()> {
     let wanted = entry(url, key)?;
-    let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
+    let mut session = Session::open(ui, machine, Refresh::IfMissing, dry_run, |m| {
         if m.caches.contains(&wanted) {
             bail!("{} is trusted already", wanted.url);
         }
@@ -41,7 +41,7 @@ pub fn add(ui: &mut Ui, machine: &Machine, url: &str, key: &str) -> Result<()> {
         Ok(())
     })?;
     let outcome = session.plan(ui, &How::default())?;
-    let built = session.install(ui, &outcome.all)?;
+    let generation = crate::repo::install(ui, &mut session, &outcome, dry_run)?;
     let style = ui.out.style;
     ui.out.line(format_args!(
         "{} {} {}",
@@ -49,13 +49,13 @@ pub fn add(ui: &mut Ui, machine: &Machine, url: &str, key: &str) -> Result<()> {
         wanted.url,
         style.dim("· trusted for the tool tier")
     ));
-    ui.done(format_args!("generation {}", built.generation.number));
+    crate::repo::finished(ui, "cache added", generation);
     Ok(())
 }
 
-pub fn remove(ui: &mut Ui, machine: &Machine, url: &str) -> Result<()> {
+pub fn remove(ui: &mut Ui, machine: &Machine, url: &str, dry_run: bool) -> Result<()> {
     let url = url.trim_end_matches('/').to_owned();
-    let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
+    let mut session = Session::open(ui, machine, Refresh::IfMissing, dry_run, |m| {
         let before = m.caches.len();
         m.caches.retain(|c| c.url != url);
         if m.caches.len() == before {
@@ -64,11 +64,11 @@ pub fn remove(ui: &mut Ui, machine: &Machine, url: &str) -> Result<()> {
         Ok(())
     })?;
     let outcome = session.plan(ui, &How::default())?;
-    let built = session.install(ui, &outcome.all)?;
+    let generation = crate::repo::install(ui, &mut session, &outcome, dry_run)?;
     let style = ui.out.style;
     ui.out
         .line(format_args!("{} {url}", style.red(ui::SYM_REMOVED)));
-    ui.done(format_args!("generation {}", built.generation.number));
+    crate::repo::finished(ui, "cache removed", generation);
     Ok(())
 }
 

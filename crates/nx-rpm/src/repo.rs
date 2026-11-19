@@ -30,7 +30,6 @@ pub struct Repo {
     pub gpgcheck: bool,
     pub gpgkey: Vec<String>,
     pub priority: i32,
-    pub cost: i32,
     /// How long downloaded metadata stays fresh; `None` is never stale.
     pub metadata_expire: Option<Duration>,
     /// The file it came from.
@@ -148,7 +147,6 @@ pub fn parse(text: &str, file: &Path, vars: &Vars) -> Vec<Repo> {
                 gpgcheck: get("gpgcheck").is_some_and(|v| truthy(&v)),
                 gpgkey: list("gpgkey"),
                 priority: int("priority", DEFAULT_PRIORITY),
-                cost: int("cost", 1000),
                 metadata_expire: get("metadata_expire")
                     .map_or(Some(DEFAULT_EXPIRE), |v| parse_expire(&v)),
                 file: file.to_owned(),
@@ -228,7 +226,6 @@ impl Repo {
             gpgcheck: true,
             gpgkey,
             priority: a.priority.unwrap_or(ADDED_PRIORITY),
-            cost: 1000,
             metadata_expire: Some(DEFAULT_EXPIRE),
             file: PathBuf::from("manifest.toml"),
         })

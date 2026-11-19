@@ -235,6 +235,9 @@ enum RepoAction {
         /// replace the pinned key of a repo added before, once checked
         #[arg(long)]
         new_key: bool,
+        /// show the key and resolve with the repo; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// the image's repos and the ones nx added
     List,
@@ -242,6 +245,9 @@ enum RepoAction {
     Remove {
         #[arg(value_name = "repo", add = ArgValueCandidates::new(complete::repos))]
         name: String,
+        /// resolve without the repo; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -254,6 +260,9 @@ enum CacheAction {
         /// as the cache publishes it: name-1:base64…
         #[arg(value_name = "key")]
         key: String,
+        /// check the entry and resolve with it; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// cache.nixos.org and the caches nx added
     List,
@@ -261,6 +270,9 @@ enum CacheAction {
     Remove {
         #[arg(value_name = "url", add = ArgValueCandidates::new(complete::caches))]
         url: String,
+        /// resolve without the cache; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -370,11 +382,13 @@ fn main() -> ExitCode {
             result
         }
         Command::Cache { action } => match action {
-            CacheAction::Add { url, key } => {
-                machine().and_then(|m| cache::add(&mut ui, &m, &url, &key))
+            CacheAction::Add { url, key, dry_run } => {
+                machine().and_then(|m| cache::add(&mut ui, &m, &url, &key, dry_run))
             }
             CacheAction::List => cache::list(&mut ui),
-            CacheAction::Remove { url } => machine().and_then(|m| cache::remove(&mut ui, &m, &url)),
+            CacheAction::Remove { url, dry_run } => {
+                machine().and_then(|m| cache::remove(&mut ui, &m, &url, dry_run))
+            }
         },
         Command::Remove {
             packages,
@@ -403,10 +417,22 @@ fn main() -> ExitCode {
                 key,
                 priority,
                 new_key,
-            } => machine()
-                .and_then(|m| repo::add(&mut ui, &m, &source, key.as_deref(), priority, new_key)),
+                dry_run,
+            } => machine().and_then(|m| {
+                repo::add(
+                    &mut ui,
+                    &m,
+                    &source,
+                    key.as_deref(),
+                    priority,
+                    new_key,
+                    dry_run,
+                )
+            }),
             RepoAction::List => machine().and_then(|m| repo::list(&mut ui, &m)),
-            RepoAction::Remove { name } => machine().and_then(|m| repo::remove(&mut ui, &m, &name)),
+            RepoAction::Remove { name, dry_run } => {
+                machine().and_then(|m| repo::remove(&mut ui, &m, &name, dry_run))
+            }
         },
         Command::Search { terms, metadata } => metadata.load(&mut ui).map(|(u, g)| {
             let pinned = g.and_then(|g| g.lock.tool);

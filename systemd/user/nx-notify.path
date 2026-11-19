@@ -5,8 +5,11 @@ Documentation=https://github.com/Siddhj2206/nx
 ConditionUser=!@system
 
 [Path]
-# A change to any entry: sync-failures.json, upgrade-failure.json, current.
-PathChanged=/var/lib/nx
+# The records nx notify reads, and the generations (a left-out package is
+# in a generation's lock.toml). Not /var/lib/nx itself: every command that
+# changes anything writes its lock file there.
+PathChanged=/var/lib/nx/sync-failures.json
+PathChanged=/var/lib/nx/upgrade-failure.json
 PathChanged=/var/lib/nx/generations
 Unit=nx-notify.service
 

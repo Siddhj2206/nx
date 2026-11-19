@@ -18,6 +18,18 @@ use crate::{Error, Result};
 /// Shared across download threads.
 pub trait Http: Sync {
     fn get(&self, url: &str) -> Result<Vec<u8>>;
+
+    /// GETs `url` into the file `to` (created or replaced) and returns the
+    /// SHA-256 of what was written. The default holds the body in memory;
+    /// [`Ureq`] streams it, so a large package never is.
+    fn download(&self, url: &str, to: &Path) -> Result<String> {
+        let body = self.get(url)?;
+        std::fs::write(to, &body).map_err(|source| Error::Write {
+            path: to.to_owned(),
+            source,
+        })?;
+        Ok(sha256_hex(&body))
+    }
 }
 
 /// HTTP over ureq, with nx's agent and retry policy ([`nx_http`]).
@@ -40,6 +52,60 @@ impl Http for Ureq {
                 url: url.to_owned(),
                 reason: e.to_string(),
             })
+    }
+
+    fn download(&self, url: &str, to: &Path) -> Result<String> {
+        let fetch = |e: nx_http::ureq::Error| Error::Fetch {
+            url: url.to_owned(),
+            reason: e.to_string(),
+        };
+        // Each attempt starts the file over.
+        self.0
+            .get(url, |r| {
+                let file = std::fs::File::create(to)?;
+                let mut out = Hashing::new(std::io::BufWriter::new(file));
+                std::io::copy(&mut r.into_body().into_reader(), &mut out)?;
+                Ok(out.finish()?)
+            })
+            .map_err(fetch)
+    }
+}
+
+/// A writer that hashes what goes through it.
+pub(crate) struct Hashing<W> {
+    inner: W,
+    sha: Sha256,
+}
+
+impl<W: std::io::Write> Hashing<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            inner,
+            sha: Sha256::new(),
+        }
+    }
+
+    /// Flushes and returns the SHA-256 of everything written, as hex.
+    pub(crate) fn finish(mut self) -> std::io::Result<String> {
+        self.inner.flush()?;
+        Ok(self
+            .sha
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for Hashing<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.sha.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -166,20 +232,35 @@ pub(crate) fn mirrors(repo: &Repo, http: &dyn Http) -> Result<(Vec<String>, Vec<
         let bases = metalink.bases().map(str::to_owned).collect();
         return Ok((bases, metalink.repomd_checksums));
     }
-    let bases = repo
-        .baseurl
-        .iter()
-        .map(|b| {
-            if b.ends_with('/') {
-                b.clone()
-            } else {
-                format!("{b}/")
-            }
-        })
-        .collect::<Vec<_>>();
+    let slash = |b: &str| {
+        if b.ends_with('/') {
+            b.to_owned()
+        } else {
+            format!("{b}/")
+        }
+    };
+    let mut bases: Vec<String> = repo.baseurl.iter().map(|b| slash(b)).collect();
+    if bases.is_empty()
+        && let Some(url) = &repo.mirrorlist
+    {
+        // One base URL per line, as dnf reads it; some servers answer a
+        // mirrorlist URL with a metalink instead.
+        let text = String::from_utf8_lossy(&http.get(url)?).into_owned();
+        if text.contains("<metalink") {
+            let metalink = parse_metalink(&text)?;
+            let bases = metalink.bases().map(str::to_owned).collect();
+            return Ok((bases, metalink.repomd_checksums));
+        }
+        bases = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(slash)
+            .collect();
+    }
     if bases.is_empty() {
         return Err(Error::Invalid(format!(
-            "{} has neither metalink nor baseurl",
+            "{} has no metalink, mirrorlist or baseurl",
             repo.id
         )));
     }
@@ -375,6 +456,37 @@ mod tests {
         let second = sync(&repo, &http, &cache, Refresh::IfStale, &mut || {})?;
         assert_eq!(second.freshness, Freshness::Cached);
         assert!(http.hits().is_empty(), "fresh cache must not fetch");
+        let _ = std::fs::remove_dir_all(&cache);
+        Ok(())
+    }
+
+    #[test]
+    fn a_mirrorlist_names_the_bases() -> Result<()> {
+        let cache = temp("mirrorlist");
+        let (_, mut http) = fake_repo(true);
+        http.bodies.insert(
+            "https://list".into(),
+            b"# mirrors\nhttps://bad/\n\nhttps://good\n".to_vec(),
+        );
+        let vars = Vars {
+            releasever: "45".into(),
+            basearch: "x86_64".into(),
+        };
+        let repo = parse("[t]\nmirrorlist=https://list\n", Path::new("t.repo"), &vars).remove(0);
+        // The first base serves a repomd without a primary; the second is
+        // the one that works.
+        let synced = sync(&repo, &http, &cache, Refresh::Always, &mut || {})?;
+        assert_eq!(synced.base, "https://good/");
+        // A mirrorlist that answers with a metalink is read as one.
+        let repo = parse("[t]\nmirrorlist=https://meta\n", Path::new("t.repo"), &vars).remove(0);
+        let synced = sync(
+            &repo,
+            &http,
+            &temp("mirrorlist-meta"),
+            Refresh::Always,
+            &mut || {},
+        )?;
+        assert_eq!(synced.base, "https://good/");
         let _ = std::fs::remove_dir_all(&cache);
         Ok(())
     }

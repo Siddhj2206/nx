@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use nx_librpm::Keyring;
 use nx_solv::Package;
 
-use crate::fetch::{Http, mirrors, sha256_hex, write_atomic};
+use crate::fetch::{Http, mirrors, write_atomic};
 use crate::repo::Repo;
 use crate::universe::Loaded;
 use crate::{Error, Result};
@@ -85,15 +85,23 @@ pub fn download(http: &dyn Http, from: &Loaded, p: &Package, dir: &Path) -> Resu
     let mut i = 0;
     while i < bases.len() {
         let url = format!("{}{}", bases[i], p.location);
+        // Streamed beside its name, and renamed once its checksum is right.
+        let part = file.with_extension("rpm.part");
         match http
-            .get(&url)
-            .and_then(|body| check(&url, &body, &p.sha256).map(|()| body))
+            .download(&url, &part)
+            .and_then(|sha| check(&url, &sha, &p.sha256))
         {
-            Ok(body) => {
-                write_atomic(&file, &body)?;
+            Ok(()) => {
+                std::fs::rename(&part, &file).map_err(|source| Error::Write {
+                    path: file.clone(),
+                    source,
+                })?;
                 return Ok(file);
             }
-            Err(e) => last = Some(e),
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                last = Some(e);
+            }
         }
         i += 1;
         if i == bases.len() && !tried_mirrors {
@@ -106,8 +114,7 @@ pub fn download(http: &dyn Http, from: &Loaded, p: &Package, dir: &Path) -> Resu
     Err(last.unwrap_or_else(|| Error::Invalid(format!("{} has no mirrors", from.repo.id))))
 }
 
-fn check(url: &str, body: &[u8], sha256: &str) -> Result<()> {
-    let got = sha256_hex(body);
+fn check(url: &str, got: &str, sha256: &str) -> Result<()> {
     if got == sha256 {
         Ok(())
     } else {
@@ -118,12 +125,16 @@ fn check(url: &str, body: &[u8], sha256: &str) -> Result<()> {
     }
 }
 
+/// The SHA-256 of a file, read in pieces.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let body = std::fs::read(path).map_err(|source| Error::Read {
+    let read = |source| Error::Read {
         path: path.to_owned(),
         source,
-    })?;
-    Ok(sha256_hex(&body))
+    };
+    let mut file = std::fs::File::open(path).map_err(read)?;
+    let mut out = crate::fetch::Hashing::new(std::io::sink());
+    std::io::copy(&mut file, &mut out).map_err(read)?;
+    out.finish().map_err(read)
 }
 
 /// One download for [`download_all`].
@@ -290,7 +301,7 @@ mod tests {
             evr: "1.13.1-4.fc45".into(),
             arch: "x86_64".into(),
             location: format!("Packages/l/{RPM}"),
-            sha256: sha256_hex(&rpm_bytes()),
+            sha256: crate::fetch::sha256_hex(&rpm_bytes()),
             ..Package::default()
         }
     }
