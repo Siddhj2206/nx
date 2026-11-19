@@ -117,8 +117,13 @@ fn shipped(ext: &Path, scope: Scope, want: &[UnitRef], s: &mut Services) -> Vec<
         }
         // `foo@*.service` means the instances of the template `foo@.service`.
         let file = u.name.replace("@*", "@");
-        let present = std::fs::symlink_metadata(ext.join(dir).join(&file))
-            .is_ok_and(|m| m.is_file() || m.file_type().is_symlink());
+        // A symlink is an alias; one to /dev/null is a mask, not a unit.
+        let path = ext.join(dir).join(&file);
+        let present = std::fs::symlink_metadata(&path).is_ok_and(|m| {
+            m.is_file()
+                || (m.file_type().is_symlink()
+                    && std::fs::read_link(&path).is_ok_and(|t| t != Path::new("/dev/null")))
+        });
         if !present {
             s.warnings
                 .push(format!("{}: the extension ships no such unit", u.name));

@@ -444,7 +444,6 @@ impl Tree {
     /// Adds `root/from` and everything under it, as `to` in the extension,
     /// owned by `owner`.
     fn add(&mut self, root: &Path, from: &Path, to: &Path, owner: &str) -> Result<()> {
-        let rel = to;
         let path = root.join(from);
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
@@ -471,7 +470,7 @@ impl Tree {
                 owner: owner.to_owned(),
             }
         };
-        self.insert(rel, node)?;
+        self.insert(to, node)?;
         if meta.is_dir() {
             let entries = std::fs::read_dir(&path).map_err(|source| Error::Read {
                 path: path.clone(),
@@ -480,7 +479,7 @@ impl Tree {
             let mut names: Vec<_> = entries.flatten().map(|e| e.file_name()).collect();
             names.sort();
             for name in names {
-                self.add(root, &from.join(&name), &rel.join(&name), owner)?;
+                self.add(root, &from.join(&name), &to.join(&name), owner)?;
             }
         }
         Ok(())
