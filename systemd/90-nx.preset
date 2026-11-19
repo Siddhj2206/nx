@@ -4,3 +4,4 @@ enable nx-select.service
 enable nx-settle.service
 enable nx-sync.service
 enable nx-refresh.timer
+enable nx-upgrade.timer

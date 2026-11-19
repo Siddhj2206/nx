@@ -50,19 +50,46 @@ pub fn newest_for(state: &State, digest: &str) -> Result<Option<u32>> {
 /// Why a deployed image has no host tier, by digest: what the last `nx sync`
 /// could not resolve. `nx status` shows it; the journal has the same line.
 pub fn failures(state: &State) -> BTreeMap<String, String> {
-    // A missing or unreadable record is the same as no failures.
-    std::fs::read_to_string(state.root().join("sync-failures.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    read_record(state, SYNC_FAILURES)
 }
 
 /// Replaces the failure record. Best effort: whoever cannot write the state
 /// directory cannot have run a sync that matters.
 pub fn record_failures(state: &State, failures: &BTreeMap<String, String>) {
+    write_record(state, SYNC_FAILURES, failures);
+}
+
+const SYNC_FAILURES: &str = "sync-failures";
+const UPGRADE_FAILURE: &str = "upgrade-failure";
+
+/// Why the last `nx upgrade` the weekly timer ran failed, if it did.
+pub fn upgrade_failure(state: &State) -> Option<String> {
+    read_record(state, UPGRADE_FAILURE).remove("tool")
+}
+
+/// Records (or with `None` clears) the timer's upgrade failure.
+pub fn record_upgrade_failure(state: &State, failure: Option<&str>) {
+    let record: BTreeMap<String, String> = failure
+        .map(|f| ("tool".to_owned(), f.to_owned()))
+        .into_iter()
+        .collect();
+    write_record(state, UPGRADE_FAILURE, &record);
+}
+
+/// A record in the state directory, `<name>.json`. A missing or unreadable
+/// one is the same as an empty one.
+fn read_record(state: &State, name: &str) -> BTreeMap<String, String> {
+    std::fs::read_to_string(state.root().join(format!("{name}.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Replaces `<name>.json`; an empty record removes it. Best effort.
+fn write_record(state: &State, name: &str, record: &BTreeMap<String, String>) {
     use std::io::Write;
-    let path = state.root().join("sync-failures.json");
-    if failures.is_empty() {
+    let path = state.root().join(format!("{name}.json"));
+    if record.is_empty() {
         let _ = std::fs::remove_file(&path);
         return;
     }
@@ -70,9 +97,9 @@ pub fn record_failures(state: &State, failures: &BTreeMap<String, String>) {
     // flushed before it gets its final one.
     let tmp = state
         .root()
-        .join(format!(".sync-failures.{}.tmp", std::process::id()));
+        .join(format!(".{name}.{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let written = serde_json::to_string(failures).ok().and_then(|text| {
+    let written = serde_json::to_string(record).ok().and_then(|text| {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -197,6 +224,11 @@ mod tests {
         assert_eq!(failures(&state), one);
         record_failures(&state, &BTreeMap::new());
         assert!(failures(&state).is_empty());
+        record_upgrade_failure(&state, Some("no network"));
+        assert_eq!(upgrade_failure(&state).as_deref(), Some("no network"));
+        assert!(failures(&state).is_empty());
+        record_upgrade_failure(&state, None);
+        assert_eq!(upgrade_failure(&state), None);
     }
 
     #[test]

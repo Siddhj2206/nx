@@ -9,6 +9,7 @@ mod apply;
 mod boot;
 mod cache;
 mod compat;
+mod converge;
 mod gc;
 mod generations;
 mod help;
@@ -16,6 +17,7 @@ mod host;
 mod info;
 mod list;
 mod live;
+mod notify;
 mod remove;
 mod repo;
 mod rollback;
@@ -104,6 +106,9 @@ enum Command {
         /// list what would change; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// run by nx-upgrade.timer: record a failure for nx notify
+        #[arg(long, hide = true)]
+        timer: bool,
         #[command(flatten)]
         metadata: Metadata,
     },
@@ -130,6 +135,16 @@ enum Command {
     Why {
         #[arg(value_name = "name|path")]
         what: String,
+    },
+    /// make the system match a manifest: this file, or the current one
+    Apply {
+        #[arg(value_name = "manifest.toml")]
+        file: Option<std::path::PathBuf>,
+        /// list what would change; change nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        metadata: Metadata,
     },
     /// third-party RPM repos: add, list, remove
     #[command(subcommand_required = true, arg_required_else_help = true)]
@@ -177,6 +192,9 @@ enum Command {
         #[arg(long)]
         after_merge: bool,
     },
+    /// in the session: notify about what nx's background jobs couldn't do
+    #[command(hide = true)]
+    Notify,
 }
 
 #[derive(Subcommand)]
@@ -299,9 +317,17 @@ fn main() -> ExitCode {
             host,
             tool,
             dry_run,
+            timer,
             metadata,
-        } => machine()
-            .and_then(|m| upgrade::run(&mut ui, &m, (host, tool), dry_run, metadata.refresh())),
+        } => {
+            let result = machine()
+                .and_then(|m| upgrade::run(&mut ui, &m, (host, tool), dry_run, metadata.refresh()));
+            if timer {
+                let failure = result.as_ref().err().map(|e| format!("{e:#}"));
+                nx_core::select::record_upgrade_failure(&host::state(), failure.as_deref());
+            }
+            result
+        }
         Command::Cache { action } => match action {
             CacheAction::Add { url, key } => {
                 machine().and_then(|m| cache::add(&mut ui, &m, &url, &key))
@@ -322,6 +348,12 @@ fn main() -> ExitCode {
             generation,
             dry_run,
         } => machine().and_then(|m| rollback::run(&mut ui, &m, generation, dry_run)),
+        Command::Apply {
+            file,
+            dry_run,
+            metadata,
+        } => machine()
+            .and_then(|m| converge::run(&mut ui, &m, file.as_deref(), dry_run, metadata.refresh())),
         Command::Shell { command } => shell::run(&mut ui, &command),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {
@@ -352,6 +384,9 @@ fn main() -> ExitCode {
         Command::Gc { dry_run } => machine().and_then(|m| gc::run(&mut ui, &m, dry_run)),
         Command::Select { after_merge: false } => boot::run(&mut ui),
         Command::Select { after_merge: true } => boot::settle(&mut ui),
+        Command::Notify => notify::seen_file().and_then(|seen| {
+            notify::run(&mut ui, &host::state(), &RpmOstree, &notify::Busctl, &seen)
+        }),
         Command::Status => status::run(
             &mut ui,
             &RpmOstree,

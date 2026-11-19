@@ -94,6 +94,21 @@ impl Tier {
         previous: Option<&LockedTool>,
         system: &str,
     ) -> Result<LockedTool> {
+        self.resolve_holding(ui, manifest, previous, None, system)
+            .map(|(locked, _)| locked)
+    }
+
+    /// [`Tier::resolve`] for an upgrade: a package this release no longer
+    /// has (or refuses) keeps its build from `held` instead of failing the
+    /// whole upgrade. Returns the attributes kept that way.
+    pub fn resolve_holding(
+        &self,
+        ui: &mut Ui,
+        manifest: &Manifest,
+        previous: Option<&LockedTool>,
+        held: Option<&LockedTool>,
+        system: &str,
+    ) -> Result<(LockedTool, Vec<String>)> {
         let same_pin = previous.filter(|p| p.rev == self.release.rev);
         let kept = |attr: &str| same_pin.and_then(|p| p.package(attr));
         let new: Vec<String> = manifest
@@ -104,54 +119,20 @@ impl Tier {
             .cloned()
             .collect();
         let evaluated = self.evaluate(ui, &new, &manifest.tool.unfree, system)?;
-        let mut packages = Vec::new();
-        let mut problems = Vec::new();
-        for attr in &manifest.tool.packages {
-            if let Some(p) = kept(attr) {
-                packages.push(p.clone());
-                continue;
-            }
-            match evaluated.get(attr) {
-                Some(Evaluated::Found {
-                    name,
-                    version,
-                    drv,
-                    outputs,
-                }) => packages.push(ToolPackage {
-                    attr: attr.clone(),
-                    name: name.clone(),
-                    version: version.clone(),
-                    drv: drv.clone(),
-                    outputs: outputs
-                        .iter()
-                        .map(|o| ToolOutput {
-                            name: o.name.clone(),
-                            path: o.path.clone(),
-                        })
-                        .collect(),
-                    bins: Vec::new(),
-                    unfree: manifest.tool.unfree.contains(name),
-                }),
-                Some(Evaluated::Refused {
-                    unfree,
-                    broken,
-                    insecure,
-                }) => problems.push(refused(attr, *unfree, *broken, *insecure)),
-                Some(Evaluated::Missing) | None => problems.push(format!(
-                    "nixpkgs {} has no package {attr}",
-                    self.release.version()
-                )),
-            }
-        }
-        if !problems.is_empty() {
-            bail!(problems.join("\n"));
-        }
-        Ok(LockedTool {
+        let (packages, holding) = lock(
+            manifest,
+            &evaluated,
+            &|attr| kept(attr),
+            held,
+            self.release.version(),
+        )?;
+        let locked = LockedTool {
             rev: self.release.rev.clone(),
             release: self.release.name.clone(),
             url: self.release.url.clone(),
             packages,
-        })
+        };
+        Ok((locked, holding))
     }
 
     fn evaluate(
@@ -236,6 +217,68 @@ impl Tier {
         })
         .with_context(|| realise_failed(&plan.build))
     }
+}
+
+/// The manifest's tool packages at a release: one `kept` from the same pin
+/// as it was, the rest from `evaluated`. One the release lacks or refuses
+/// takes its build from `held` when there is one (returned by attribute),
+/// and is a problem otherwise.
+fn lock<'a>(
+    manifest: &Manifest,
+    evaluated: &BTreeMap<String, Evaluated>,
+    kept: &dyn Fn(&str) -> Option<&'a ToolPackage>,
+    held: Option<&LockedTool>,
+    version: &str,
+) -> Result<(Vec<ToolPackage>, Vec<String>)> {
+    let mut packages = Vec::new();
+    let mut problems = Vec::new();
+    let mut holding = Vec::new();
+    for attr in &manifest.tool.packages {
+        if let Some(p) = kept(attr) {
+            packages.push(p.clone());
+            continue;
+        }
+        let found = matches!(evaluated.get(attr), Some(Evaluated::Found { .. }));
+        if let Some(p) = held.and_then(|h| h.package(attr)).filter(|_| !found) {
+            packages.push(p.clone());
+            holding.push(attr.clone());
+            continue;
+        }
+        match evaluated.get(attr) {
+            Some(Evaluated::Found {
+                name,
+                version,
+                drv,
+                outputs,
+            }) => packages.push(ToolPackage {
+                attr: attr.clone(),
+                name: name.clone(),
+                version: version.clone(),
+                drv: drv.clone(),
+                outputs: outputs
+                    .iter()
+                    .map(|o| ToolOutput {
+                        name: o.name.clone(),
+                        path: o.path.clone(),
+                    })
+                    .collect(),
+                bins: Vec::new(),
+                unfree: manifest.tool.unfree.contains(name),
+            }),
+            Some(Evaluated::Refused {
+                unfree,
+                broken,
+                insecure,
+            }) => problems.push(refused(attr, *unfree, *broken, *insecure)),
+            Some(Evaluated::Missing) | None => {
+                problems.push(format!("nixpkgs {version} has no package {attr}"));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        bail!(problems.join("\n"));
+    }
+    Ok((packages, holding))
 }
 
 /// What a failed realise says. A package no cache has was built here, and
@@ -890,5 +933,38 @@ mod tests {
         b.packages.pop();
         assert!(!same(Some(&a), Some(&b)));
         assert!(same(None, Some(&LockedTool::default())));
+    }
+
+    #[test]
+    fn an_upgrade_keeps_a_package_the_release_dropped() {
+        let mut manifest = Manifest::default();
+        manifest.tool.packages = vec!["ripgrep".into(), "tig".into()];
+        let evaluated = BTreeMap::from([
+            (
+                "ripgrep".to_owned(),
+                Evaluated::Found {
+                    name: "ripgrep".into(),
+                    version: "15.2.0".into(),
+                    drv: "/nix/store/x-ripgrep.drv".into(),
+                    outputs: Vec::new(),
+                },
+            ),
+            ("tig".to_owned(), Evaluated::Missing),
+        ]);
+        let none = |_: &str| None;
+        let was = three();
+        let (packages, held) = match lock(&manifest, &evaluated, &none, Some(&was), "26.11") {
+            Ok(v) => v,
+            Err(e) => panic!("{e:#}"),
+        };
+        assert_eq!(held, ["tig"]);
+        assert_eq!(packages[0].version, "15.2.0");
+        assert_eq!(packages[1], was.packages[2]);
+        // Without a build to keep (nx add), it is an error.
+        let err = lock(&manifest, &evaluated, &none, None, "26.11").map(|_| ());
+        assert_eq!(
+            err.map_err(|e| e.to_string()),
+            Err("nixpkgs 26.11 has no package tig".to_owned())
+        );
     }
 }

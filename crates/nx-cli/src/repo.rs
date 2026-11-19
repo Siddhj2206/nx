@@ -36,34 +36,10 @@ pub fn add(
         .map(|r| r.id)
         .collect();
     let http = Ureq::new();
-    let mut fetched = Vec::new();
-    for entry in entries(&http, &vars, source, key, priority)? {
-        let repo = Repo::added(&host::added(&entry), &vars)?;
-        if image_ids.contains(&repo.id) {
-            bail!("{} is one of the image's repos", entry.name);
-        }
-        let url = repo
-            .gpgkey
-            .first()
-            .filter(|k| nx_core::Https::parse(k).is_some())
-            .with_context(|| {
-                format!("{} needs a key served over https (--key <url>)", entry.name)
-            })?;
-        let key = String::from_utf8_lossy(&http.get(url)?).into_owned();
-        let fingerprints =
-            nx_librpm::fingerprints(&key).with_context(|| format!("reading the key at {url}"))?;
-        // Shown before anything changes, so the user sees what they trust.
-        ui.step(format_args!(
-            "{} is signed with {}",
-            entry.name,
-            fingerprints.join(", ")
-        ));
-        fetched.push(Fetched {
-            entry,
-            key,
-            fingerprints,
-        });
-    }
+    let fetched = entries(&http, &vars, source, key, priority)?
+        .into_iter()
+        .map(|entry| fetch(ui, &http, &vars, &image_ids, entry))
+        .collect::<Result<Vec<_>>>()?;
 
     let mut session = Session::open(ui, machine, Refresh::IfMissing, false, |m| {
         for f in &fetched {
@@ -140,6 +116,84 @@ pub fn add(
     Ok(())
 }
 
+/// `entry`'s key, from its https URL, shown before anything changes so the
+/// user sees what they trust.
+fn fetch(
+    ui: &mut Ui,
+    http: &dyn Http,
+    vars: &Vars,
+    image_ids: &[String],
+    entry: RepoEntry,
+) -> Result<Fetched> {
+    let repo = Repo::added(&host::added(&entry), vars)?;
+    if image_ids.contains(&repo.id) {
+        bail!("{} is one of the image's repos", entry.name);
+    }
+    let url = repo
+        .gpgkey
+        .first()
+        .filter(|k| nx_core::Https::parse(k).is_some())
+        .with_context(|| format!("{} needs a key served over https (--key <url>)", entry.name))?;
+    let key = String::from_utf8_lossy(&http.get(url)?).into_owned();
+    let fingerprints =
+        nx_librpm::fingerprints(&key).with_context(|| format!("reading the key at {url}"))?;
+    ui.step(format_args!(
+        "{} is signed with {}",
+        entry.name,
+        fingerprints.join(", ")
+    ));
+    Ok(Fetched {
+        entry,
+        key,
+        fingerprints,
+    })
+}
+
+/// The keys of `wanted`'s repos that have none pinned yet (`nx apply` on a
+/// new machine), fetched and shown as `nx repo add` does. Refuses two
+/// repos with one id, and a repo the image has.
+pub fn fetch_unpinned(ui: &mut Ui, machine: &Machine, wanted: &Manifest) -> Result<Unpinned> {
+    for (i, r) in wanted.repos.iter().enumerate() {
+        if let Some(other) = wanted.repos[..i]
+            .iter()
+            .find(|o| id_of(&o.name) == id_of(&r.name))
+        {
+            bail!("repos {} and {} would share one id", other.name, r.name);
+        }
+    }
+    let vars = machine.vars();
+    let image_ids: Vec<String> = repo::load(&machine.root, &vars)?
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let dir = host::keys_dir(&host::state());
+    let http = Ureq::new();
+    let fetched = wanted
+        .repos
+        .iter()
+        .filter(|r| {
+            !dir.join(nx_rpm::packages::pinned_key(&id_of(&r.name)))
+                .exists()
+        })
+        .map(|r| fetch(ui, &http, &vars, &image_ids, r.clone()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Unpinned(fetched))
+}
+
+/// Keys fetched for repos that had none pinned.
+pub struct Unpinned(Vec<Fetched>);
+
+impl Unpinned {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Pins them; [`Pins::undo`] takes them back if the change fails.
+    pub fn pin(&self, dir: &Path) -> Result<Pins> {
+        Pins::write(dir, &self.0)
+    }
+}
+
 /// Another added repo with `name`'s id: `copr:a/b` and `copr:a:b` would
 /// share the pool's repo, the cache and the pinned key.
 fn same_id<'a>(m: &'a Manifest, name: &str) -> Option<&'a RepoEntry> {
@@ -151,7 +205,7 @@ fn same_id<'a>(m: &'a Manifest, name: &str) -> Option<&'a RepoEntry> {
 
 /// Key files written for a change, and what they replaced, so a change
 /// that fails leaves the keys as they were.
-struct Pins(Vec<(PathBuf, Option<String>)>);
+pub struct Pins(Vec<(PathBuf, Option<String>)>);
 
 impl Pins {
     fn write(dir: &Path, fetched: &[Fetched]) -> Result<Self> {
@@ -169,7 +223,7 @@ impl Pins {
         Ok(pins)
     }
 
-    fn undo(self) {
+    pub fn undo(self) {
         for (path, before) in self.0 {
             let _ = match before {
                 Some(text) => std::fs::write(&path, text),

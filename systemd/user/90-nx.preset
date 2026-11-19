@@ -1,0 +1,3 @@
+# Installed as /usr/lib/systemd/user-preset/90-nx.preset.
+enable nx-notify.path
+enable nx-notify.service

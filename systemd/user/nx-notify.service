@@ -1,0 +1,15 @@
+[Unit]
+Description=Notify about what nx's background jobs couldn't do
+Documentation=https://github.com/Siddhj2206/nx
+ConditionUser=!@system
+ConditionPathExists=/var/lib/nx/generations
+# The notification daemon is part of the graphical session.
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nx notify
+
+[Install]
+# Once at login, for what happened while nobody was.
+WantedBy=graphical-session.target

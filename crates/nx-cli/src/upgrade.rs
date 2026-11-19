@@ -18,7 +18,7 @@ use crate::ui::{self, Stream, Ui};
 
 /// What changed for one package.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Change {
+pub enum Change {
     Upgraded {
         name: String,
         from: String,
@@ -79,7 +79,16 @@ pub fn run(
         let lost = session.tool.as_ref().is_some_and(tool::incomplete);
         if !same_pin || lost {
             let system = tool::system(session.universe.arch());
-            let locked = tier.resolve(ui, &manifest, None, &system)?;
+            let (locked, held) =
+                tier.resolve_holding(ui, &manifest, None, session.tool.as_ref(), &system)?;
+            if !held.is_empty() {
+                ui.warn(format_args!(
+                    "nixpkgs {} has no usable {}: keeping the build you have (nx remove {} to drop it)",
+                    tier.release.version(),
+                    held.join(", "),
+                    if held.len() == 1 { "it" } else { "them" }
+                ));
+            }
             let version = |t: &nx_core::LockedTool| -> BTreeMap<String, String> {
                 t.packages
                     .iter()
@@ -121,7 +130,7 @@ pub fn run(
 
 /// Package by package, from `before` to `after` (name → version); `tag`
 /// follows the version.
-fn diff(
+pub fn diff(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
     tag: &str,
@@ -152,13 +161,8 @@ fn diff(
     out
 }
 
-fn render(
-    out: &mut Stream,
-    changes: &[Change],
-    moved: Option<&str>,
-    generation: Option<u32>,
-    secs: f64,
-) {
+/// One `↑`, `+` or `-` line per change.
+pub fn lines(out: &mut Stream, changes: &[Change]) {
     let style = out.style;
     for c in changes {
         match c {
@@ -179,6 +183,17 @@ fn render(
             )),
         }
     }
+}
+
+fn render(
+    out: &mut Stream,
+    changes: &[Change],
+    moved: Option<&str>,
+    generation: Option<u32>,
+    secs: f64,
+) {
+    lines(out, changes);
+    let style = out.style;
     let upgraded = changes
         .iter()
         .filter(|c| matches!(c, Change::Upgraded { .. }))

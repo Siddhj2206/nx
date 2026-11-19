@@ -22,6 +22,7 @@ const PLACEMENT: &[(&str, &str)] = &[
     ("why", "Packages"),
     ("generations", "Maintenance"),
     ("rollback", "Maintenance"),
+    ("apply", "Maintenance"),
     ("repo", "Maintenance"),
     ("cache", "Maintenance"),
     ("sync", "Maintenance"),
