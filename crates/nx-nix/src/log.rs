@@ -3,15 +3,17 @@
 //! and errors (ported from nx 0.x's `nixlog`).
 //!
 //! The format is Nix's own and unversioned (ADR-0001). The parser keeps to
-//! activity and result types that have been stable for years; a line it
-//! can't read comes out as text, so a newer Nix degrades to its own words.
+//! activity and result types that have been stable for years, and degrades
+//! rather than fails: an action, type or field it doesn't know is skipped,
+//! a field of another JSON type reads as absent, and an `@nix` line it
+//! can't read at all is dropped. A Nix release that changes the log loses
+//! nx some notes and progress, never the install. A line that isn't `@nix`
+//! (Nix printing plainly) comes out as text.
 //! Nix logs download retries at error level with "warning:" in the text,
 //! and recovered failures as "error (ignored):": notes are classified by
 //! text, not level.
 
 use std::collections::HashMap;
-
-use serde::Deserialize;
 
 use crate::{store_name, strip_ansi};
 
@@ -30,13 +32,11 @@ const LVL_WARN: i64 = 1;
 const LVL_TALK: i64 = 4;
 
 /// One `@nix` line.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub struct Event {
     pub action: String,
     pub id: u64,
     pub parent: u64,
-    #[serde(rename = "type")]
     pub kind: i64,
     pub level: i64,
     pub text: String,
@@ -45,9 +45,34 @@ pub struct Event {
 }
 
 impl Event {
-    /// Reads one line; `None` for one that isn't an event.
+    /// Reads one line; `None` for one that isn't an `@nix` line. Each field
+    /// is read on its own, so one Nix renamed or retyped is only missing:
+    /// a missing `level` reads as quieter than any nx shows.
     pub fn parse(line: &str) -> Option<Self> {
-        serde_json::from_str(line.trim().strip_prefix("@nix ")?).ok()
+        let json = line.trim().strip_prefix("@nix")?;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+        let get = |k: &str| value.get(k);
+        let text = |k: &str| {
+            get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let int = |k: &str| get(k).and_then(serde_json::Value::as_i64);
+        let id = |k: &str| get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        Some(Self {
+            action: text("action"),
+            id: id("id"),
+            parent: id("parent"),
+            kind: int("type").unwrap_or(-1),
+            level: int("level").unwrap_or(i64::MAX),
+            text: text("text"),
+            msg: text("msg"),
+            fields: get("fields")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 
     fn str(&self, i: usize) -> &str {
@@ -152,7 +177,7 @@ impl Tracker {
                     a.path = Some(p);
                 }
             }
-            ACT_BUILD => {
+            ACT_BUILD if !ev.str(0).is_empty() => {
                 let name = store_name(ev.str(0)).trim_end_matches(".drv").to_owned();
                 notes.push(Note::Building { name: name.clone() });
                 a.build = Some(name);
@@ -386,6 +411,35 @@ not json"#;
                 Note::Raw("not json".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_log_nx_does_not_know_loses_notes_not_the_install() {
+        // What a newer Nix might write: an unknown action, activity and
+        // result type, new fields, a retyped field, a msg without a level,
+        // and lines that aren't JSON or an object.
+        let log = r#"@nix {"action":"phase","id":9,"name":"unpack"}
+@nix {"action":"start","id":2,"level":3,"parent":0,"text":"","type":142,"fields":[{"new":true}],"extra":1}
+@nix {"action":"start","id":3,"level":3,"parent":0,"text":"building","type":105,"fields":[{"drvPath":"/nix/store/x-y.drv"}]}
+@nix {"action":"result","id":2,"type":199,"fields":"no longer a list"}
+@nix {"action":"stop","id":2}
+@nix {"action":"stop","id":3}
+@nix {"action":"start","id":"4","level":3,"parent":0,"type":108,"fields":["/nix/store/5m5ri3ilhw2ihz9p6icdkzs5vbjm3a6b-jq-1.8.2","https://cache.nixos.org"]}
+@nix {"action":"msg","msg":"something new"}
+@nix {"action":"msg","level":"error","msg":"also new"}
+@nix ["a","list"]
+@nix {"truncated":
+@nix
+"#;
+        let mut lines: Vec<String> = log.lines().map(str::to_owned).collect();
+        assert_eq!(notes(log), [], "every line is skipped");
+        // A substitution after them still reads.
+        let ok = include_str!("../../../testdata/nix-build-storepath.jsonl");
+        assert_eq!(notes(&format!("{log}{ok}")).len(), 1);
+        // A failed run with only unreadable lines says so plainly.
+        assert_eq!(error_text(&lines), "nix failed without saying why");
+        lines.push("error: plain words".into());
+        assert_eq!(error_text(&lines), "plain words");
     }
 
     #[test]

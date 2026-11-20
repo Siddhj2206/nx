@@ -240,7 +240,7 @@ and runs the fixture tests and a dry-run resolve against rawhide's repos,
 so a moved repo file or a soname bump shows up months before Neptuno
 rebases. The COPR rawhide chroot gives the build half for free.
 
-**6.3 Nix's log degrades.** An unknown internal-json message or field is
+**~~6.3 Nix's log degrades.~~** *Done (`nx_nix::log::Event::parse` reads each field on its own).* An unknown internal-json message or field is
 skipped, never an error: a Nix release that changes the log loses the
 progress bar, not the install. A test feeds the parser a line it doesn't
 know.
