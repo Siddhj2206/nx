@@ -1,0 +1,87 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":semanticCommits"
+  ],
+  "description": "Runs as the hosted Mend Renovate app, as for Neptuno. Renovate merges an automerge PR itself once every check is green (main has no required checks, so platform automerge would not wait).",
+  "platformAutomerge": false,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "schedule": [
+    "* 0-6 * * 1"
+  ],
+  "prConcurrentLimit": 10,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true
+  },
+  "packageRules": [
+    {
+      "description": "Crates: one weekly PR for everything non-major; it merges when CI (both arches) is green.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "crates",
+      "automerge": true
+    },
+    {
+      "description": "GitHub Actions: one weekly PR after a 3-day quarantine. Only first-party actions automerge: the release job can write releases.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "actions/**"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Dev tools in mise.toml (git-cliff).",
+      "matchManagers": [
+        "mise"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "dev tools",
+      "automerge": true
+    },
+    {
+      "description": "nx is built for Neptuno's Fedora: 45 -> 46 moves with the image, by hand (dev/Containerfile, both workflows, dev/dist's tarball name).",
+      "matchDepNames": [
+        "quay.io/fedora/fedora",
+        "registry.fedoraproject.org/fedora"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Majors always wait for a human. Last matching rule wins, so keep this last.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false
+    }
+  ]
+}
