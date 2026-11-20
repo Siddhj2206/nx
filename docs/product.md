@@ -1,56 +1,64 @@
 # nx: product
 
-> This describes nx 0.x, the Go front end to a Nix profile (tag `v0.2.0`). nx 1.0 is a rebuild: [design.md](design.md) is its design and [ADR-0006](adr/0006-rust-rebuild-two-tiers.md) says why. What carries over is the *Output* section (symbols, results on stdout, progress on stderr, exit codes) and the per-package progress for the tool tier.
+What nx 1.0 does and shows, command by command. [design.md](design.md) is
+how and why it works; nx 0.x, the Go front end to a Nix profile, is tag
+`v0.2.0`, and its output is what 1.0 keeps.
 
-nx installs command-line packages from nixpkgs into your Nix profile. It fills
-the role Homebrew plays on macOS: per-user packages, no root, and one command
-to keep them current. It covers the everyday half of package management and
-leaves the rest to `nix`.
+nx installs packages on a Fedora bootc system, live, without rebuilding the
+image or rebooting. It covers the everyday half of package management:
+`dnf` for the image itself and Flatpak for desktop apps stay as they are.
 
 ## Principles
 
-- **Fast by not asking Nix.** Search, info, list, history and outdated read
-  files: the profile manifest, the registry, a local catalog of nixpkgs, and
-  narinfo files from the binary cache. Nix runs only to change the store.
-- **One nixpkgs for everything.** The user registry pins `nixpkgs` to one
-  channel release. Every package comes from it, so they share dependencies,
-  and only `nx upgrade` moves it ([ADR-0004](adr/0004-one-pin-from-the-channel.md)).
-- **Say what happens, package by package.** Each download or build gets a
-  line as it finishes, with a live block underneath showing what's in flight.
+- **Two tiers, one ABI per process.** Packages that plug into the system
+  (`-devel` packages, libraries, compilers, services) are Fedora RPMs for the
+  booted image, overlaid onto `/usr`. Standalone tools come from nixpkgs,
+  sealed with their own libraries. `nx add` picks the tier; `--host` and
+  `--tool` override it.
+- **The image is the anchor.** Host packages are resolved against the
+  booted image and resolved again for every new one. nx never writes the
+  image and never upgrades what the image ships.
+- **One nixpkgs for every tool.** The tool tier follows one pinned nixpkgs
+  release; `nx upgrade` (or the weekly timer) moves it.
+- **Reads are local.** `list`, `why`, `generations` and `status` read files.
+  `search` and `info` use cached repo metadata and wait on the network only
+  for a repo with nothing cached, or with `--refresh`.
+- **Every change is a generation.** `add`, `remove`, `upgrade`, `apply` and
+  `repo` build a new generation and make it live; `rollback` goes back to an
+  earlier one.
 - **Results on stdout, progress on stderr.** `nx list | grep x` sees only
   results. Colour turns off for pipes, `NO_COLOR` and `TERM=dumb`.
 
-## What Homebrew and dnf show, and what nx takes
-
-| Moment | Homebrew | dnf5 | nx |
-|---|---|---|---|
-| Before installing | "Fetching dependencies for x: a, b" | A table of name, arch, version, repo and size; totals; a y/N prompt | The step (`› Installing ripgrep 15.2.0`), then Nix's plan as one line: count, download and unpacked size. No prompt, like brew. |
-| While downloading | Concurrent rows with byte counts (brew 4.5+) | `[3/12] name 100% \| speed \| size \| time` per package, then a total row | One permanent `↓ name version size` line per package as it lands. Below them, a live block with each download's bar and bytes, and a total bar with count, bytes and speed |
-| Building | Formula build log, collapsed | n/a | `⚙ name version built in 14s` once done; live phase and last log line while building |
-| After | "🍺 /opt/.../ripgrep/15.2.0: 13 files, 6.3MB" | "Complete!" | `+ ripgrep 15.2.0`, then `✓ 1 added · 28 unchanged · 7.8 MiB in 6.9s` |
-| info | Version, description, homepage, license, installed path and size, dependencies with ✔/✘ | Name, version, size, repo, summary, URL, license, description | Description, homepage, command, license, unfree/broken notes, installed version and nixpkgs revision, own size and closure size, download size, direct dependencies |
-| outdated | `name (old) < new` | `check-upgrade` lists updates | `↑ name old → new` against the newest channel release, without moving the pin |
-| list | Names (`--versions` adds versions) | name, version, repo | Name, version, and the description when there's a terminal |
-| history | n/a | `dnf history`: id, command, date, altered | Each profile generation with its date and what changed (`↑ + -`); the current one is marked |
-| cleanup | "Removing: … (N files, X MB)"; "freed approximately X" | `autoremove` and `clean` | Profile versions dropped, then space freed and the store-path count |
-
 ## Commands
 
-| Command | Does | Runs nix? |
-|---|---|---|
-| `add <name>...` (`install`) | Installs from the pinned nixpkgs. Takes Homebrew spellings (`node@22`). Refuses unfree packages without `--unfree`. Typos get "did you mean". Warns when an earlier PATH directory has a command of the same name, since that copy is the one that runs | `nix profile add` |
-| `remove <name>...` (`rm`, `uninstall`) | Removes. Space comes back with `clean` | `nix profile remove` |
-| `list` (`ls`) | Installed packages | no |
-| `search <term>...` | Searches the catalog: exact name, then prefix, then name contains, then description; top-level before package sets; 25 shown | no |
-| `info <name>` | Details and sizes | `nix eval` for the store path |
-| `try <name> [-- cmd]` (`shell`) | Runs a package without installing it | `nix build`, `nix shell` |
-| `upgrade` (`update`) | Moves the pin to the newest channel release, then upgrades everything. Returns at once when every package is already built from the pin | `nix registry pin`, `nix profile upgrade --all` |
-| `outdated` | New versions in the newest release | no |
-| `history` | Profile generations | no |
-| `rollback` | Back one generation | `nix profile rollback` |
-| `clean` (`gc`, `cleanup`) | Drops history older than 14 days and collects garbage | `nix profile wipe-history`, `nix store gc` |
+| Command | Does |
+|---|---|
+| `add <pkg>…` | Adds packages, live. Takes names, commands (`rg`), provides (`pkgconfig(xkbcommon)`) and files; `name@repo` pins the repo. Typos get "did you mean". A package the image must ship (kernel, drivers) gets a hint instead. `--host`/`--tool` pick the tier; `--override` and `--without` settle a command two packages provide; `--allow-unfree` and `--allow-scriptlets` allow what nx otherwise refuses. |
+| `remove <pkg>…` | Removes packages and the dependencies only they needed; stops and disables their units first |
+| `upgrade` | Host packages to newer builds for the image, and the nixpkgs pin to its current release (`--host` or `--tool` for one tier) |
+| `list` (`ls`) | Installed packages: host packages with their versions and what pulled them in, then tools with their release and commands |
+| `search <term>…` | Fedora, added repos and the nixpkgs catalog, each result marked with its source; 25 per source |
+| `info <pkg>` | One package: version, tier and why, repo or release, license, size, commands |
+| `why <name\|path>` | Who provides a package, command or file, why it is there, and the generation that added it |
+| `generations` | Every generation, what it changed, and the current one |
+| `rollback [N]` | Makes the previous generation (or `N`) current again |
+| `apply [file]` | Makes the system match a manifest: a new machine copies `manifest.toml` and runs it |
+| `repo add\|list\|remove` | Third-party RPM repos: `copr:owner/project`, a `.repo` file's URL, or a base URL with `--key`. Keys are pinned by content |
+| `cache add\|list\|remove` | Extra Nix binary caches for the tool tier |
+| `shell [cmd]` | A shell, or one command, with the host tier on its paths |
+| `status` | The images nx resolves against (booted, staged, rollback), each one's generation, and the tool tier's release |
+| `doctor` | Checks that what nx set up is what the system runs: nxd, the merge, `PATH` order, leaked Nix variables, background failures. Exits 1 on a failure |
+| `sync` | Builds a generation for every deployed image; the staged-image hook, boot and the daily timer run it |
+| `gc` | Removes generations nothing deployed needs, and the packages only they used |
+| `migrate` | Moves nx 0.x's Nix profile into the tool tier |
 
-Exit codes: 0 success, 1 failure, 2 misuse, 130 interrupted.
+`add`, `remove`, `upgrade`, `rollback`, `apply` and `gc` take `--dry-run`. Exit codes: 0
+success, 1 failure, 2 misuse, 130 interrupted.
+
+In the background, `nx-sync` builds generations for a staged image and
+`nx-refresh.timer` refreshes repo metadata daily; `nx-upgrade.timer` moves
+the nixpkgs pin weekly. What they couldn't do (a failed sync, a package
+left out of an image's generation) reaches the desktop as a notification.
 
 ## Output
 
@@ -61,6 +69,32 @@ Every line is indented two spaces and starts with one symbol for its kind:
 ⚙ built    ✓ done       ! warning  ✗ error
 ```
 
+Results go to stdout; steps, warnings and errors to stderr. A change lists
+what it added, upgraded and removed, then one summary line:
+
+```
+  + libffi-devel   3.5.2-3.fc45   fedora  29 KiB
+  + wayland-devel  1.26.0-3.fc45  fedora  161 KiB
+
+  2 packages · 190 KiB download, 758 KiB installed · dry run, nothing changed
+```
+
+Detail views (`info`, `why`) have a bold name, a dim version, then rows
+with dim keys padded to 11:
+
+```
+  ripgrep 15.2.0
+
+  Asked       rg
+  Tier        tool · nixpkgs, sealed beside the image
+  Release     nixpkgs-26.11pre1124565.19cfded70b91
+  Why         you added it · a standalone tool
+  Generation  65 · added in 63
+```
+
+An error is one line of context joined with `: `. Phase 8 of
+[plan-1.1.md](plan-1.1.md) splits it into a headline, reasons and fixes.
+
 Nix's own messages are reworded or dropped:
 
 - An evaluation trace shrinks to its innermost error ("unrar-7.3.2 has an
@@ -68,36 +102,29 @@ Nix's own messages are reworded or dropped:
 - A download retry, which Nix logs at error level with the URL, becomes
   `! retrying ripgrep · <reason>`.
 - "error (ignored)" messages are dropped, since Nix recovered by itself.
-- After `add`, any of the new package's commands that an earlier PATH
-  directory also provides is listed once per directory:
-  `! clang: addr2line, ar, as, c++, c++filt and 15 more · /usr/bin comes first on PATH, so its copy runs`.
-  The check is generic and names no package. A host that puts the system
-  before the profile (Neptuno does, so a Nix compiler can't replace
-  `/usr/bin/cc`) still lets the user install anything.
 - Lines that aren't JSON are passed through unchanged, so a format change in a
   newer Nix shows Nix's own words instead of nothing.
 
 ## Speed
 
-Measured on the reference machine with 28 packages installed:
+nx 1.0.1 on the reference machine (Neptuno 45, 6 host packages, 25 tools,
+warm caches):
 
-| | bash nx / nix | nx |
-|---|---|---|
-| `list` | ~0.2 s (`nix profile list`) | 3 ms |
-| `search ripgrep` | 1.2 s cached, 20 s+ cold (`nix search`) | 90 ms |
-| `upgrade` with nothing new | several seconds (re-evaluates every package) | 0.9 s (one HTTP request) |
-| `info ripgrep` | n/a | ~1 s (eval plus parallel narinfo lookups) |
-| `add` of a package already in the store | ~1 s | 0.25 s |
+| Command | Time |
+|---|---|
+| `list` | 12 ms |
+| `generations` | 13 ms |
+| `why rg` | 70 ms |
+| `status` | 170 ms |
+| `info ripgrep` | 1.5 s |
+| `add --dry-run wayland-devel` | 1.8 s |
+| `search ripgrep` | 2.0 s |
 
-Downloads are as fast as Nix makes them: `max-substitution-jobs` and
-`http-connections` in nix.conf decide parallelism, and nx only draws them.
+`search`, `info` and a resolve load the image's rpmdb and every repo into
+libsolv from `.solv` caches; that load is most of their time.
 
 ## Later
 
-- Build the catalog for a pin older than the channel's current release (the
-  release bucket can be listed); for now the newest catalog stands in, and
-  search says so.
-- `nx which <command>`: which package provides a command, from nix-index's
-  database.
-- `--json` on list, search, info and outdated.
-- Talk to the daemon directly for store queries, if a measurement asks for it.
+[plan-1.1.md](plan-1.1.md) is what comes next: one builder running as `nx`,
+the prefix backend, unfree packages, extra caches and `nx migrate` removed,
+and `nx outdated`.
