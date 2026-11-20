@@ -431,7 +431,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nx-activate"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nx-core",
  "nx-scriptlet",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "nx-cli"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "anstream",
  "anyhow",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "nx-core"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nx-scriptlet",
  "rustix",
@@ -471,14 +471,14 @@ dependencies = [
 
 [[package]]
 name = "nx-http"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "ureq",
 ]
 
 [[package]]
 name = "nx-librpm"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "libc",
  "nx-scriptlet",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "nx-nix"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "brotli-decompressor",
  "nx-http",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "nx-proto"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nx-core",
  "serde",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "nx-rpm"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "nx-http",
  "nx-librpm",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "nx-scriptlet"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "sha2",
@@ -529,11 +529,11 @@ dependencies = [
 
 [[package]]
 name = "nx-shim"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 
 [[package]]
 name = "nx-solv"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "libc",
  "thiserror",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "nxd"
-version = "1.0.0-alpha.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "nx-activate",

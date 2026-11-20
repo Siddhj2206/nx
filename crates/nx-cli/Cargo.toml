@@ -18,11 +18,11 @@ workspace = true
 anstream = "1.0.0"
 anyhow = "1.0.104"
 clap = { version = "4.6.8", features = ["derive"] }
-nx-librpm = { version = "1.0.0-alpha.0", path = "../nx-librpm" }
-nx-activate = { version = "1.0.0-alpha.0", path = "../nx-activate" }
-nx-core = { version = "1.0.0-alpha.0", path = "../nx-core" }
-nx-nix = { version = "1.0.0-alpha.0", path = "../nx-nix" }
-nx-proto = { version = "1.0.0-alpha.0", path = "../nx-proto" }
-nx-rpm = { version = "1.0.0-alpha.0", path = "../nx-rpm" }
+nx-librpm = { version = "1.0.0", path = "../nx-librpm" }
+nx-activate = { version = "1.0.0", path = "../nx-activate" }
+nx-core = { version = "1.0.0", path = "../nx-core" }
+nx-nix = { version = "1.0.0", path = "../nx-nix" }
+nx-proto = { version = "1.0.0", path = "../nx-proto" }
+nx-rpm = { version = "1.0.0", path = "../nx-rpm" }
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 clap_mangen = "0.3.3"

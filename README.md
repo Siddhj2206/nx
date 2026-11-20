@@ -3,9 +3,9 @@
 Packages for a Fedora bootc system, live, without rebuilding the image or
 rebooting.
 
-> **Rebuild in progress.** This branch is nx 1.0, a Rust rewrite. The
-> released nx is 0.x (tag `v0.2.0`), a Homebrew-style front end to a Nix
-> profile. See [docs/adr/0006](docs/adr/0006-rust-rebuild-two-tiers.md).
+nx 1.0 is a Rust rebuild of nx 0.x (tag `v0.2.0`, a front end to a Nix
+profile); `nx migrate` moves a 0.x profile into it. See
+[docs/adr/0006](docs/adr/0006-rust-rebuild-two-tiers.md).
 
 nx sorts every package by whose libraries it loads:
 
@@ -17,28 +17,32 @@ nx sorts every package by whose libraries it loads:
   with its own sealed libraries, exposed through small shims that never leak
   Nix's environment into host programs.
 
-Working today: `nx status`, and for the host tier `nx search`, `nx info`
-and `nx add --dry-run`, which resolve against the booted image with its own
-libsolv.
-
 ```
-$ nx add --dry-run libxkbcommon-devel wayland-devel
-
-  + libxkbcommon-devel  1.13.1-4.fc45  fedora      74 KiB
-  + wayland-devel       1.26.0-3.fc45  fedora      161 KiB
-
-  2 packages · 235 KiB download, 1.1 MiB installed · dry run, nothing changed
-
-$ nx status
-
-  ghcr.io/siddhj2206/neptuno:latest 45.20261118
-  Neptuno 45 · booted from sha256:92409d3fcf84
-
-  Staged      none
-  Rollback    45.20261117 from sha256:292ee1bfc6d4
-  Host tier   resolves (nx add --dry-run); installs from M3
-  Tool tier   not built yet (M6)
+nx add <pkg>…        live, in seconds: tools from nixpkgs, the rest as Fedora RPMs
+nx remove <pkg>…     and what only they needed
+nx upgrade           newer host builds and the current nixpkgs release
+nx apply [file]      make the machine match a manifest
+nx list | why | search | info | status | doctor
+nx rollback [N]      an earlier generation, live again
+nx repo | cache      third-party RPM repos, extra Nix caches
+nx migrate           nx 0.x's Nix profile into nx
 ```
+
+Every change builds a generation for every deployed image (booted, staged,
+rollback); at boot `nx select` merges the one built for the image that
+booted. Timers refresh metadata daily (and collect garbage) and move the
+nixpkgs pin weekly; failures reach the desktop as notifications.
+
+## Installing
+
+nx links the image's libsolv and librpm, so a release is one tarball per
+Fedora release and architecture, the tree an image unpacks at `/`:
+`nx-v<version>-fc<release>-<arch>.tar.gz`, with `SHA256SUMS`. In a
+Containerfile, unpack it, check it, and enable its units (the preset does,
+or list them: `nxd.socket`, `nx-select`, `nx-settle`, `nx-sync`,
+`nx-refresh.timer`, `nx-upgrade.timer`, and the user units
+`nx-notify.path` and `.service`). The tool tier needs the image's Nix and
+its daemon. Neptuno does all of this.
 
 The design, milestones and open questions are in
 [docs/design.md](docs/design.md).

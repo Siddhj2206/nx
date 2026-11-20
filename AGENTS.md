@@ -3,7 +3,7 @@
 nx 1.0 is a package manager for a Fedora bootc system, in Rust: Fedora RPMs
 overlaid live onto the image's `/usr` (the host tier) and sealed nixpkgs
 tools beside it (the tool tier). It is a rebuild of nx 0.x, a Go front end to
-a Nix profile that lives on as tag `v0.2.0` and is still what Neptuno ships.
+a Nix profile that lives on as tag `v0.2.0`. Neptuno ships 1.0 from its release tarballs.
 
 Start with `docs/design.md` (the design, milestones and open questions), then
 `docs/adr/0006-rust-rebuild-two-tiers.md` (why a rebuild, and what changed
