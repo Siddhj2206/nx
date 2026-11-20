@@ -141,6 +141,9 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   solver's problems name the hidden builds in the way (`Problems::involved`);
   re-solving with the newer builds visible doesn't work, because a newer
   `-devel` requires its own newer library, which the locked image refuses.
+- `repo_add_rpmdb` reads under the pool's rootdir only with
+  `REPO_USE_ROOTDIR`; without it, a staged or rollback image's resolve
+  reads the running system's rpmdb (1.0.0 did).
 - libsolv selections honour `pool->considered`, so `Pool` clears it before
   selecting and on `prepare`; a stale map hides packages added since (Koji).
 - Changing state needs write access to `/var/lib/nx`: the `nx` user owns it

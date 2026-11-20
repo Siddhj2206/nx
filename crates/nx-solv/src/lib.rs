@@ -172,8 +172,11 @@ impl Pool {
         // SAFETY: live pool; libsolv copies rootdir.
         unsafe { sys::pool_set_rootdir(self.p(), rootdir.as_ptr()) };
         let (id, repo) = self.create_repo(name, 0)?;
+        // Without REPO_USE_ROOTDIR libsolv ignores the pool's rootdir and
+        // reads the running system's rpmdb.
+        let flags = sys::REPO_USE_ROOTDIR as i32;
         // SAFETY: repo belongs to this pool; no reference repo.
-        let rc = unsafe { sys::repo_add_rpmdb(repo, std::ptr::null_mut(), 0) };
+        let rc = unsafe { sys::repo_add_rpmdb(repo, std::ptr::null_mut(), flags) };
         // SAFETY: as above; an empty rootdir resets it.
         unsafe { sys::pool_set_rootdir(self.p(), std::ptr::null()) };
         if rc != 0 {

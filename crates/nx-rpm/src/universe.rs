@@ -463,9 +463,12 @@ impl Universe {
 }
 
 fn load_installed(pool: &mut Pool, opts: &Options, solv_dir: &Path) -> Result<RepoId> {
+    // `installed-<digest>.solv`, before 1.0.1, could hold the running
+    // system's rpmdb under another image's digest: never read them.
+    remove_matching(solv_dir, "installed-");
     let cache = opts.image_digest.as_ref().map(|d| {
         let key = d.strip_prefix("sha256:").unwrap_or(d);
-        solv_dir.join(format!("installed-{key}.solv"))
+        solv_dir.join(format!("image-{key}.solv"))
     });
     if let Some(path) = &cache
         && path.exists()
@@ -476,7 +479,7 @@ fn load_installed(pool: &mut Pool, opts: &Options, solv_dir: &Path) -> Result<Re
     }
     let id = pool.load_rpmdb("@image", &opts.root)?;
     if let Some(path) = &cache {
-        remove_matching(solv_dir, "installed-");
+        remove_matching(solv_dir, "image-");
         // A failed cache write only costs speed next time.
         let _ = pool.write_solv(id, path);
     }
