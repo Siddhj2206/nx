@@ -281,9 +281,10 @@ pub fn load_from(
             );
         }
     }
-    // Old enough to mention: a change refreshed past `metadata_expire`
-    // already (`Refresh::IfStale`), and `nx-refresh.timer` runs every 6 h, so
-    // a read finding metadata older than a day means the refreshes failed.
+    // Worth mentioning: a refresh that failed (the timer's, before this
+    // command), and metadata older than a day. A change refreshed past
+    // `metadata_expire` already (`Refresh::IfStale`), and `nx-refresh.timer`
+    // runs every 6 h, so a read rarely sees either.
     let mut expired = Vec::new();
     for loaded in universe.stale() {
         match &loaded.synced.freshness {
@@ -297,6 +298,10 @@ pub fn load_from(
                     &format!("cached metadata for {}: {error}", loaded.repo.id),
                 );
             }
+            Freshness::Failed(error) => ui.warn(format_args!(
+                "the last refresh of {}'s metadata failed: {error}; --refresh tries again",
+                loaded.repo.id
+            )),
             _ if loaded.synced.age().is_none_or(|age| age > MENTION_AFTER) => {
                 expired.push(loaded.repo.id.as_str());
             }

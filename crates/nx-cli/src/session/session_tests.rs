@@ -565,5 +565,16 @@ fn a_change_refreshes_expired_metadata_and_a_read_mentions_it_after_a_day() -> R
         "{}",
         err.text()
     );
+    // A read after the failed refresh says so, even under a day old.
+    age(2)?;
+    let err = load(Refresh::IfMissing)?;
+    assert!(
+        err.starts_with("  ! the last refresh of fedora's metadata failed: ")
+            && err.ends_with("; --refresh tries again\n"),
+        "{err}"
+    );
+    // A refresh that works clears it.
+    load(Refresh::Always)?;
+    assert_eq!(load(Refresh::IfMissing)?, "");
     Ok(())
 }

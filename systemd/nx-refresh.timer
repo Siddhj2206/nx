@@ -4,7 +4,7 @@ Documentation=https://github.com/Siddhj2206/nx
 
 [Timer]
 OnCalendar=00/6:00
-RandomizedDelaySec=30min
+RandomizedDelaySec=1h
 Persistent=true
 
 [Install]

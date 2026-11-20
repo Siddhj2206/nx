@@ -16,29 +16,55 @@ use crate::tool;
 use crate::ui::{self, Stream, Ui};
 
 /// `nx sync`'s tail: removes what `nx gc` would, saying so only when
-/// something went. With `nix` (the daily `nx sync --refresh`) the Nix
-/// store is collected too: old tool tiers (the weekly upgrade leaves one
-/// each time) would otherwise stay until someone runs `nx gc`. Returns how
-/// many generations were removed.
+/// something went. With `nix` (the refresh timer's `nx sync --refresh`) the
+/// Nix store is collected too, at most once a day ([`NIX_GC_EVERY`]): old
+/// tool tiers (the weekly upgrade leaves one each time) would otherwise stay
+/// until someone runs `nx gc`. Returns how many generations were removed.
 pub fn collect(ui: &mut Ui, machine: &Machine, nix: Option<&dyn Nix>) -> Result<usize> {
     let (dropped, packages, keep) = remove(machine, false)?;
     if !dropped.is_empty() || packages > 0 {
         render(&mut ui.out, &dropped, packages, false);
     }
-    if let Some(nix) = nix.filter(|n| n.available()) {
+    let state = host::state();
+    if let Some(nix) = nix.filter(|n| n.available() && nix_gc_due(&state)) {
         // The host tier is done; a Nix failure is only a warning here.
-        if let Err(e) = collect_nix(ui, nix, &host::state(), &keep) {
-            ui.warn(format_args!("the Nix store was not collected: {e:#}"));
+        match collect_nix(ui, nix, &state, &keep) {
+            Ok(()) => record_nix_gc(&state),
+            Err(e) => ui.warn(format_args!("the Nix store was not collected: {e:#}")),
         }
     }
     Ok(dropped.len())
+}
+
+/// How often the refresh timer (every 6 h) also collects the Nix store.
+/// `nix store gc` walks the whole store, and old tool tiers pile up only
+/// weekly.
+pub const NIX_GC_EVERY: std::time::Duration = std::time::Duration::from_secs(20 * 3600);
+
+/// Marks when the timer last collected the Nix store: its mtime.
+const NIX_GC_STAMP: &str = "nix-gc";
+
+/// Whether the last collection is [`NIX_GC_EVERY`] ago, or there was none.
+fn nix_gc_due(state: &State) -> bool {
+    std::fs::metadata(state.root().join(NIX_GC_STAMP))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age >= NIX_GC_EVERY)
+}
+
+/// Best effort: without the stamp the next run collects again.
+fn record_nix_gc(state: &State) {
+    let _ = std::fs::write(state.root().join(NIX_GC_STAMP), "");
 }
 
 pub fn run(ui: &mut Ui, machine: &Machine, nix: &dyn Nix, dry_run: bool) -> Result<()> {
     let (dropped, packages, keep) = remove(machine, dry_run)?;
     render(&mut ui.out, &dropped, packages, dry_run);
     if !dry_run && nix.available() {
-        collect_nix(ui, nix, &host::state(), &keep)?;
+        let state = host::state();
+        collect_nix(ui, nix, &state, &keep)?;
+        record_nix_gc(&state);
     }
     Ok(())
 }
@@ -134,8 +160,8 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
                 let _ = std::fs::remove_file(path);
             }
         }
-        // What an earlier gc set aside (removable now if this is root: nx
-        // sync runs gc as root every day) and what an interrupted build
+        // What an earlier gc set aside (removable now if this is root: the
+        // refresh timer's nx sync runs gc as root) and what an interrupted build
         // left: no build runs while this holds the lock.
         state.purge_leftovers(guard);
     }
@@ -187,6 +213,25 @@ mod tests {
                 String::new()
             })
         }
+    }
+
+    #[test]
+    fn the_timer_collects_the_nix_store_once_a_day() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-gc-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let state = State::new(&dir);
+        assert!(nix_gc_due(&state));
+        record_nix_gc(&state);
+        assert!(!nix_gc_due(&state));
+        let yesterday = std::time::SystemTime::now() - NIX_GC_EVERY;
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(NIX_GC_STAMP))?
+            .set_modified(yesterday)?;
+        assert!(nix_gc_due(&state));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 
     #[test]

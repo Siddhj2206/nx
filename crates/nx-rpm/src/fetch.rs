@@ -41,16 +41,23 @@ pub enum Freshness {
     Expired,
     /// From the cache because every mirror failed; the error says why.
     Unreachable(String),
+    /// From the cache, which an earlier refresh failed to update (the
+    /// refresh timer's, say); the error says why. Recorded beside the cache
+    /// in `last-error` until a refresh works.
+    Failed(String),
 }
 
+/// Beside a repo's cached metadata: why the last refresh of it failed.
+const LAST_ERROR: &str = "last-error";
+
 impl Synced {
-    /// `repomd.xml`'s `primary` checksum: what a `.solv` cache is keyed by.
     /// How long ago this metadata was last checked against the repo: the
     /// age of its cached `repomd.xml`, rewritten on every fetch.
     pub fn age(&self) -> Option<std::time::Duration> {
         age(&self.primary.with_file_name("repomd.xml"))
     }
 
+    /// `repomd.xml`'s `primary` checksum: what a `.solv` cache is keyed by.
     pub fn primary_checksum(&self) -> &str {
         self.repomd.get("primary").map_or("", |p| &p.checksum.hex)
     }
@@ -88,7 +95,7 @@ pub fn sync(
         let expired = repo
             .metadata_expire
             .is_some_and(|expire| age(&dir.join("repomd.xml")).is_none_or(|age| age >= expire));
-        if expired {
+        if expired && synced.freshness == Freshness::Cached {
             synced.freshness = Freshness::Expired;
         }
         let use_cache = match refresh {
@@ -111,13 +118,19 @@ pub fn sync(
     }
     on_fetch();
     let err = match fetch(repo, http, &dir, cached.as_ref()) {
-        Ok(synced) => return Ok(synced),
+        Ok(synced) => {
+            let _ = std::fs::remove_file(dir.join(LAST_ERROR));
+            return Ok(synced);
+        }
         Err(e) => e,
     };
     // Old metadata beats none: nx can still resolve, and the caller tells
-    // the user why it is old.
+    // the user why it is old. The failure is kept for later reads, which
+    // don't go to the network themselves. Best effort: a user who can't
+    // write the shared cache only loses the note.
     match cached {
         Some(mut synced) => {
+            let _ = write_atomic(&dir.join(LAST_ERROR), err.to_string().as_bytes());
             synced.freshness = Freshness::Unreachable(err.to_string());
             Ok(synced)
         }
@@ -236,11 +249,15 @@ fn read_cached(dir: &Path) -> Option<Synced> {
         return None;
     }
     let base = std::fs::read_to_string(dir.join("base")).ok()?;
+    let freshness = match std::fs::read_to_string(dir.join(LAST_ERROR)) {
+        Ok(error) => Freshness::Failed(error.trim().to_owned()),
+        Err(_) => Freshness::Cached,
+    };
     Some(Synced {
         repomd,
         primary,
         base,
-        freshness: Freshness::Cached,
+        freshness,
     })
 }
 
