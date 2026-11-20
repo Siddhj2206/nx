@@ -419,7 +419,7 @@ pub fn remove_tree(dir: &Path) -> Result<()> {
 /// Removes `dir`, or, when this user can't (a tree root built: `nx sync`
 /// runs as root, and a package's directory modes leave wheel's ACL mask
 /// without write), renames it to a `.trash-` name beside it, which every
-/// listing skips, for [`State::purge_trash`] as root to finish. Renaming
+/// listing skips, for [`State::purge_leftovers`] as root to finish. Renaming
 /// within the same directory needs write access only to the parent.
 pub(crate) fn discard(dir: &Path) -> Result<()> {
     match remove_tree(dir) {
@@ -443,18 +443,19 @@ pub(crate) fn discard(dir: &Path) -> Result<()> {
 }
 
 impl State {
-    /// Removes what [`discard`] couldn't, as far as this user can: the
-    /// `.trash-` entries among the generations and in the store. Needs the
-    /// state lock. Returns how many are left.
-    pub fn purge_trash(&self, _lock: &Lock) -> usize {
+    /// Removes what [`discard`] couldn't and what an interrupted build left,
+    /// as far as this user can: the `.trash-` entries and the `.N.part` and
+    /// `.<sha256>.part` staging directories among the generations and in the
+    /// store. Holding the state lock means no build is running, so no
+    /// `.part` is in use. Returns how many are left.
+    pub fn purge_leftovers(&self, _lock: &Lock) -> usize {
         let mut left = 0;
         for dir in [self.generations_dir(), self.store_dir()] {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
             for e in entries.flatten() {
-                if e.file_name().to_string_lossy().starts_with(".trash-")
-                    && remove_tree(&e.path()).is_err()
+                if is_leftover(&e.file_name().to_string_lossy()) && remove_tree(&e.path()).is_err()
                 {
                     left += 1;
                 }
@@ -462,6 +463,20 @@ impl State {
         }
         left
     }
+}
+
+/// A name [`State::purge_leftovers`] removes: `.trash-…`, or `.N.part` and
+/// `.<sha256>.part` (a generation's or a package's staging directory).
+fn is_leftover(name: &str) -> bool {
+    if name.starts_with(".trash-") {
+        return true;
+    }
+    let Some(stem) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".part")) else {
+        return false;
+    };
+    let number = !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit());
+    let sha256 = stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit());
+    number || sha256
 }
 
 fn make_writable(dir: &Path) {
@@ -526,6 +541,32 @@ pub(crate) mod tests {
                 .insert(&lock, "../x", |_| Ok::<(), Error>(()))
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn leftovers_of_interrupted_builds_are_purged() -> Result<()> {
+        let tmp = TempDir::new("leftovers");
+        let state = State::new(&tmp.0);
+        let lock = state.lock()?;
+        let gens = state.generations_dir();
+        let store = state.store_dir();
+        for d in [
+            gens.join(".65.part/sysext/usr"),
+            gens.join(".trash-3-1-0"),
+            gens.join("64"),
+            store.join(format!(".{SHA}.part")),
+            store.join(SHA),
+            store.join(".cache.part"),
+        ] {
+            create_dir(&d)?;
+        }
+        assert_eq!(state.purge_leftovers(&lock), 0);
+        assert!(!gens.join(".65.part").exists() && !gens.join(".trash-3-1-0").exists());
+        assert!(!store.join(format!(".{SHA}.part")).exists());
+        // Generations, entries and names nx doesn't stage stay.
+        assert!(gens.join("64").is_dir() && store.join(SHA).is_dir());
+        assert!(store.join(".cache.part").is_dir());
         Ok(())
     }
 

@@ -95,7 +95,8 @@ hard way.
   without wheel's ACL (package modes cut the ACL mask), so a wheel user
   can't delete them: `state::discard` renames them to `.trash-*` beside
   themselves (renaming needs write access to the parent only), and the next
-  gc as root (`nx sync`'s) purges them. Every listing skips dot names.
+  gc as root (`nx sync`'s) purges them, with the `.part` staging
+  directories an interrupted build left. Every listing skips dot names.
 
 ## nxd and activation
 

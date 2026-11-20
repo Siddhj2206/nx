@@ -134,9 +134,10 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
                 let _ = std::fs::remove_file(path);
             }
         }
-        // What an earlier gc set aside: removable now if this is root
-        // (nx sync runs gc as root every day).
-        state.purge_trash(guard);
+        // What an earlier gc set aside (removable now if this is root: nx
+        // sync runs gc as root every day) and what an interrupted build
+        // left: no build runs while this holds the lock.
+        state.purge_leftovers(guard);
     }
     Ok((plan.drop, store.len(), plan.keep))
 }
