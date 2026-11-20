@@ -26,7 +26,7 @@ record the decision in `design.md` (an ADR where marked).
 1.x sandbox the units ──┐
 5.2 Web seam ───────────┼─> 2.x nx-user builder + Varlink merge ─> 3.1 SYSEXT_LEVEL
 4.x deletions ──────────┘     (4.x first: less code to move)
-5.1, 5.3, 6.x, 7.x: independent, any order
+5.1, 5.3, 6.x, 7.x, 8.x: independent, any order (8.1 first)
 ```
 
 Phase 4 comes before Phase 2 now that its decisions are taken: the builder
@@ -111,6 +111,15 @@ in `nx-proto`, no new crate. Drops the pitfall "the nxd unit must not use
 
 **2.3 nxd accepts files owned by root or `nx` only.** Root's copy stays,
 with simpler checks.
+
+**2.4 Re-merge only when the host tier changed.** Today every activation
+copies, labels and refreshes the extension, a tool-only change too, and a
+refresh in systemd 262 also reloads the service manager: `nx add ripgrep`
+runs a daemon-reload and swaps `/usr` under running builds. When the new
+generation's host packages (`lock.toml`) and `activation.toml` equal the
+merged one's, nxd only moves `current`. Likewise `nx sync` carries the
+previous host tier over for the other images on a tool-only change instead
+of resolving again. Reverses audit 20.
 
 **What 2.x deletes**
 
@@ -233,6 +242,79 @@ know.
 | 7.9 | COPR chroot check before a rebase | When the staged image's `VERSION_ID` differs, check each added COPR for that release's chroot and name the missing ones in the notification before the reboot. |
 | 7.10 | COPR key rotation | `nx add`/`upgrade` show the old and new fingerprints and the exact `nx repo add <repo> --new-key` to run. |
 | 7.11 | *Stretch:* COPR search | `nx search --copr <term>` through COPR's API, results marked as COPR with the `nx repo add copr:…` to run. Depends on a service nx doesn't otherwise need; only if the rest is done. |
+
+## Phase 8: output
+
+What nx prints is hard to read in three ways (seen on the laptop after
+`nx migrate`, 2026-11-20): errors are one line of `: `-joined context with
+pre-formatted lists, every step stays on screen, and listings don't group.
+`docs/product.md` *Output* (symbols, indent, stdout/stderr, exit codes)
+stays; this changes what goes in the lines.
+
+**Rules**
+
+1. An error is a headline (what failed, plain words, one line), reasons
+   (indented, one per line, grouped) and fixes (the exact command). Library
+   errors carry data (`Conflict { package, files }`), the CLI words them;
+   no `{e:#}` chains.
+2. Lists are grouped and counted ("libxml2-devel is already in that image,
+   386 files"); `-v` shows them whole.
+3. On a terminal, steps are one live status line that is replaced as work
+   moves on; only results stay. Piped or in the journal every step prints,
+   as now. The escape codes live in `Style`.
+4. Results are an aligned table, then one summary line: what changed,
+   size, time. Generation numbers, the backend, activation time and other
+   images' generations go to `-v`; a failure for another image is an error
+   block like any other.
+5. A warning is about this change and is printed once.
+6. Times are relative ("2 h ago", "yesterday"), not UTC dates.
+
+**8.1 Bugs first**
+
+- `Ui::warn` doesn't indent continuation lines: the scriptlet refusal
+  prints its advice at column 0, and suggests
+  `nx add <what you asked for>` though it knows the package.
+- A failed sync for another image is reported twice (the warning, then the
+  same text wrapped in "some deployed images have no host tier yet").
+- `! <pkg>: scriptlets … skipped, as you allowed` prints on every build
+  that contains the package (`nx remove git`), not only when it changes.
+- `nx generations` diffs host packages only and against the previous
+  number: tool-tier changes show as "0 packages · no change", and other
+  images' generations sit between them, diffed across images. Diff against
+  `parent`, both tiers, and group by image.
+- Dates are UTC (`03:31` for 09:01 IST).
+- `nx list` doesn't pad the version column.
+- `help::reword` keeps only the first line of clap's error, so `nx add`
+  with no package says "the following required arguments were not
+  provided:" and drops `<PACKAGE>...`. Say `nx add needs a package: nx add
+  <package>...`.
+
+**8.2 Errors.** `ui::Problem` (headline, reasons, fixes) and one renderer;
+the overlap check reports by package; the scriptlet translator says what
+a refused idiom does (`update-alternatives`: "makes ld.mold the system
+linker") and the full text moves to `nx info <pkg>`.
+
+**8.3 Live status line and `-v`/`--verbose`.**
+
+**8.4 Command by command.**
+
+| Command | Change |
+| --- | --- |
+| `add`, `remove`, `upgrade`, `apply`, `repo` | Table of changes (`+ name version  why`), dependencies folded under what pulled them in, one summary line; other images on one line unless they fail. |
+| `migrate` | Until it goes (4.4): one batch without the failures, one table, "open a new shell" at the end. |
+| `generations` | Per image (booted first, then staged, rollback); one row per change with both tiers' diff against its parent; the other images' rows collapsed, `--all` shows them. |
+| `gc --dry-run` | One line per kind (`- 58 generations: 29 for this image, 29 for the rollback image`), not one per generation; space it frees. |
+| `list` | Two sections, host and tools, padded columns; commands dimmed. |
+| `search` | One line per result (name, version, source, summary cut to the terminal); exact name, then prefix, then contains, across both sources; installed ones marked; 20 shown. |
+| `info` | An *Installed* row (version, generation added); skipped scriptlets for a host package; size and closure for a tool. |
+| `status` | An image without a host tier gets the headline of the reason; `nx sync` or `-v` for the rest. |
+| `why` | *Asked* becomes *Query*. |
+| `rollback --dry-run` | Show what the switch changes (both tiers' diff), not only the numbers. |
+| unknown command | `did you mean nx add?` instead of clap's "a similar subcommand exists". |
+
+*Exit:* each command's output, before and after, is a whole-block plain
+test (`Ui::plain`), and the before/after examples in this section are
+among them.
 
 ## Docs
 
