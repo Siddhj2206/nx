@@ -4,11 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use anyhow::Result;
 use nx_core::{DeploymentSource, Deployments, State};
 use nx_rpm::Refresh;
+
+use nx_http::Canned;
 
 use super::{Env, How, Session};
 use crate::changes::Change;
@@ -37,28 +38,6 @@ fn testdata(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/rpm")
         .join(name)
-}
-
-/// Canned answers by URL; anything else is a 404. Records what was asked.
-#[derive(Default)]
-struct Canned {
-    bodies: HashMap<String, Vec<u8>>,
-    asked: Mutex<Vec<String>>,
-}
-
-impl nx_rpm::Http for Canned {
-    fn get(&self, url: &str) -> nx_rpm::Result<Vec<u8>> {
-        if let Ok(mut a) = self.asked.lock() {
-            a.push(url.to_owned());
-        }
-        self.bodies
-            .get(url)
-            .cloned()
-            .ok_or_else(|| nx_rpm::Error::Fetch {
-                url: url.to_owned(),
-                reason: "404".into(),
-            })
-    }
 }
 
 /// No Nix here: a host-tier change never runs it.
@@ -167,13 +146,11 @@ impl Fixture {
     fn env(&self) -> Env {
         Env {
             state: self.state(),
-            http: Box::new(Canned {
-                bodies: self.bodies.clone(),
-                ..Canned::default()
-            }),
+            http: Box::new(Canned::new(self.bodies.clone())),
             nix: Box::new(NoNix),
             live: Box::new(MoveCurrent),
             journal: nx_core::Journal::off(),
+            shim: Some(self.dir.join("nx-shim")),
         }
     }
 }
@@ -316,5 +293,201 @@ fn repos_change_only_when_the_session_opens() -> Result<()> {
         });
     });
     assert!(err.is_err());
+    Ok(())
+}
+
+/// `tests/fixtures/nixpkgs`, recorded by its `record.sh`.
+fn nixpkgs(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/nixpkgs")
+        .join(name)
+}
+
+/// What `record.sh` recorded, and where nx asks for it: the channel (a
+/// redirect to the release), the package list, hello's closure's narinfos.
+/// Returns the HTTP, the release directory and what the closure downloads.
+fn recorded_nixpkgs() -> Result<(Canned, String, u64)> {
+    let at = std::fs::read_to_string(nixpkgs("git-revision.url"))?
+        .trim()
+        .to_owned();
+    let release = at.strip_suffix("/git-revision").unwrap_or(&at).to_owned();
+    let mut http = Canned::new([
+        (at.clone(), std::fs::read(nixpkgs("git-revision"))?),
+        (
+            format!("{release}/packages.json.br"),
+            std::fs::read(nixpkgs("packages.json.br"))?,
+        ),
+    ]);
+    http.redirects.insert(
+        format!("{}/git-revision", nx_nix::channel::CHANNEL),
+        at.clone(),
+    );
+    let mut download = 0;
+    for entry in std::fs::read_dir(nixpkgs("narinfo"))? {
+        let path = entry?.path();
+        let text = std::fs::read_to_string(&path)?;
+        download += text
+            .lines()
+            .find_map(|l| l.strip_prefix("FileSize: "))
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        http.bodies
+            .insert(format!("{}/{name}", nx_nix::CACHE), text.into_bytes());
+    }
+    Ok((http, release, download))
+}
+
+/// `nix` over a store of its own: `eval` answers what was recorded,
+/// `build --no-link` puts the store paths it is given there with the
+/// commands `bins` names (as substituting would), and every call is kept.
+struct FakeNix {
+    root: PathBuf,
+    eval: String,
+    bins: Vec<(&'static str, &'static str)>,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+impl nx_nix::Nix for FakeNix {
+    fn run(&self, args: &[String], _: &mut dyn FnMut(&str)) -> nx_nix::Result<String> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(args.to_vec());
+        }
+        match args.first().map(String::as_str) {
+            Some("eval") => Ok(self.eval.clone()),
+            Some("build") if args.iter().any(|a| a == "--no-link") => {
+                for path in args.iter().filter(|a| a.starts_with(nx_nix::STORE)) {
+                    let dir = self.on_disk(path);
+                    std::fs::create_dir_all(dir.join("bin")).map_err(nx_nix::Error::Spawn)?;
+                    for (_, name) in self.bins.iter().filter(|(p, _)| p == path) {
+                        let bin = dir.join("bin").join(name);
+                        std::fs::write(&bin, "#!/bin/sh\n")
+                            .and_then(|()| {
+                                use std::os::unix::fs::PermissionsExt;
+                                std::fs::set_permissions(
+                                    &bin,
+                                    std::fs::Permissions::from_mode(0o755),
+                                )
+                            })
+                            .map_err(nx_nix::Error::Spawn)?;
+                    }
+                }
+                Ok(String::new())
+            }
+            _ => Ok(String::new()),
+        }
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// A tool-tier package new to the pin: the channel says which release,
+/// its package list loads, `nix eval` gives its store path, the narinfos
+/// give its closure and size, `nix build` realises it and roots it in
+/// the generation, which becomes current. Recorded answers throughout.
+#[test]
+fn a_tool_is_evaluated_planned_realised_and_rooted() -> Result<()> {
+    // From eval.json: re-recording changes these.
+    const HELLO: &str = "/nix/store/sd779x86bjaqxj2lzh2jsir4h0zjz6d1-hello-2.12.3";
+    const VERSION: &str = "2.12.3";
+
+    let f = Fixture::new("tool")?;
+    std::fs::write(f.dir.join("nx-shim"), "the shim")?;
+    let (http, release, download) = recorded_nixpkgs()?;
+    let store = f.dir.join("nix-root");
+    std::fs::create_dir_all(store.join("nix/store"))?;
+    let calls = std::sync::Arc::default();
+    let env = Env {
+        http: Box::new(http),
+        nix: Box::new(FakeNix {
+            root: store.clone(),
+            eval: std::fs::read_to_string(nixpkgs("eval.json"))?,
+            bins: vec![(HELLO, "hello")],
+            calls: std::sync::Arc::clone(&calls),
+        }),
+        ..f.env()
+    };
+    let mut ui = ui();
+    let asked = vec!["hello".to_owned()];
+    let mut s = Session::open_in(env, &mut ui, &f.machine, Refresh::IfMissing, false, |m| {
+        m.add_tool(&asked);
+        Ok(())
+    })?;
+    assert!(s.tool_available());
+    let catalog = s.catalog(&mut ui)?;
+    assert_eq!(
+        catalog.find("hello").map(|p| p.version.as_str()),
+        Some(VERSION)
+    );
+    assert!(catalog.find("ripgrep").is_some());
+
+    let outcome = s.plan(
+        &mut ui,
+        &How {
+            asked: &asked,
+            ..How::default()
+        },
+    )?;
+    assert_eq!(
+        outcome.changes,
+        [Change::Added {
+            name: "hello".into(),
+            version: format!("{VERSION} · nixpkgs"),
+        }]
+    );
+    // hello and everything it references: nothing is in this store yet.
+    assert_eq!(outcome.tool_download, download);
+    assert!(
+        store.join(HELLO.trim_start_matches('/')).is_dir(),
+        "realised"
+    );
+
+    let built = s.install(&mut ui, &outcome.all)?;
+    drop(s);
+    let n = built.generation.number;
+    assert_eq!(f.state().current_number()?, Some(n));
+    let tool = built.generation.lock.tool.as_ref();
+    assert_eq!(
+        tool.map(|t| t.url.as_str()),
+        Some(release.as_str()),
+        "pinned to the channel's release"
+    );
+    let hello = tool.and_then(|t| t.package("hello"));
+    assert_eq!(hello.map(|p| p.version.as_str()), Some(VERSION));
+    assert_eq!(
+        hello.map(|p| p.paths().collect::<Vec<_>>()),
+        Some(vec![HELLO])
+    );
+    // Its command is exposed in the generation.
+    let exposed = built.generation.dir.join("bin/hello");
+    assert!(exposed.is_file(), "{exposed:?}");
+
+    let calls = calls.lock().map(|c| c.clone()).unwrap_or_default();
+    let verbs: Vec<&str> = calls
+        .iter()
+        .map(|c| match c.get(1).map(String::as_str) {
+            Some("--no-link") => "realise",
+            Some("--out-link") => "root",
+            _ => c[0].as_str(),
+        })
+        .collect();
+    assert_eq!(verbs, ["eval", "realise", "root"]);
+    assert_eq!(calls[0][3], format!("{release}/nixexprs.tar.xz"));
+    assert_eq!(calls[1].last().map(String::as_str), Some(HELLO));
+    assert_eq!(
+        calls[2][2],
+        built
+            .generation
+            .gcroots()
+            .join("root")
+            .display()
+            .to_string()
+    );
+    assert_eq!(calls[2].last().map(String::as_str), Some(HELLO));
     Ok(())
 }

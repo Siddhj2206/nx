@@ -214,7 +214,7 @@ fn tools(i: &Inputs, lock: &Lock, out: &mut Vec<Finding>) {
             "systemctl enable --now nix-daemon.service",
         ));
     }
-    if crate::tool::incomplete(tool) {
+    if crate::tool::incomplete(&nx_nix::System, tool) {
         out.push(warn(
             "some tools' Nix paths are gone from the store",
             "nx upgrade --tool fetches them again",

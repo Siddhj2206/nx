@@ -3,6 +3,7 @@
 //! `nix build`, never `nix-store`.
 
 use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::{Error, Result, log};
@@ -12,6 +13,27 @@ use crate::{Error, Result, log};
 /// stdout. A failure carries Nix's own error, condensed.
 pub trait Nix {
     fn run(&self, args: &[String], on_line: &mut dyn FnMut(&str)) -> Result<String>;
+
+    /// The root store paths are read under: `/` for the real store, a
+    /// fixture in tests (the machine running them may have a store).
+    fn root(&self) -> &Path {
+        Path::new("/")
+    }
+
+    /// Where `path` (`/nix/store/…`) is on disk.
+    fn on_disk(&self, path: &str) -> PathBuf {
+        self.root().join(path.trim_start_matches('/'))
+    }
+
+    /// Whether the store has `path`.
+    fn has(&self, path: &str) -> bool {
+        self.on_disk(path).exists()
+    }
+
+    /// Whether there is a store at all: the image has Nix.
+    fn available(&self) -> bool {
+        self.on_disk(crate::STORE).is_dir()
+    }
 }
 
 /// The real `nix` on `PATH` (`NX_NIX` names another, for tests in a VM).

@@ -1,0 +1,1 @@
+{"hello":{"drv":"/nix/store/0mvzg2dqivqc8ndvy2dxsh1zx9385ysn-hello-2.12.3.drv","name":"hello","outputs":[{"name":"out","path":"/nix/store/sd779x86bjaqxj2lzh2jsir4h0zjz6d1-hello-2.12.3"}],"version":"2.12.3"}}

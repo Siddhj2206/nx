@@ -4,8 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::web::Web;
-use crate::{Error, Result};
+use crate::{Error, Http, Result};
 
 /// Where releases come from.
 pub const CHANNEL: &str = "https://channels.nixos.org/nixpkgs-unstable";
@@ -50,9 +49,9 @@ impl Release {
 
 /// Asks the channel for its current release: one small request, which
 /// redirects to the release directory.
-pub fn latest(web: &Web) -> Result<Release> {
+pub fn latest(http: &dyn Http) -> Result<Release> {
     let url = format!("{CHANNEL}/git-revision");
-    let (rev, at) = web.text(&url)?.ok_or_else(|| Error::Fetch {
+    let (rev, at) = crate::text(http, &url)?.ok_or_else(|| Error::Fetch {
         url: url.clone(),
         reason: "not found".to_owned(),
     })?;

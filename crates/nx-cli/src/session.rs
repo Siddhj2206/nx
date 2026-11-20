@@ -41,6 +41,9 @@ pub struct Env {
     pub live: Box<dyn crate::live::Live>,
     /// Where fallbacks are recorded (plan 1.1, 0.1).
     pub journal: Journal,
+    /// The `nx-shim` exposed commands link to; `None` finds the one
+    /// installed beside nx.
+    pub shim: Option<PathBuf>,
 }
 
 impl Env {
@@ -53,6 +56,7 @@ impl Env {
             nix: Box::new(nx_nix::System),
             live: Box::new(crate::live::Nxd),
             journal: Journal::system("nx"),
+            shim: None,
         }
     }
 }
@@ -286,9 +290,34 @@ impl<'m> Session<'m> {
     pub fn tier(&mut self, ui: &mut Ui) -> Result<&mut Tier> {
         let tier = match self.tier.take() {
             Some(t) => t,
-            None => Tier::open(ui, self.tool.as_ref(), false)?,
+            None => Tier::open(
+                ui,
+                &*self.env.http,
+                self.nix_cache()?,
+                self.tool.as_ref(),
+                false,
+            )?,
         };
         Ok(self.tier.insert(tier))
+    }
+
+    /// The pinned release's package list, loaded once.
+    pub fn catalog(&mut self, ui: &mut Ui) -> Result<&nx_nix::Catalog> {
+        self.tier(ui)?;
+        let (Some(tier), http) = (self.tier.as_mut(), &*self.env.http) else {
+            bail!("the nixpkgs release didn't open");
+        };
+        tier.catalog(ui, http)
+    }
+
+    /// Whether the image has Nix, so the tool tier can be used.
+    pub fn tool_available(&self) -> bool {
+        self.env.nix.available()
+    }
+
+    /// Where the tool tier's catalogs are kept.
+    fn nix_cache(&self) -> Result<PathBuf> {
+        Ok(host::cache_dir_for(&self.env.state)?.join("nix"))
     }
 
     /// Resolves both tiers for the session's manifest, as `how` says, and
@@ -324,7 +353,7 @@ impl<'m> Session<'m> {
             self.tool = kept;
             return Ok(0);
         }
-        if !tool::available() {
+        if !self.env.nix.available() {
             bail!(
                 "the tool tier needs Nix in the image, and {} is missing",
                 nx_nix::STORE
@@ -338,7 +367,7 @@ impl<'m> Session<'m> {
             bail!("the nixpkgs release didn't open");
         };
         let locked = tier.resolve(ui, nix, &manifest, previous.as_ref(), &system)?;
-        let plan = tier.plan(&locked)?;
+        let plan = tier.plan(&*self.env.http, nix, &locked)?;
         if !dry_run {
             tier.realise(ui, nix, &self.env.journal, &locked, &plan, &system)?;
         }
@@ -351,13 +380,22 @@ impl<'m> Session<'m> {
     /// At an unchanged pin only paths the store lost are done again.
     /// Returns the release moved to and what realising downloads.
     fn upgrade_tools(&mut self, ui: &mut Ui) -> Result<(Option<String>, u64)> {
-        if !tool::available() || self.manifest.tool.packages.is_empty() {
+        if !self.env.nix.available() || self.manifest.tool.packages.is_empty() {
             return Ok((None, self.resolve_tools(ui)?));
         }
-        let tier = Tier::open(ui, self.tool.as_ref(), true)?;
+        let tier = Tier::open(
+            ui,
+            &*self.env.http,
+            self.nix_cache()?,
+            self.tool.as_ref(),
+            true,
+        )?;
         let same_pin =
             self.tool.as_ref().map(|t| t.rev.as_str()) == Some(tier.release.rev.as_str());
-        let lost = self.tool.as_ref().is_some_and(tool::incomplete);
+        let lost = self
+            .tool
+            .as_ref()
+            .is_some_and(|t| tool::incomplete(&*self.env.nix, t));
         if same_pin && !lost {
             return Ok((None, self.resolve_tools(ui)?));
         }
@@ -381,7 +419,7 @@ impl<'m> Session<'m> {
         }
         let mut download = 0;
         if !self.dry_run {
-            let plan = tier.plan(&locked)?;
+            let plan = tier.plan(&*self.env.http, &*self.env.nix, &locked)?;
             download = plan.sum.download;
             tier.realise(
                 ui,
@@ -586,7 +624,10 @@ impl<'m> Session<'m> {
             .as_ref()
             .is_some_and(|t| t.bins().next().is_some());
         let shim = if has_bins {
-            Some(crate::tool::shim(&self.env.state)?)
+            Some(match &self.env.shim {
+                Some(source) => crate::tool::shim_from(&self.env.state, source)?,
+                None => crate::tool::shim(&self.env.state)?,
+            })
         } else {
             None
         };
@@ -621,7 +662,7 @@ impl<'m> Session<'m> {
         };
         // Collected since it was realised: fetch it again. If that fails,
         // the host tier still gets its generation, without those commands.
-        if crate::tool::incomplete(&tool)
+        if crate::tool::incomplete(&*self.env.nix, &tool)
             && let Err(e) = crate::tool::restore(ui, &*self.env.nix, &tool)
         {
             ui.warn(format_args!(
@@ -637,12 +678,9 @@ impl<'m> Session<'m> {
                 .find(|p| host::has_command(&store.path(&p.sha256), name))
                 .map(|p| format!("the host tier's {}", p.name))
         };
-        let exposure = crate::tool::expose(
-            &mut tool,
-            &owner,
-            &manifest.overrides.names,
-            &crate::tool::commands,
-        );
+        let exposure = crate::tool::expose(&mut tool, &owner, &manifest.overrides.names, &|out| {
+            crate::tool::commands(&*self.env.nix, out)
+        });
         let previous = self.current.as_ref().and_then(|g| g.lock.tool.as_ref());
         // Packages this change adds: their commands must not clash.
         let fresh: Vec<String> = tool

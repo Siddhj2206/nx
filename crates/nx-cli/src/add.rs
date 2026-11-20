@@ -76,7 +76,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     // Where each new spec goes.
     let routing = session.manifest().routing.clone();
     let use_tool = opts.forced != Some(Forced::Host)
-        && tool::available()
+        && session.tool_available()
         && (routing.cli_tools == CliTools::Nix || opts.forced == Some(Forced::Tool));
     let toolchains = route::toolchains(&routing);
     let (mut fresh_host, mut fresh_tool, mut problems) = (Vec::new(), Vec::new(), Vec::new());
@@ -94,7 +94,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             });
         }
         if use_tool && !route::host_only(spec) {
-            let catalog = session.tier(ui)?.catalog(ui)?;
+            let catalog = session.catalog(ui)?;
             found.nix = catalog.find(spec).map(|p| Nixpkg::new(p, &toolchains));
             if found.rpm.is_none() && found.nix.is_none() {
                 found.similar = catalog.similar(spec, 3);
@@ -104,7 +104,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         match route {
             // Without the catalog, the solver has the last word on a name.
             Route::Refuse(_) if !use_tool => {
-                let why = if tool::available() {
+                let why = if session.tool_available() {
                     "routing.cli_tools is fedora"
                 } else {
                     "the image has no Nix"

@@ -192,7 +192,7 @@ do what* table becomes two rows.
 packages the manifest names (not their dependencies) into the package
 cache and runs the hint on their file lists, as a real run already does.
 
-**5.2 Audit 10: a seam for `nx-nix`'s `Web`.** The channel, catalog and
+**~~5.2 Audit 10: a seam for `nx-nix`'s `Web`.~~** *Done: `nx_http::Http` is the one seam (`Web` is gone), `Nix` reads the store under its `root()`, fixtures in `tests/fixtures/nixpkgs`.* The channel, catalog and
 narinfo fetches go through `nx-http`'s `Http` trait, as `nx-rpm`'s do.
 `session_tests.rs` then runs a tool-tier change that evaluates something
 new, with a fake `Nix` and recorded catalog and narinfo fixtures.

@@ -14,14 +14,14 @@ use nx_core::{
 use nx_nix::eval::{self, Evaluated};
 use nx_nix::log::Note;
 use nx_nix::narinfo::{self, Caches, Sum};
-use nx_nix::{Catalog, Nix, Release, Web};
+use nx_nix::{Catalog, Http, Nix, Release};
 
 use crate::host;
 use crate::ui::{self, Ui};
 
 /// Whether the image has Nix: without `/nix/store` the tool tier is off.
 pub fn available() -> bool {
-    Path::new(nx_nix::STORE).is_dir()
+    nx_nix::System.available()
 }
 
 /// Nix's name for the platform: `x86_64-linux`.
@@ -41,7 +41,7 @@ pub fn pinned(tool: &LockedTool) -> Release {
 /// The release, the catalog (loaded when first needed) and the means to
 /// evaluate and realise.
 pub struct Tier {
-    web: Web,
+    /// Where the catalog is kept.
     cache: PathBuf,
     pub release: Release,
     catalog: Option<Catalog>,
@@ -49,30 +49,35 @@ pub struct Tier {
 
 impl Tier {
     /// The tool tier at `pinned`'s release, or at the channel's current one
-    /// when nothing is pinned yet or `latest` asks to move the pin.
-    pub fn open(ui: &mut Ui, pinned_to: Option<&LockedTool>, latest: bool) -> Result<Self> {
-        let web = Web::new();
+    /// when nothing is pinned yet or `latest` asks to move the pin. The
+    /// catalog is kept under `cache`.
+    pub fn open(
+        ui: &mut Ui,
+        http: &dyn Http,
+        cache: PathBuf,
+        pinned_to: Option<&LockedTool>,
+        latest: bool,
+    ) -> Result<Self> {
         let release = match pinned_to {
             Some(t) if !latest && !t.rev.is_empty() => pinned(t),
             _ => {
                 ui.step("asking the nixpkgs channel for its current release");
-                nx_nix::channel::latest(&web).context("finding the current nixpkgs release")?
+                nx_nix::channel::latest(http).context("finding the current nixpkgs release")?
             }
         };
         Ok(Self {
-            web,
-            cache: host::cache_dir()?.join("nix"),
+            cache,
             release,
             catalog: None,
         })
     }
 
     /// The release's package list, built once per release.
-    pub fn catalog(&mut self, ui: &mut Ui) -> Result<&Catalog> {
+    pub fn catalog(&mut self, ui: &mut Ui, http: &dyn Http) -> Result<&Catalog> {
         if self.catalog.is_none() {
             let version = self.release.version().to_owned();
             let err = &mut ui.err;
-            let catalog = Catalog::ensure(&self.web, &self.cache, &self.release, &mut || {
+            let catalog = Catalog::ensure(http, &self.cache, &self.release, &mut || {
                 let sym = err.style.cyan(ui::SYM_FETCH);
                 err.line(format_args!("{sym} nixpkgs {version} package list"));
             })
@@ -157,24 +162,28 @@ impl Tier {
 
     /// What realising `tool` takes: the closure of what isn't in the store
     /// yet, from cache.nixos.org.
-    pub fn plan(&self, tool: &LockedTool) -> Result<Plan> {
+    pub fn plan(&self, http: &dyn Http, nix: &dyn Nix, tool: &LockedTool) -> Result<Plan> {
         let roots: Vec<String> = tool
             .packages
             .iter()
             .flat_map(ToolPackage::paths)
-            .filter(|p| !local(p))
+            .filter(|p| !nix.has(p))
             .map(str::to_owned)
             .collect();
         if roots.is_empty() {
             return Ok(Plan::default());
         }
         let lookup = Caches {
-            web: &self.web,
+            http,
             urls: vec![nx_nix::CACHE.to_owned()],
         };
-        let closure =
-            narinfo::closure(&lookup, &roots, &|p| local(p)).context("reading the binary cache")?;
-        Ok(plan_from(tool, &closure))
+        // The walk runs on several threads; `Nix` isn't `Sync`, its root is.
+        let root = nix.root().to_owned();
+        let closure = narinfo::closure(&lookup, &roots, &|p| {
+            root.join(p.trim_start_matches('/')).exists()
+        })
+        .context("reading the binary cache")?;
+        Ok(plan_from(tool, &closure, &|p| nix.has(p)))
     }
 
     /// Realises what `plan` lists through the daemon, drawing each fetch
@@ -195,7 +204,7 @@ impl Tier {
         let lost: Vec<String> = tool
             .packages
             .iter()
-            .filter(|p| plan.build.contains(&p.attr) && !Path::new(&p.drv).exists())
+            .filter(|p| plan.build.contains(&p.attr) && !nix.has(&p.drv))
             .map(|p| p.attr.clone())
             .collect();
         self.evaluate(ui, nix, &lost, system)?;
@@ -312,10 +321,13 @@ pub fn catalog_to_read(ui: &mut Ui, pinned_to: Option<&LockedTool>) -> Option<Ca
     if !available() {
         return None;
     }
-    let loaded = Tier::open(ui, pinned_to, false).and_then(|mut t| {
-        t.catalog(ui)?;
-        Ok(t.catalog.take())
-    });
+    let http = nx_rpm::Ureq::new();
+    let loaded = host::cache_dir()
+        .and_then(|cache| Tier::open(ui, &http, cache.join("nix"), pinned_to, false))
+        .and_then(|mut t| {
+            t.catalog(ui, &http)?;
+            Ok(t.catalog.take())
+        });
     match loaded {
         Ok(c) => c,
         Err(e) => {
@@ -356,10 +368,6 @@ fn draw(ui: &mut Ui, note: Note) {
     }
 }
 
-fn local(path: &str) -> bool {
-    Path::new(path).exists()
-}
-
 /// What to realise.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -379,7 +387,11 @@ impl Plan {
 
 /// A package whose outputs a cache has is substituted by store path; one
 /// whose outputs no cache has is built.
-fn plan_from(tool: &LockedTool, closure: &BTreeMap<String, narinfo::Info>) -> Plan {
+fn plan_from(
+    tool: &LockedTool,
+    closure: &BTreeMap<String, narinfo::Info>,
+    local: &dyn Fn(&str) -> bool,
+) -> Plan {
     let mut plan = Plan {
         sum: narinfo::total(closure),
         ..Plan::default()
@@ -412,8 +424,8 @@ fn from_drv(p: &ToolPackage) -> String {
 
 /// The commands an output has: the executables in its `bin/`, without
 /// the dot-files wrappers keep their originals in.
-pub fn commands(out: &str) -> Vec<Bin> {
-    let Ok(entries) = std::fs::read_dir(Path::new(out).join("bin")) else {
+pub fn commands(nix: &dyn Nix, out: &str) -> Vec<Bin> {
+    let Ok(entries) = std::fs::read_dir(nix.on_disk(out).join("bin")) else {
         return Vec::new();
     };
     let mut bins: Vec<Bin> = entries
@@ -604,7 +616,12 @@ pub fn same(a: Option<&LockedTool>, b: Option<&LockedTool>) -> bool {
 /// state directory once per build of it, so generations can link to it
 /// (`NX_SHIM` names another, for a VM test).
 pub fn shim(state: &State) -> Result<PathBuf> {
-    let source = find_shim()?;
+    shim_from(state, &find_shim()?)
+}
+
+/// [`shim`] with `source` as the shim.
+pub fn shim_from(state: &State, source: &Path) -> Result<PathBuf> {
+    let source = source.to_owned();
     let sha = nx_rpm::packages::sha256_file(&source)
         .with_context(|| format!("reading {}", source.display()))?;
     let dir = state.root().join("store/shim");
@@ -668,11 +685,11 @@ pub fn add_roots(nix: &dyn Nix, g: &Generation) -> Result<()> {
 
 /// Whether some output of `tool` isn't in the store (collected since it
 /// was realised).
-pub fn incomplete(tool: &LockedTool) -> bool {
+pub fn incomplete(nix: &dyn Nix, tool: &LockedTool) -> bool {
     tool.packages
         .iter()
         .flat_map(ToolPackage::paths)
-        .any(|p| !local(p))
+        .any(|p| !nix.has(p))
 }
 
 /// Realises again the outputs of `tool` the store lost: from their
@@ -681,11 +698,11 @@ pub fn incomplete(tool: &LockedTool) -> bool {
 pub fn restore(ui: &mut Ui, nix: &dyn Nix, tool: &LockedTool) -> Result<()> {
     let mut installables = Vec::new();
     for p in &tool.packages {
-        let lost: Vec<&ToolOutput> = p.outputs.iter().filter(|o| !local(&o.path)).collect();
+        let lost: Vec<&ToolOutput> = p.outputs.iter().filter(|o| !nix.has(&o.path)).collect();
         if lost.is_empty() {
             continue;
         }
-        if Path::new(&p.drv).exists() {
+        if nix.has(&p.drv) {
             installables.push(from_drv(p));
         } else {
             installables.extend(lost.iter().map(|o| o.path.clone()));
@@ -706,7 +723,7 @@ pub fn root(nix: &dyn Nix, g: &Generation, tool: &LockedTool) -> Result<()> {
         .packages
         .iter()
         .flat_map(ToolPackage::paths)
-        .filter(|p| local(p))
+        .filter(|p| nix.has(p))
         .map(str::to_owned)
         .collect();
     let dir = g.gcroots();
@@ -914,7 +931,7 @@ mod tests {
                 ..narinfo::Info::default()
             },
         );
-        let plan = plan_from(&tool, &closure);
+        let plan = plan_from(&tool, &closure, &|p| Path::new(p).exists());
         assert_eq!(
             plan.installables,
             [

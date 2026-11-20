@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Condvar, Mutex};
 
-use crate::web::Web;
+use crate::Http;
 use crate::{Result, STORE, store_hash};
 
 /// Requests in flight at once.
@@ -56,17 +56,17 @@ pub trait Lookup: Sync {
 
 /// The caches over HTTP.
 pub struct Caches<'a> {
-    pub web: &'a Web,
+    pub http: &'a dyn Http,
     pub urls: Vec<String>,
 }
 
 impl Lookup for Caches<'_> {
     fn narinfo(&self, hash: &str) -> Result<Option<String>> {
         for base in &self.urls {
-            if let Some((text, _)) = self
-                .web
-                .text(&format!("{}/{hash}.narinfo", base.trim_end_matches('/')))?
-            {
+            if let Some((text, _)) = crate::text(
+                self.http,
+                &format!("{}/{hash}.narinfo", base.trim_end_matches('/')),
+            )? {
                 return Ok(Some(text));
             }
         }

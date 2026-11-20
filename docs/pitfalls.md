@@ -165,6 +165,10 @@ hard way.
   host's certificates and locale archive by default, and Fedora 45 has no
   `/etc/pki/tls/certs/ca-bundle.crt`. Only `TERMINFO_DIRS` is needed.
 - `nix store gc` prints its "… freed" summary on stdout, not stderr.
+- Read the store through the `Nix` trait (`Nix::has`, `Nix::on_disk`,
+  `Nix::available`), never `Path::new("/nix/store/…")`: the machine running
+  the tests may have a store with the very paths a fixture names. HTTP for
+  the tool tier is `nx_http::Http`, the same `Env.http` the host tier uses.
 
 Nix's internal-json log, from nx 0.x:
 

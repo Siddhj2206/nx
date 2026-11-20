@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 
+use crate::Http;
 use crate::channel::Release;
-use crate::web::Web;
 use crate::{Error, Result};
 
 /// Changes when the file's layout does; a file in another layout is rebuilt.
@@ -68,7 +68,7 @@ impl Catalog {
     /// first when it isn't there (about 10 MB, once per release).
     /// `on_build` is called before a download.
     pub fn ensure(
-        web: &Web,
+        http: &dyn Http,
         cache: &Path,
         release: &Release,
         on_build: &mut dyn FnMut(),
@@ -89,7 +89,7 @@ impl Catalog {
                 path: tmp.clone(),
                 source,
             })?;
-            let body = web.reader(&release.packages_json())?;
+            let body = http.reader(&release.packages_json())?;
             let json = brotli_decompressor::Decompressor::new(body, 1 << 16);
             build(json, out, release)?;
             std::fs::rename(&tmp, &file).map_err(|source| Error::Io {

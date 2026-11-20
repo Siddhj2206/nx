@@ -94,6 +94,7 @@ fn fetch(
         let part = file.with_extension("rpm.part");
         match http
             .download(&url, &part)
+            .map_err(Error::from)
             .and_then(|sha| check(&url, &sha, &p.sha256))
         {
             Ok(()) => {
@@ -251,7 +252,7 @@ pub fn koji(http: &dyn Http, rel: &Relative, keys: &RepoKeys, dir: &Path) -> Res
             rel.arch,
             rel.file_name()
         );
-        match http.get(&url) {
+        match http.get(&url).map_err(Error::from) {
             Ok(body) => {
                 write_atomic(&file, &body)?;
                 if let Err(e) = nx_librpm::verify(&file, keyring) {

@@ -67,8 +67,9 @@ Each crate's `Cargo.toml` description says what it holds. The seams to know:
   lock) → `Session::plan(How)` → `Session::install` or `session::finish`.
   A new command that changes packages is a manifest edit and a `How`, not a
   new pipeline. `Session::open_in(Env, …)` takes the state, `Http`, `Nix`
-  and `Live` it uses; `session/session_tests.rs` drives the pipeline on a
-  fixture root that way (test a change there before the VM).
+  and `Live` it uses; `session/session_tests.rs` drives the pipeline for
+  both tiers on a fixture root that way, with recorded repo and nixpkgs
+  answers (test a change there before the VM).
 - `crates/nx-cli/src/host.rs`: `Machine`, the system as one value (root,
   os-release, deployments, arch): commands read `/`, tests a fixture.
   `route.rs` is the pure tier decision; `tool.rs` drives the tool tier.

@@ -504,6 +504,7 @@ dependencies = [
  "jiff",
  "nx-activate",
  "nx-core",
+ "nx-http",
  "nx-librpm",
  "nx-nix",
  "nx-proto",
@@ -526,6 +527,8 @@ dependencies = [
 name = "nx-http"
 version = "1.0.1"
 dependencies = [
+ "sha2",
+ "thiserror",
  "ureq",
 ]
 

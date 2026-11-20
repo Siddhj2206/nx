@@ -8,106 +8,12 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use sha2::{Digest, Sha256};
-
 use crate::repo::Repo;
 use crate::repomd::{Checksum, DataFile, Metalink, Repomd, parse_metalink, parse_repomd};
 use crate::{Error, Result};
 
-/// Something that can GET a URL. [`Ureq`] is the real one; tests use a map.
-/// Shared across download threads.
-pub trait Http: Sync {
-    fn get(&self, url: &str) -> Result<Vec<u8>>;
-
-    /// GETs `url` into the file `to` (created or replaced) and returns the
-    /// SHA-256 of what was written. The default holds the body in memory;
-    /// [`Ureq`] streams it, so a large package never is.
-    fn download(&self, url: &str, to: &Path) -> Result<String> {
-        let body = self.get(url)?;
-        std::fs::write(to, &body).map_err(|source| Error::Write {
-            path: to.to_owned(),
-            source,
-        })?;
-        Ok(sha256_hex(&body))
-    }
-}
-
-/// HTTP over ureq, with nx's agent and retry policy ([`nx_http`]).
-#[derive(Default)]
-pub struct Ureq(nx_http::Client);
-
-impl Ureq {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl Http for Ureq {
-    fn get(&self, url: &str) -> Result<Vec<u8>> {
-        self.0
-            .get(url, |mut r| {
-                r.body_mut().with_config().limit(1 << 30).read_to_vec()
-            })
-            .map_err(|e| Error::Fetch {
-                url: url.to_owned(),
-                reason: e.to_string(),
-            })
-    }
-
-    fn download(&self, url: &str, to: &Path) -> Result<String> {
-        let fetch = |e: nx_http::ureq::Error| Error::Fetch {
-            url: url.to_owned(),
-            reason: e.to_string(),
-        };
-        // Each attempt starts the file over.
-        self.0
-            .get(url, |r| {
-                let file = std::fs::File::create(to)?;
-                let mut out = Hashing::new(std::io::BufWriter::new(file));
-                std::io::copy(&mut r.into_body().into_reader(), &mut out)?;
-                Ok(out.finish()?)
-            })
-            .map_err(fetch)
-    }
-}
-
-/// A writer that hashes what goes through it.
-pub(crate) struct Hashing<W> {
-    inner: W,
-    sha: Sha256,
-}
-
-impl<W: std::io::Write> Hashing<W> {
-    pub(crate) fn new(inner: W) -> Self {
-        Self {
-            inner,
-            sha: Sha256::new(),
-        }
-    }
-
-    /// Flushes and returns the SHA-256 of everything written, as hex.
-    pub(crate) fn finish(mut self) -> std::io::Result<String> {
-        self.inner.flush()?;
-        Ok(self
-            .sha
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect())
-    }
-}
-
-impl<W: std::io::Write> std::io::Write for Hashing<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.sha.update(&buf[..n]);
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
+pub(crate) use nx_http::Hashing;
+pub use nx_http::{Http, Ureq, sha256_hex};
 
 /// A repo's metadata on disk, verified.
 #[derive(Debug, Clone)]
@@ -343,11 +249,6 @@ fn verify(d: &DataFile, body: &[u8]) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn age(path: &Path) -> Option<std::time::Duration> {

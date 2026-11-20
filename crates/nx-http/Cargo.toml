@@ -1,6 +1,6 @@
 [package]
 name = "nx-http"
-description = "nx's HTTP client settings and retry policy, shared by the host and tool tiers"
+description = "nx's HTTP: the Http trait both tiers fetch through, the client settings and retry policy"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
@@ -12,3 +12,5 @@ workspace = true
 
 [dependencies]
 ureq = { version = "3.5.2", default-features = false, features = ["rustls", "platform-verifier"] }
+sha2 = "0.11.1"
+thiserror = "2"

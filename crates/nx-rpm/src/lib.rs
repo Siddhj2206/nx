@@ -45,43 +45,20 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+impl From<nx_http::FetchError> for Error {
+    fn from(e: nx_http::FetchError) -> Self {
+        Self::Fetch {
+            url: e.url,
+            reason: e.reason,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    use crate::{Error, Http, Result};
 
     /// Serves canned bodies and records requests.
-    #[derive(Default)]
-    pub struct FakeHttp {
-        pub bodies: HashMap<String, Vec<u8>>,
-        hits: Mutex<Vec<String>>,
-    }
-
-    impl FakeHttp {
-        pub fn hits(&self) -> Vec<String> {
-            self.hits.lock().map(|h| h.clone()).unwrap_or_default()
-        }
-
-        pub fn clear(&self) {
-            if let Ok(mut h) = self.hits.lock() {
-                h.clear();
-            }
-        }
-    }
-
-    impl Http for FakeHttp {
-        fn get(&self, url: &str) -> Result<Vec<u8>> {
-            if let Ok(mut h) = self.hits.lock() {
-                h.push(url.to_owned());
-            }
-            self.bodies.get(url).cloned().ok_or_else(|| Error::Fetch {
-                url: url.to_owned(),
-                reason: "404".into(),
-            })
-        }
-    }
+    pub type FakeHttp = nx_http::Canned;
 
     /// A fresh directory under the system temp dir, removed on drop.
     pub struct TempDir(pub std::path::PathBuf);

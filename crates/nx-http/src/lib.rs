@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+mod http;
+pub use http::{Canned, Error as FetchError, Hashing, Http, Ureq, sha256_hex};
 pub use ureq;
 use ureq::http::Response;
 use ureq::{Body, Error};

@@ -18,12 +18,11 @@ pub mod eval;
 pub mod log;
 pub mod narinfo;
 pub mod nix;
-pub mod web;
 
 pub use catalog::Catalog;
 pub use channel::Release;
 pub use nix::{Nix, System};
-pub use web::Web;
+pub use nx_http::Http;
 
 /// Where every store path lives.
 pub const STORE: &str = "/nix/store/";
@@ -52,6 +51,32 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl From<nx_http::FetchError> for Error {
+    fn from(e: nx_http::FetchError) -> Self {
+        Self::Fetch {
+            url: e.url,
+            reason: e.reason,
+        }
+    }
+}
+
+/// GETs `url` as text, with the URL it came from after redirects; `None`
+/// when the server has no such file (a binary cache's "don't have it").
+pub fn text(http: &dyn Http, url: &str) -> Result<Option<(String, String)>> {
+    match http.fetch(url) {
+        Ok((body, at)) => {
+            String::from_utf8(body)
+                .map(|t| Some((t, at)))
+                .map_err(|_| Error::Fetch {
+                    url: url.to_owned(),
+                    reason: "the answer is not text".to_owned(),
+                })
+        }
+        Err(e) if e.not_found() => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// `/nix/store/<hash>-ripgrep-15.2.0` → `ripgrep-15.2.0`; the input when it
 /// isn't a store path.

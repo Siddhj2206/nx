@@ -397,8 +397,8 @@ mod tests {
 
     struct Canned(&'static str);
     impl Http for Canned {
-        fn get(&self, _url: &str) -> nx_rpm::Result<Vec<u8>> {
-            Ok(self.0.as_bytes().to_vec())
+        fn fetch(&self, url: &str) -> Result<(Vec<u8>, String), nx_http::FetchError> {
+            Ok((self.0.as_bytes().to_vec(), url.to_owned()))
         }
     }
 
