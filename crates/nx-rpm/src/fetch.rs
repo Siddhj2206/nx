@@ -45,6 +45,12 @@ pub enum Freshness {
 
 impl Synced {
     /// `repomd.xml`'s `primary` checksum: what a `.solv` cache is keyed by.
+    /// How long ago this metadata was last checked against the repo: the
+    /// age of its cached `repomd.xml`, rewritten on every fetch.
+    pub fn age(&self) -> Option<std::time::Duration> {
+        age(&self.primary.with_file_name("repomd.xml"))
+    }
+
     pub fn primary_checksum(&self) -> &str {
         self.repomd.get("primary").map_or("", |p| &p.checksum.hex)
     }

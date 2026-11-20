@@ -42,7 +42,7 @@ pub fn add(
         .map(|entry| fetch(ui, &http, &vars, &image_ids, entry))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut session = Session::open(ui, machine, Refresh::IfMissing, dry_run, |m| {
+    let mut session = Session::open(ui, machine, Refresh::IfStale, dry_run, |m| {
         for f in &fetched {
             let name = &f.entry.name;
             if let Some(r) = same_id(m, name) {
@@ -295,7 +295,7 @@ fn entries(
 }
 
 pub fn remove(ui: &mut Ui, machine: &Machine, name: &str, dry_run: bool) -> Result<()> {
-    let mut session = Session::open(ui, machine, Refresh::IfMissing, dry_run, |m| {
+    let mut session = Session::open(ui, machine, Refresh::IfStale, dry_run, |m| {
         if m.repo(name).is_none() {
             bail!("{name} was not added with nx repo add (nx repo list shows the repos)");
         }

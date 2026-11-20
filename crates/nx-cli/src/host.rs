@@ -223,6 +223,9 @@ pub fn added_repos(manifest: &Manifest, vars: &Vars) -> Result<Vec<Repo>> {
         .collect()
 }
 
+/// Metadata past its `metadata_expire` that a read uses without a word.
+pub const MENTION_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
 /// Loads the universe for `machine` and the repos `manifest` adds,
 /// telling the user about downloads, out-of-date metadata and repos that
 /// could not be loaded.
@@ -278,6 +281,9 @@ pub fn load_from(
             );
         }
     }
+    // Old enough to mention: a change refreshed past `metadata_expire`
+    // already (`Refresh::IfStale`), and `nx-refresh.timer` runs every 6 h, so
+    // a read finding metadata older than a day means the refreshes failed.
     let mut expired = Vec::new();
     for loaded in universe.stale() {
         match &loaded.synced.freshness {
@@ -291,12 +297,15 @@ pub fn load_from(
                     &format!("cached metadata for {}: {error}", loaded.repo.id),
                 );
             }
-            _ => expired.push(loaded.repo.id.as_str()),
+            _ if loaded.synced.age().is_none_or(|age| age > MENTION_AFTER) => {
+                expired.push(loaded.repo.id.as_str());
+            }
+            _ => {}
         }
     }
     if !expired.is_empty() {
         ui.warn(format_args!(
-            "metadata for {} is out of date; --refresh updates it",
+            "metadata for {} is more than a day old; --refresh updates it",
             expired.join(", ")
         ));
     }

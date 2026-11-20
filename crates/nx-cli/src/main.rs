@@ -237,13 +237,24 @@ struct Metadata {
 }
 
 impl Metadata {
-    /// Commands answer from the cache; only a repo with nothing cached, or
-    /// `--refresh`, waits on the network.
+    /// Reads (search, info, sync) answer from the cache; only a repo with
+    /// nothing cached, or `--refresh`, waits on the network.
     fn refresh(&self) -> nx_rpm::Refresh {
         if self.refresh {
             nx_rpm::Refresh::Always
         } else {
             nx_rpm::Refresh::IfMissing
+        }
+    }
+
+    /// A change (add, remove, upgrade, apply) also refreshes a repo past its
+    /// `metadata_expire`: one `repomd.xml` fetch, and `primary` only when it
+    /// changed. Offline, the cache answers, with a warning.
+    fn refresh_for_change(&self) -> nx_rpm::Refresh {
+        if self.refresh {
+            nx_rpm::Refresh::Always
+        } else {
+            nx_rpm::Refresh::IfStale
         }
     }
 
@@ -290,7 +301,7 @@ fn main() -> ExitCode {
             let opts = add::Options {
                 dry_run,
                 allow_scriptlets,
-                refresh: Some(metadata.refresh()),
+                refresh: Some(metadata.refresh_for_change()),
                 forced: match (host, tool) {
                     (true, _) => Some(route::Forced::Host),
                     (_, true) => Some(route::Forced::Tool),
@@ -308,8 +319,15 @@ fn main() -> ExitCode {
             timer,
             metadata,
         } => {
-            let result = machine()
-                .and_then(|m| upgrade::run(&mut ui, &m, (host, tool), dry_run, metadata.refresh()));
+            let result = machine().and_then(|m| {
+                upgrade::run(
+                    &mut ui,
+                    &m,
+                    (host, tool),
+                    dry_run,
+                    metadata.refresh_for_change(),
+                )
+            });
             if timer {
                 let failure = result.as_ref().err().map(|e| format!("{e:#}"));
                 nx_core::select::record_upgrade_failure(&host::state(), failure.as_deref());
@@ -320,9 +338,15 @@ fn main() -> ExitCode {
             packages,
             dry_run,
             metadata,
-        } => {
-            machine().and_then(|m| remove::run(&mut ui, &m, &packages, dry_run, metadata.refresh()))
-        }
+        } => machine().and_then(|m| {
+            remove::run(
+                &mut ui,
+                &m,
+                &packages,
+                dry_run,
+                metadata.refresh_for_change(),
+            )
+        }),
         Command::List => list::run(&mut ui),
         Command::Generations => generations::run(&mut ui, &RpmOstree, &host::state()),
         Command::Rollback {
@@ -333,8 +357,15 @@ fn main() -> ExitCode {
             file,
             dry_run,
             metadata,
-        } => machine()
-            .and_then(|m| apply::run(&mut ui, &m, file.as_deref(), dry_run, metadata.refresh())),
+        } => machine().and_then(|m| {
+            apply::run(
+                &mut ui,
+                &m,
+                file.as_deref(),
+                dry_run,
+                metadata.refresh_for_change(),
+            )
+        }),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {
             RepoAction::Add {

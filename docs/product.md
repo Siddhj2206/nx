@@ -22,9 +22,11 @@ image or rebooting. It covers the everyday half of package management:
   release; `nx upgrade` (or the weekly timer) moves it.
 - **Reads are local.** `list`, `why`, `generations` and `status` read files.
   `search` and `info` use cached repo metadata and wait on the network only
-  for a repo with nothing cached, or with `--refresh`.
+  for a repo with nothing cached, or with `--refresh`. They mention
+  metadata only once it is more than a day old.
 - **Every change is a generation.** `add`, `remove`, `upgrade`, `apply` and
-  `repo` build a new generation and make it live; `rollback` goes back to an
+  `repo` refresh repo metadata past its expiry (one `repomd.xml` each), build
+  a new generation and make it live; `rollback` goes back to an
   earlier one.
 - **Results on stdout, progress on stderr.** `nx list | grep x` sees only
   results. Colour turns off for pipes, `NO_COLOR` and `TERM=dumb`.
@@ -46,14 +48,14 @@ image or rebooting. It covers the everyday half of package management:
 | `repo add\|list\|remove` | Third-party RPM repos: `copr:owner/project`, a `.repo` file's URL, or a base URL with `--key`. Keys are pinned by content |
 | `status` | The images nx resolves against (booted, staged, rollback), each one's generation, and the tool tier's release |
 | `doctor` | Checks that what nx set up is what the system runs: nxd, the merge, `PATH` order, leaked Nix variables, background failures. Exits 1 on a failure |
-| `sync` | Builds a generation for every deployed image; the staged-image hook, boot and the daily timer run it |
+| `sync` | Builds a generation for every deployed image; the staged-image hook, boot and the refresh timer run it |
 | `gc` | Removes generations nothing deployed needs, and the packages only they used |
 
 `add`, `remove`, `upgrade`, `rollback`, `apply` and `gc` take `--dry-run`. Exit codes: 0
 success, 1 failure, 2 misuse, 130 interrupted.
 
 In the background, `nx-sync` builds generations for a staged image and
-`nx-refresh.timer` refreshes repo metadata daily; `nx-upgrade.timer` moves
+`nx-refresh.timer` refreshes repo metadata every 6 hours; `nx-upgrade.timer` moves
 the nixpkgs pin weekly. What they couldn't do (a failed sync, a package
 left out of an image's generation) reaches the desktop as a notification.
 

@@ -46,7 +46,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             })
         })
         .collect::<Result<_>>()?;
-    let refresh = opts.refresh.unwrap_or(Refresh::IfMissing);
+    let refresh = opts.refresh.unwrap_or(Refresh::IfStale);
     let mut session = Session::open(ui, machine, refresh, opts.dry_run, |m| {
         for a in allow {
             if !m.scriptlets.contains(&a) {

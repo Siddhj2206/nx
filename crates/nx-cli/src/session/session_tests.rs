@@ -491,3 +491,79 @@ fn a_tool_is_evaluated_planned_realised_and_rooted() -> Result<()> {
     assert_eq!(calls[2].last().map(String::as_str), Some(HELLO));
     Ok(())
 }
+
+#[test]
+fn a_change_refreshes_expired_metadata_and_a_read_mentions_it_after_a_day() -> Result<()> {
+    let f = Fixture::new("expire")?;
+    // As Fedora's updates repo: stale after 6 h.
+    let repo_file = f.machine.root.join("etc/yum.repos.d/fedora.repo");
+    let text = std::fs::read_to_string(&repo_file)?;
+    std::fs::write(&repo_file, format!("{text}metadata_expire=6h\n"))?;
+    let cache = f.dir.join("cache");
+    let http = Canned::new(f.bodies.clone());
+    let load = |refresh| -> Result<String> {
+        let err = SharedBuf::default();
+        let mut ui = Ui::plain(SharedBuf::default(), err.clone());
+        crate::host::load_from(
+            &mut ui,
+            &f.machine,
+            refresh,
+            &nx_core::Manifest::default(),
+            &http,
+            &nx_core::Journal::off(),
+            cache.clone(),
+        )?;
+        Ok(err.text())
+    };
+    let age = |hours: u64| -> Result<()> {
+        let repomd = cache.join("repodata/fedora/repomd.xml");
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(hours * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(repomd)?
+            .set_modified(then)?;
+        Ok(())
+    };
+    load(Refresh::IfMissing)?;
+    http.clear();
+
+    // Past its expiry but under a day: a read answers from the cache and
+    // says nothing.
+    age(7)?;
+    assert_eq!(load(Refresh::IfMissing)?, "");
+    assert!(http.hits().is_empty());
+    // A change checks repomd.xml; primary is the same, so not fetched again.
+    let err = load(Refresh::IfStale)?;
+    assert_eq!(http.hits(), [format!("{REPO}repodata/repomd.xml")]);
+    assert_eq!(err, "  ↓ fedora metadata\n");
+    http.clear();
+    // Checked just now: nothing to fetch.
+    load(Refresh::IfStale)?;
+    assert!(http.hits().is_empty());
+
+    // Over a day (the timer's refreshes failed): a read says so.
+    age(25)?;
+    assert_eq!(
+        load(Refresh::IfMissing)?,
+        "  ! metadata for fedora is more than a day old; --refresh updates it\n"
+    );
+    // Offline, a change uses the cache and says why.
+    let offline = Canned::default();
+    let err = SharedBuf::default();
+    let mut ui = Ui::plain(SharedBuf::default(), err.clone());
+    crate::host::load_from(
+        &mut ui,
+        &f.machine,
+        Refresh::IfStale,
+        &nx_core::Manifest::default(),
+        &offline,
+        &nx_core::Journal::off(),
+        cache.clone(),
+    )?;
+    assert!(
+        err.text().contains("! using cached metadata for fedora:"),
+        "{}",
+        err.text()
+    );
+    Ok(())
+}

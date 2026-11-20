@@ -67,7 +67,7 @@ it as a system extension. Nothing is ever written into the image.
 A generation is built for every deployed image (booted, staged and
 rollback), so a bootc update comes up with a host tier that matches it, and
 at boot `nx select` merges the one built for the image that booted.
-Timers refresh repo metadata daily and move the nixpkgs pin weekly;
+Timers refresh repo metadata every 6 hours and move the nixpkgs pin weekly;
 failures reach the desktop as notifications.
 
 RPM scriptlets aren't run: nx translates them into sysusers, tmpfiles and

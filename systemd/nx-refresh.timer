@@ -1,10 +1,10 @@
 [Unit]
-Description=Refresh nx's repo metadata daily
+Description=Refresh nx's repo metadata every 6 hours
 Documentation=https://github.com/Siddhj2206/nx
 
 [Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
+OnCalendar=00/6:00
+RandomizedDelaySec=30min
 Persistent=true
 
 [Install]
