@@ -10,8 +10,8 @@ pub mod serve;
 use std::path::PathBuf;
 
 use nx_activate::{Image, Layout, Runner, System};
-use nx_core::State;
 use nx_core::{DeploymentSource, RpmOstree};
+use nx_core::{Journal, State};
 
 /// Why a request was not carried out.
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +127,8 @@ pub struct Context {
     /// Held while a request runs: with one process per connection, two
     /// activations must not interleave.
     pub lock: PathBuf,
+    /// Where a failed merge is recorded (plan 1.1, 0.1).
+    pub journal: Journal,
 }
 
 impl Context {
@@ -138,6 +140,7 @@ impl Context {
             authorizer: Box::new(Polkit),
             image: Box::new(booted_image),
             lock: PathBuf::from("/run/nxd.lock"),
+            journal: Journal::system("nxd"),
         }
     }
 }

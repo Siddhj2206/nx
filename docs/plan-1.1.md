@@ -35,7 +35,7 @@ builder rewrite needs the tool tier testable without the VM.
 
 ## Phase 0: measure
 
-**0.1 Fallback telemetry.** Every fallback logs one journal line with its
+**~~0.1 Fallback telemetry.~~** *Done (`nx_core::journal`; IDs in design.md, Fallback telemetry).* Every fallback logs one journal line with its
 own `MESSAGE_ID`: Koji fetch, partial re-resolve, local build from a
 derivation, mirror fallback, a sysext merge that failed. After a few weeks
 `journalctl MESSAGE_ID=…` says what runs. Decides 4.2 (Koji).

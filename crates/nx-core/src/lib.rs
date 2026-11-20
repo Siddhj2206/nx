@@ -8,6 +8,7 @@
 
 pub mod deployment;
 pub mod generation;
+pub mod journal;
 pub mod lockfile;
 pub mod manifest;
 pub mod os_release;
@@ -18,6 +19,7 @@ pub use deployment::{
     BootedOstree, Deployment, DeploymentSource, Deployments, Ostree, OstreeCli, RpmOstree,
 };
 pub use generation::{Activation, ActivationPackage, Built, Generation, Readable, Refusal};
+pub use journal::{Fallback, Journal};
 pub use lockfile::{Bin, Lock, LockedPackage, LockedRepo, LockedTool, ToolOutput, ToolPackage};
 pub use manifest::{CliTools, Https, Manifest, RepoEntry, ScriptletAllow};
 pub use os_release::OsRelease;

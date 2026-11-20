@@ -173,6 +173,7 @@ impl Fixture {
             }),
             nix: Box::new(NoNix),
             live: Box::new(MoveCurrent),
+            journal: nx_core::Journal::off(),
         }
     }
 }

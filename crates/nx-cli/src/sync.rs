@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use nx_core::select;
-use nx_core::{Deployment, Generation};
+use nx_core::{Deployment, Fallback, Generation};
 use nx_rpm::Refresh;
 
 use crate::host::{self, Machine};
@@ -261,6 +261,13 @@ fn resolve_what_fits(
     let resolved = session
         .resolve(ui, &kept)
         .context("the rest of the manifest doesn't resolve either")?;
+    session.journal().fallback(
+        Fallback::PartialResolve,
+        &format!(
+            "the manifest didn't resolve as a whole; left out {}",
+            skipped.join(", ")
+        ),
+    );
     Ok((resolved, skipped))
 }
 

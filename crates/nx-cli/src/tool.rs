@@ -8,7 +8,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nx_core::{Bin, Generation, LockedTool, Manifest, State, ToolOutput, ToolPackage};
+use nx_core::{
+    Bin, Fallback, Generation, Journal, LockedTool, Manifest, State, ToolOutput, ToolPackage,
+};
 use nx_nix::eval::{self, Evaluated};
 use nx_nix::log::Note;
 use nx_nix::narinfo::{self, Caches, Sum};
@@ -182,6 +184,7 @@ impl Tier {
         &self,
         ui: &mut Ui,
         nix: &dyn Nix,
+        journal: &Journal,
         tool: &LockedTool,
         plan: &Plan,
         system: &str,
@@ -209,6 +212,14 @@ impl Tier {
                 "building {}: no binary cache has it",
                 plan.build.join(", ")
             ));
+            journal.fallback(
+                Fallback::LocalBuild,
+                &format!(
+                    "building {} from its derivation at nixpkgs {}: no binary cache has it",
+                    plan.build.join(", "),
+                    tool.rev
+                ),
+            );
         }
         nx_nix::nix::realise(nix, &plan.installables, &mut |note| {
             draw(ui, note);

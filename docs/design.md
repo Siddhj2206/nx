@@ -479,6 +479,18 @@ On Neptuno the units are declared in `build/packages/*.toml` like every other un
 | `bootc upgrade` runs while `nx add` is running | Staged digest changes mid-resolve | Re-check the staged digest before finishing; if it changed, re-resolve for it too (invariant 6) | Slightly longer `add` |
 | Overlay stacking depth exceeded on a new kernel | Sysext won't merge | The next activation fails with `systemd-sysext`'s reason and puts the previous generation back; at boot nothing merges | `nx doctor` fails "the host tier isn't merged over /usr" and points to the journal |
 
+### Fallback telemetry (1.1)
+
+Each fallback writes one journal entry with its own `MESSAGE_ID` (`nx_core::journal`), so `journalctl MESSAGE_ID=<id>` (or `journalctl NX_FALLBACK=koji`) says how often it runs on a real machine, and a fallback that never does can go. nx writes to journald's native socket directly (`KEY=value` datagrams, no libsystemd); a missing journal loses the entry and nothing else. The CLI logs as `nx`, nxd as `nxd`, at priority notice.
+
+| `NX_FALLBACK` | `MESSAGE_ID` | When |
+| --- | --- | --- |
+| `koji` | `44f21298d15a4e8a92ad200912912dd7` | An image relative's exact build is downloaded from Koji: no repo has it |
+| `partial-resolve` | `13b86f26dcdf40a68ab4002ee34da519` | `nx sync`: the manifest didn't resolve whole, so packages were left out |
+| `local-build` | `52cf727a75204b31aea91b293bded854` | A tool is built from its derivation: no binary cache has it |
+| `other-mirror` | `397e4099b3774e0c8aa3144b7392f21a` | A package came from a mirror other than its metadata's |
+| `merge-failed` | `e7aa490fdaaf491a9c62c78cd738a59b` | nxd's `systemd-sysext refresh` failed or merged nothing, and the previous generation was put back |
+
 ### Open questions for updates
 
 - [ ] Do Koji's signed copies (`data/signed/<key>/`) exist for every build nx might need, and how should nx verify one that only exists unsigned? *Partly answered (M2):* they exist under the key's short ID (`f577861e` for Fedora 45) for the mesa builds tested; nx tries each of the repo's keys and refuses anything that doesn't verify, so an unsigned-only build is refused for now.

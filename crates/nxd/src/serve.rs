@@ -7,6 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
+use nx_core::Fallback;
 use nx_proto::{Request, Response};
 
 use crate::{ACTION_ACTIVATE, Context, Error, Peer, Result};
@@ -76,7 +77,19 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
                 image: (ctx.image)(),
                 ..ctx.layout.clone()
             };
-            let done = nx_activate::activate(&layout, &*ctx.runner, generation, &allowed)?;
+            let done = nx_activate::activate(&layout, &*ctx.runner, generation, &allowed)
+                .inspect_err(|e| {
+                    if let nx_activate::Error::Command {
+                        program: "systemd-sysext",
+                        detail,
+                    } = e
+                    {
+                        ctx.journal.fallback(
+                            Fallback::MergeFailed,
+                            &format!("generation {generation} didn't merge: {detail}"),
+                        );
+                    }
+                })?;
             Ok(Response::Activated {
                 events: done.services.events,
                 warnings: done.services.warnings,
@@ -213,18 +226,33 @@ mod tests {
 
     /// Serves one connection on a temp socket while `client` talks to it.
     fn exchange<T>(tag: &str, allow: bool, client: impl FnOnce(&Path) -> T) -> std::io::Result<T> {
+        Ok(exchange_with(tag, allow, Merges, client)?.0)
+    }
+
+    /// [`exchange`] with `runner` as `systemd-sysext`; also returns what
+    /// nxd wrote to the journal.
+    fn exchange_with<T>(
+        tag: &str,
+        allow: bool,
+        runner: impl Runner + Send + 'static,
+        client: impl FnOnce(&Path) -> T,
+    ) -> std::io::Result<(T, Vec<String>)> {
         let (tmp, layout) = fixture(tag)?;
         let socket = tmp.0.join("nxd.sock");
         let listener = bind(&socket)?;
         let lock = tmp.0.join("nxd.lock");
+        let journal_path = tmp.0.join("journal.sock");
+        let journal = std::os::unix::net::UnixDatagram::bind(&journal_path)?;
+        journal.set_nonblocking(true)?;
         let result = std::thread::scope(|s| {
             let server = s.spawn(move || {
                 let ctx = Context {
                     layout,
-                    runner: Box::new(Merges),
+                    runner: Box::new(runner),
                     authorizer: Box::new(Allow(allow)),
                     image: Box::new(|| nx_activate::Image::None),
                     lock,
+                    journal: nx_core::Journal::at(&journal_path, "nxd"),
                 };
                 if let Ok((stream, _)) = listener.accept() {
                     handle(stream, &ctx);
@@ -234,8 +262,13 @@ mod tests {
             let _ = server.join();
             out
         });
+        let mut entries = Vec::new();
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = journal.recv(&mut buf) {
+            entries.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+        }
         drop(tmp);
-        Ok(result)
+        Ok((result, entries))
     }
 
     /// Asks to activate generation 1; returns the answer and whether
@@ -270,6 +303,53 @@ mod tests {
             "{response:?}"
         );
         assert!(!current);
+        Ok(())
+    }
+
+    /// `systemd-sysext` whose refresh fails.
+    struct RefreshFails;
+    impl Runner for RefreshFails {
+        fn run(&self, _: &str, args: &[&OsStr]) -> std::io::Result<Output> {
+            let refresh = args.first().is_some_and(|a| *a == "refresh");
+            Ok(Output {
+                success: !refresh,
+                stdout: String::new(),
+                stderr: if refresh {
+                    "no space".into()
+                } else {
+                    String::new()
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn a_failed_merge_is_recorded_in_the_journal() -> std::io::Result<()> {
+        let (response, entries) = exchange_with("merge-fails", true, RefreshFails, |socket| {
+            nx_proto::call(socket, &Request::Activate { generation: 1 })
+        })?;
+        assert!(
+            matches!(&response, Ok(Response::Failed { .. })),
+            "{response:?}"
+        );
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            entries[0].contains("NX_FALLBACK=merge-failed\n"),
+            "{entries:?}"
+        );
+        assert!(
+            entries[0].contains("MESSAGE=generation 1 didn't merge"),
+            "{entries:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_authorized_activation_records_nothing() -> std::io::Result<()> {
+        let (_, entries) = exchange_with("quiet", true, Merges, |socket| {
+            nx_proto::call(socket, &Request::Activate { generation: 1 })
+        })?;
+        assert!(entries.is_empty(), "{entries:?}");
         Ok(())
     }
 

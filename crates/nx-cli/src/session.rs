@@ -10,7 +10,10 @@ use std::sync::mpsc;
 use anyhow::{Context, Result, bail};
 use nx_core::generation::{self, Spec};
 use nx_core::state::{self, Staged};
-use nx_core::{Built, Generation, Lock, LockedPackage, LockedRepo, LockedTool, Manifest, State};
+use nx_core::{
+    Built, Fallback, Generation, Journal, Lock, LockedPackage, LockedRepo, LockedTool, Manifest,
+    State,
+};
 use nx_rpm::packages::Job;
 use nx_rpm::{Package, Plan, Planned, Refresh, Relative, Repo, Universe, Ureq};
 
@@ -36,6 +39,8 @@ pub struct Env {
     pub http: Box<dyn nx_rpm::Http>,
     pub nix: Box<dyn nx_nix::Nix>,
     pub live: Box<dyn crate::live::Live>,
+    /// Where fallbacks are recorded (plan 1.1, 0.1).
+    pub journal: Journal,
 }
 
 impl Env {
@@ -47,6 +52,7 @@ impl Env {
             http: Box::new(Ureq::new()),
             nix: Box::new(nx_nix::System),
             live: Box::new(crate::live::Nxd),
+            journal: Journal::system("nx"),
         }
     }
 }
@@ -233,6 +239,11 @@ impl<'m> Session<'m> {
         &self.env.state
     }
 
+    /// Where fallbacks are recorded.
+    pub fn journal(&self) -> &Journal {
+        &self.env.journal
+    }
+
     /// The generation the change builds on.
     pub fn current(&self) -> Option<&Generation> {
         self.current.as_ref()
@@ -329,7 +340,7 @@ impl<'m> Session<'m> {
         let locked = tier.resolve(ui, nix, &manifest, previous.as_ref(), &system)?;
         let plan = tier.plan(&locked)?;
         if !dry_run {
-            tier.realise(ui, nix, &locked, &plan, &system)?;
+            tier.realise(ui, nix, &self.env.journal, &locked, &plan, &system)?;
         }
         self.tool = Some(locked);
         Ok(plan.sum.download)
@@ -372,7 +383,14 @@ impl<'m> Session<'m> {
         if !self.dry_run {
             let plan = tier.plan(&locked)?;
             download = plan.sum.download;
-            tier.realise(ui, &*self.env.nix, &locked, &plan, &system)?;
+            tier.realise(
+                ui,
+                &*self.env.nix,
+                &self.env.journal,
+                &locked,
+                &plan,
+                &system,
+            )?;
         }
         let version = tier.release.version();
         let moved = if same_pin {
@@ -457,6 +475,7 @@ impl<'m> Session<'m> {
             .collect();
         let cache = host::cache_dir_for(&self.env.state)?.join("koji");
         let (http, keys, koji_repo) = (&*self.env.http, &mut self.keys, &mut self.koji_repo);
+        let journal = &self.env.journal;
         let err = &mut ui.err;
         let mut koji = |rel: &Relative, stand_in: &Package| -> nx_rpm::Result<PathBuf> {
             let repo = repos
@@ -467,6 +486,10 @@ impl<'m> Session<'m> {
             // Kept after unpacking: a locked Koji build is re-added on every
             // resolve, and that must not need the network.
             if !cache.join(rel.file_name()).exists() {
+                journal.fallback(
+                    Fallback::Koji,
+                    &format!("{} from Koji: no repo has the image's build", rel.nevra()),
+                );
                 let sym = err.style.cyan(ui::SYM_FETCH);
                 err.line(format_args!(
                     "{sym} {} {} {}",
@@ -707,7 +730,7 @@ impl<'m> Session<'m> {
             self.env.state.root(),
             missing.iter().map(|p| p.package.install_size).sum(),
         )?;
-        let files = download(ui, &*self.env.http, &jobs, &dir)?;
+        let files = download(ui, &*self.env.http, &self.env.journal, &jobs, &dir)?;
         Ok(jobs
             .iter()
             .zip(files)
@@ -1011,6 +1034,7 @@ fn need(path: &Path, bytes: u64) -> Result<()> {
 fn download(
     ui: &mut Ui,
     http: &dyn nx_rpm::Http,
+    journal: &Journal,
     jobs: &[Job],
     dir: &Path,
 ) -> Result<Vec<PathBuf>> {
@@ -1020,7 +1044,13 @@ fn download(
     let (tx, rx) = mpsc::channel::<Package>();
     std::thread::scope(|s| {
         let worker = s.spawn(move || {
-            nx_rpm::download_all(http, jobs, dir, THREADS, &|p| {
+            nx_rpm::download_all(http, jobs, dir, THREADS, &|p, other| {
+                if let Some(mirror) = other {
+                    journal.fallback(
+                        Fallback::OtherMirror,
+                        &format!("{} from {mirror}, not {}'s mirror", p.nevra(), p.repo),
+                    );
+                }
                 let _ = tx.send(p.clone());
             })
         });

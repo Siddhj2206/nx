@@ -63,6 +63,17 @@ pub fn keyring(repo: &Repo, root: &Path, pinned: Option<&str>) -> Result<RepoKey
 /// Downloads `p` from `from` into `dir`, checked against the SHA-256 in the
 /// repo metadata. Tries the mirror the metadata came from, then the others.
 pub fn download(http: &dyn Http, from: &Loaded, p: &Package, dir: &Path) -> Result<PathBuf> {
+    fetch(http, from, p, dir).map(|(file, _)| file)
+}
+
+/// [`download`], and the mirror it came from when that isn't the one the
+/// metadata came from.
+fn fetch(
+    http: &dyn Http,
+    from: &Loaded,
+    p: &Package,
+    dir: &Path,
+) -> Result<(PathBuf, Option<String>)> {
     if p.sha256.is_empty() {
         return Err(Error::Invalid(format!(
             "{}: the repo metadata has no SHA-256 for it",
@@ -71,7 +82,7 @@ pub fn download(http: &dyn Http, from: &Loaded, p: &Package, dir: &Path) -> Resu
     }
     let file = dir.join(format!("{}.rpm", p.nevra()));
     if file.exists() && sha256_file(&file)? == p.sha256 {
-        return Ok(file);
+        return Ok((file, None));
     }
     let mut bases = vec![from.synced.base.clone()];
     let mut last = None;
@@ -90,7 +101,8 @@ pub fn download(http: &dyn Http, from: &Loaded, p: &Package, dir: &Path) -> Resu
                     path: file.clone(),
                     source,
                 })?;
-                return Ok(file);
+                let other = (i > 0).then(|| bases[i].clone());
+                return Ok((file, other));
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&part);
@@ -144,7 +156,7 @@ pub fn download_all(
     jobs: &[Job],
     dir: &Path,
     threads: usize,
-    done: &(dyn Fn(&Package) + Sync),
+    done: &(dyn Fn(&Package, Option<&str>) + Sync),
 ) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir).map_err(|source| Error::Write {
         path: dir.to_owned(),
@@ -164,10 +176,10 @@ pub fn download_all(
                         i
                     };
                     let Some(job) = jobs.get(i) else { return };
-                    let r = download(http, job.from, job.package, dir);
-                    if r.is_ok() {
-                        done(job.package);
-                    }
+                    let r = fetch(http, job.from, job.package, dir).map(|(file, other)| {
+                        done(job.package, other.as_deref());
+                        file
+                    });
                     if let Ok(mut all) = results.lock() {
                         all[i] = Some(r);
                     }
@@ -355,16 +367,20 @@ mod tests {
             }],
             &tmp.0,
             4,
-            &|p| {
+            &|p, other| {
                 if let Ok(mut l) = landed.lock() {
-                    l.push(p.name.clone());
+                    l.push((p.name.clone(), other.map(str::to_owned)));
                 }
             },
         )?;
         assert_eq!(sha256_file(&files[0])?, p.sha256);
+        // Says it came from another mirror than the metadata's.
         assert_eq!(
             landed.into_inner().unwrap_or_default(),
-            ["libxkbcommon-devel"]
+            [(
+                "libxkbcommon-devel".to_owned(),
+                Some("https://good/".to_owned())
+            )]
         );
 
         // Cached: no request.
