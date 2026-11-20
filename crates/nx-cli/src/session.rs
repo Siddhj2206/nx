@@ -702,7 +702,7 @@ impl<'m> Session<'m> {
         }
         // The sync below takes the lock itself, once per image.
         self.guard = None;
-        match crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing) {
+        match crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing, false) {
             Ok(d) if !d.unbuilt.is_empty() => {
                 ui.warn(format_args!("{}\nnx sync retries", d.unbuilt.join("\n")));
             }

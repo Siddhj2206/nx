@@ -175,6 +175,10 @@ enum Command {
     Sync {
         #[command(flatten)]
         metadata: Metadata,
+        /// build every deployed image's generation again, even one that
+        /// matches the manifest
+        #[arg(long)]
+        rebuild: bool,
     },
     /// remove generations and packages nothing needs
     Gc {
@@ -376,9 +380,8 @@ fn main() -> ExitCode {
             );
             info::run(&mut ui, &u, catalog.as_ref(), &manifest, &package)
         }),
-        Command::Sync { metadata } => {
-            machine().and_then(|m| sync::run(&mut ui, &m, &nx_nix::System, metadata.refresh()))
-        }
+        Command::Sync { metadata, rebuild } => machine()
+            .and_then(|m| sync::run(&mut ui, &m, &nx_nix::System, metadata.refresh(), rebuild)),
         Command::Gc { dry_run } => {
             machine().and_then(|m| gc::run(&mut ui, &m, &nx_nix::System, dry_run))
         }

@@ -19,8 +19,16 @@ use crate::host::{self, Machine};
 use crate::session::{Session, Unresolvable};
 use crate::ui::Ui;
 
-/// `nx sync [--refresh]`. The daily refresh also collects `nix`'s store.
-pub fn run(ui: &mut Ui, machine: &Machine, nix: &dyn Nix, refresh: Refresh) -> Result<()> {
+/// `nx sync [--refresh] [--rebuild]`. The daily refresh also collects
+/// `nix`'s store. `rebuild` builds every deployed image's generation again,
+/// whether or not it matches.
+pub fn run(
+    ui: &mut Ui,
+    machine: &Machine,
+    nix: &dyn Nix,
+    refresh: Refresh,
+    rebuild: bool,
+) -> Result<()> {
     if refresh != Refresh::IfMissing {
         // The refresh timer: fill the cache first, so what follows (and the
         // next `nx add`) answers from it.
@@ -31,7 +39,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, nix: &dyn Nix, refresh: Refresh) -> R
             .unwrap_or_default();
         host::load(ui, machine, refresh, &manifest)?;
     }
-    let Deployed { built, unbuilt } = deployed(ui, machine, &host::state(), refresh)?;
+    let Deployed { built, unbuilt } = deployed(ui, machine, &host::state(), refresh, rebuild)?;
     if !unbuilt.is_empty() {
         bail!(
             "{} no host tier yet\n{}",
@@ -108,13 +116,16 @@ pub struct Deployed {
 }
 
 /// Builds a generation for each deployed image that lacks one for the
-/// current manifest. Every image is tried: one that fails is in
-/// [`Deployed::unbuilt`], not an error.
+/// current manifest, or whose one an nx older than
+/// [`select::REBUILD_BEFORE`] built (every one with `rebuild`). Every image
+/// is tried: one that fails is in [`Deployed::unbuilt`], not an error; one
+/// that fails to rebuild keeps the generation it has, with a warning.
 pub fn deployed(
     ui: &mut Ui,
     machine: &Machine,
     state: &nx_core::State,
     refresh: Refresh,
+    rebuild: bool,
 ) -> Result<Deployed> {
     let current = match Generation::current(state) {
         Ok(Some(g)) => g,
@@ -128,12 +139,29 @@ pub fn deployed(
         let Some(digest) = d.image_digest.as_deref() else {
             continue;
         };
-        if matches(state, digest, &current, refresh)? {
-            continue;
-        }
-        let result = build(ui, machine, role, &d, refresh);
+        let suspect = match have(state, digest, &current, refresh, rebuild)? {
+            Have::Matching => continue,
+            Have::Stale => false,
+            Have::Suspect { number, builder } => {
+                ui.step(format_args!(
+                    "rebuilding generation {number} for the {role} image: {}",
+                    match builder {
+                        _ if rebuild => "asked to".to_owned(),
+                        Some(b) => format!("nx {b} built it"),
+                        None => "nx 1.0 built it".to_owned(),
+                    }
+                ));
+                true
+            }
+        };
+        let result = build(ui, machine, role, &d, refresh, suspect);
         match result {
             Ok(()) => built += 1,
+            // The image still has a host tier, only an old one.
+            Err(e) if suspect => ui.warn(format_args!(
+                "the {role} image keeps the generation it has; rebuilding failed: {}",
+                first_line(&e)
+            )),
             Err(e) => {
                 unbuilt.push(format!(
                     "no host tier for the {role} image ({}): {e:#}",
@@ -149,17 +177,34 @@ pub fn deployed(
     Ok(Deployed { built, unbuilt })
 }
 
+/// What an image has, as far as `nx sync` cares.
+#[derive(Debug, PartialEq, Eq)]
+enum Have {
+    /// A generation built from the manifest `current` has.
+    Matching,
+    /// None, or one built from another manifest: build one.
+    Stale,
+    /// One that matches but is to be built again: an nx older than the
+    /// floor built it (`builder`, `None` for nx 1.0), or `--rebuild`.
+    Suspect {
+        number: u32,
+        builder: Option<String>,
+    },
+}
+
 /// Whether the newest generation for `digest` was built from the
-/// manifest `current` has. One that left packages out is tried again only
-/// when the metadata is being refreshed: that is when they might resolve.
-fn matches(
+/// manifest `current` has, by an nx at or above the floor. One that left
+/// packages out is tried again only when the metadata is being refreshed:
+/// that is when they might resolve.
+fn have(
     state: &nx_core::State,
     digest: &str,
     current: &Generation,
     refresh: Refresh,
-) -> Result<bool> {
+    rebuild: bool,
+) -> Result<Have> {
     let Some(n) = select::newest_for(state, digest)? else {
-        return Ok(false);
+        return Ok(Have::Stale);
     };
     // The empty generation `nx select` made at boot is a placeholder, not a
     // host tier.
@@ -167,14 +212,23 @@ fn matches(
     if lock.pending
         || (!lock.skipped.is_empty() && matches!(refresh, Refresh::IfStale | Refresh::Always))
     {
-        return Ok(false);
+        return Ok(Have::Stale);
     }
-    if n == current.number {
-        return Ok(true);
+    if n != current.number {
+        let g = Generation::read(state, n).with_context(|| format!("reading generation {n}"))?;
+        if g.manifest != current.manifest
+            || !crate::tool::same(g.lock.tool.as_ref(), current.lock.tool.as_ref())
+        {
+            return Ok(Have::Stale);
+        }
     }
-    let g = Generation::read(state, n).with_context(|| format!("reading generation {n}"))?;
-    Ok(g.manifest == current.manifest
-        && crate::tool::same(g.lock.tool.as_ref(), current.lock.tool.as_ref()))
+    if rebuild || lock.built_before(select::REBUILD_BEFORE) {
+        return Ok(Have::Suspect {
+            number: n,
+            builder: lock.builder,
+        });
+    }
+    Ok(Have::Matching)
 }
 
 fn build(
@@ -183,6 +237,7 @@ fn build(
     role: Role,
     d: &Deployment,
     refresh: Refresh,
+    rebuild: bool,
 ) -> Result<()> {
     let digest = d.image_digest.as_deref().unwrap_or_default();
     let version = d.version.as_deref().unwrap_or("unknown version");
@@ -205,7 +260,9 @@ fn build(
     if !skipped.is_empty() {
         // A repeat of the last attempt (the daily refresh, with the same
         // repos still lacking them) would only add a generation like it.
-        if let Some(n) = select::newest_for(session.state(), digest)?
+        // A rebuild replaces it whatever it holds.
+        if !rebuild
+            && let Some(n) = select::newest_for(session.state(), digest)?
             && same_as(
                 session.state(),
                 n,
@@ -348,6 +405,45 @@ mod tests {
     }
 
     #[test]
+    fn an_old_builders_generation_is_rebuilt() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-sync-builder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = nx_core::State::new(&dir);
+        let mut lock = nx_core::Lock::new(Some("sha256:new".into()), "45", "x86_64");
+        let current = Generation {
+            number: 3,
+            dir: Default::default(),
+            manifest: nx_core::Manifest::default(),
+            lock: lock.clone(),
+            activation: Default::default(),
+        };
+        let write = |lock: &nx_core::Lock| -> Result<()> {
+            let gen_dir = dir.join("generations/3");
+            std::fs::create_dir_all(&gen_dir)?;
+            std::fs::write(gen_dir.join("lock.toml"), lock.to_toml()?)?;
+            Ok(())
+        };
+        let have = |rebuild| have(&state, "sha256:new", &current, Refresh::IfMissing, rebuild);
+        write(&lock)?;
+        assert_eq!(have(false)?, Have::Matching);
+        let suspect = |builder: Option<&str>| Have::Suspect {
+            number: 3,
+            builder: builder.map(str::to_owned),
+        };
+        assert_eq!(have(true)?, suspect(Some(nx_core::VERSION)));
+        // The bootc hook ran 1.0.0's nx sync for an image that ships 1.0.1.
+        lock.builder = Some("1.0.0".into());
+        write(&lock)?;
+        assert_eq!(have(false)?, suspect(Some("1.0.0")));
+        // nx 1.0 didn't say.
+        lock.builder = None;
+        write(&lock)?;
+        assert_eq!(have(false)?, suspect(None));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
     fn a_boot_placeholder_is_not_a_host_tier() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("nx-sync-pending-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -370,21 +466,17 @@ mod tests {
         write(2, &lock)?;
         // `nx select` made generation 2 current for the booted image, but it
         // is empty: sync must still resolve for the image.
-        assert!(!matches(
-            &state,
-            "sha256:new",
-            &current,
-            Refresh::IfMissing
-        )?);
+        let have = |refresh, rebuild| have(&state, "sha256:new", &current, refresh, rebuild);
+        assert_eq!(have(Refresh::IfMissing, false)?, Have::Stale);
         lock.pending = false;
         write(2, &lock)?;
-        assert!(matches(&state, "sha256:new", &current, Refresh::IfMissing)?);
+        assert_eq!(have(Refresh::IfMissing, false)?, Have::Matching);
         // One that left a package out is retried when the metadata refreshes,
         // not on every sync.
         lock.skipped = vec!["copr-thing".into()];
         write(2, &lock)?;
-        assert!(matches(&state, "sha256:new", &current, Refresh::IfMissing)?);
-        assert!(!matches(&state, "sha256:new", &current, Refresh::Always)?);
+        assert_eq!(have(Refresh::IfMissing, false)?, Have::Matching);
+        assert_eq!(have(Refresh::Always, false)?, Have::Stale);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

@@ -16,6 +16,11 @@ pub struct Lock {
     /// The image's `VERSION_ID`.
     pub release: String,
     pub arch: String,
+    /// The version of nx that built it; absent in what nx 1.0 built. `nx
+    /// sync` rebuilds a generation an nx older than
+    /// [`crate::select::REBUILD_BEFORE`] built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder: Option<String>,
     /// The generation this one was built from (the current one at the
     /// time), so `nx rollback` undoes a change even after earlier
     /// rollbacks made the numbers say otherwise.
@@ -140,6 +145,18 @@ pub struct LockedPackage {
     pub requested: Vec<String>,
 }
 
+/// A version's leading dot-separated numbers (`1.1.0-rc.1` → `[1, 1, 0]`),
+/// for comparing nx versions.
+fn numeric(version: &str) -> Vec<u64> {
+    version
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default()
+        .split('.')
+        .map_while(|n| n.parse().ok())
+        .collect()
+}
+
 impl Lock {
     /// Every package of both tiers by name (host name, tool attribute),
     /// with its version (host NEVRA, tool version).
@@ -162,6 +179,7 @@ impl Lock {
             image,
             release: release.to_owned(),
             arch: arch.to_owned(),
+            builder: Some(crate::VERSION.to_owned()),
             parent: None,
             pending: false,
             skipped: Vec::new(),
@@ -170,6 +188,14 @@ impl Lock {
             host: Vec::new(),
             tool: None,
         }
+    }
+
+    /// Whether an nx older than `floor` (`1.0.1`) built it. One that
+    /// doesn't say was built by nx 1.0, so is older than any floor.
+    pub fn built_before(&self, floor: &str) -> bool {
+        self.builder
+            .as_deref()
+            .is_none_or(|b| numeric(b) < numeric(floor))
     }
 
     pub fn parse(text: &str, path: &Path) -> Result<Self> {
@@ -273,5 +299,21 @@ mod tests {
             [("jq", "1.8.2"), ("pkgconf", "pkgconf-2.4-1.fc45.x86_64")]
         );
         Ok(())
+    }
+
+    #[test]
+    fn knows_an_older_builder() {
+        let mut lock = Lock::new(None, "45", "x86_64");
+        assert!(!lock.built_before(crate::VERSION));
+        for (builder, older) in [
+            (None, true),
+            (Some("1.0.0"), true),
+            (Some("1.0.1"), false),
+            (Some("1.0.10"), false),
+            (Some("1.1.0-rc.1"), false),
+        ] {
+            lock.builder = builder.map(str::to_owned);
+            assert_eq!(lock.built_before("1.0.1"), older, "{builder:?}");
+        }
     }
 }

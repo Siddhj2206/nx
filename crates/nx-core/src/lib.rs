@@ -30,6 +30,10 @@ pub use state::{State, Store};
 /// (design invariant 9).
 pub const FORMAT: u32 = 1;
 
+/// This nx's version, recorded in each lockfile it writes
+/// ([`Lock::builder`]).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Errors from reading the system's state.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

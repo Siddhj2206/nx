@@ -11,6 +11,12 @@ use crate::lockfile::Lock;
 use crate::state::{self, State};
 use crate::{Error, Result};
 
+/// `nx sync` rebuilds, for each deployed image, a generation an nx older
+/// than this built ([`Lock::built_before`]). Raised whenever a bug makes
+/// generations built before the fix suspect: 1.0.0 built a staged image's
+/// generation from the booted image's rpmdb.
+pub const REBUILD_BEFORE: &str = "1.0.1";
+
 /// One generation's lockfile, for the questions that don't need the rest.
 pub fn read_lock(state: &State, number: u32) -> Result<Lock> {
     let path = state.generation_dir(number).join("lock.toml");
