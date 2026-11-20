@@ -30,7 +30,6 @@ const PLACEMENT: &[(&str, &str)] = &[
     ("shell", "System"),
     ("status", "System"),
     ("doctor", "System"),
-    ("migrate", "System"),
 ];
 
 pub fn group(name: &str) -> &'static str {

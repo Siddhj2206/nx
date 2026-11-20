@@ -1,5 +1,0 @@
-{"version":3,"elements":{
- "ripgrep":{"active":true,"attrPath":"legacyPackages.x86_64-linux.ripgrep","originalUrl":"flake:nixpkgs","priority":5,"storePaths":["/nix/store/whbrk657qmih065xal60m4khwf6cb9pj-ripgrep-15.2.0"],"url":"github:NixOS/nixpkgs/5d2b81a7a3be3e2f832879028e4d60abbf58e9a0?narHash=x"},
- "neovim":{"active":true,"attrPath":"legacyPackages.x86_64-linux.neovim","originalUrl":"flake:nixpkgs","storePaths":["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-neovim-0.12.6-man","/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-neovim-0.12.6"],"url":"github:NixOS/nixpkgs/5d2b81a7a3be3e2f832879028e4d60abbf58e9a0"},
- "old":{"active":false,"attrPath":"legacyPackages.x86_64-linux.old","storePaths":[]}
-}}

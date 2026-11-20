@@ -1,5 +1,5 @@
 //! `nx doctor`: checks that what nx set up is what the system runs, and
-//! that nothing from nx 0.x or the environment undoes it (design, *CLI
+//! that nothing in the environment undoes it (design, *CLI
 //! surface*). Each check reads plain inputs ([`Inputs`]), so tests need no
 //! bootc system; `run` gathers them from `/`.
 
@@ -8,7 +8,6 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 use nx_core::{Backend, Deployments, Lock, State, select};
-use nx_nix::profile::Legacy;
 
 use crate::problems::Problem;
 use crate::ui::{self, Ui};
@@ -62,8 +61,6 @@ pub struct Inputs<'a> {
     pub image_root: Option<PathBuf>,
     pub deployments: Option<Deployments>,
     pub env: &'a dyn Fn(&str) -> Option<String>,
-    /// nx 0.x's profile and registry, when there is a home directory.
-    pub legacy: Option<Legacy>,
     /// A path's SELinux label, when SELinux is on.
     pub label: &'a dyn Fn(&Path) -> Option<String>,
 }
@@ -146,7 +143,6 @@ pub fn checks(i: &Inputs) -> Vec<Finding> {
         });
     }
     environment(i, &mut out);
-    legacy(i, &mut out);
     out
 }
 
@@ -289,31 +285,6 @@ fn into_nix(list: &str) -> bool {
     })
 }
 
-/// What nx 0.x left: profile packages on `PATH`, its registry pin.
-fn legacy(i: &Inputs, out: &mut Vec<Finding>) {
-    let Some(legacy) = &i.legacy else {
-        return;
-    };
-    match legacy.elements() {
-        Ok(e) if !e.is_empty() => out.push(warn(
-            format!(
-                "nx 0.x's Nix profile still has {}",
-                ui::plural(e.len(), "package")
-            ),
-            "nx migrate moves them into nx and empties the profile",
-        )),
-        Ok(_) if legacy.pins_nixpkgs() => out.push(warn(
-            "nx 0.x's nixpkgs pin is still in the user flake registry",
-            "nx migrate removes it",
-        )),
-        Ok(_) => {}
-        Err(e) => out.push(warn(
-            format!("nx 0.x's Nix profile can't be read: {e}"),
-            "nix profile list",
-        )),
-    }
-}
-
 /// `stat -c %C`: the SELinux label, if SELinux is on.
 pub fn label(path: &Path) -> Option<String> {
     let out = Command::new("stat")
@@ -358,7 +329,6 @@ mod tests {
             image_root: None,
             deployments: Deployments::from_json(STATUS).ok(),
             env: &lookup,
-            legacy: Some(Legacy::new(&dir.join("home"), None, None)),
             label: &|_| None,
         };
         checks(&inputs)
@@ -378,14 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn flags_leaks_path_order_and_nx_0x() -> Result<()> {
+    fn flags_leaks_and_path_order() {
         let f = fixture("leaks");
-        let profile = f.0.join("home/.local/state/nix/profiles/profile");
-        std::fs::create_dir_all(&profile)?;
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/profile/p/manifest.json"),
-            profile.join("manifest.json"),
-        )?;
         let env = BTreeMap::from([
             ("PATH", "/var/lib/nx/current/bin:/usr/bin"),
             ("LD_LIBRARY_PATH", "/home/u/.nix-profile/lib"),
@@ -406,13 +370,8 @@ mod tests {
                     Level::Warn,
                     "/var/lib/nx/current/bin comes before /usr/bin on PATH".to_owned()
                 ),
-                (
-                    Level::Warn,
-                    "nx 0.x's Nix profile still has 2 packages".to_owned()
-                ),
             ]
         );
-        Ok(())
     }
 
     #[test]
@@ -426,7 +385,6 @@ mod tests {
             image_root: None,
             deployments: None,
             env: &env,
-            legacy: None,
             label: &|_| None,
         };
         let out = SharedBuf::default();

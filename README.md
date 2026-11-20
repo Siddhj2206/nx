@@ -89,8 +89,9 @@ that): `nxd.socket`, `nx-select`, `nx-settle`, `nx-sync`,
 `nx-notify.path` and `.service`. The tool tier needs Nix and its daemon in
 the image.
 
-nx 1.0 replaced nx 0.x, a front end to a Nix profile (tag `v0.2.0`);
-`nx migrate` moves a 0.x profile into the tool tier.
+nx 1.0 replaced nx 0.x, a front end to a Nix profile (tag `v0.2.0`).
+nx 1.0.x's `nx migrate` moves a 0.x profile into the tool tier; 1.1
+dropped it.
 
 ## Building
 

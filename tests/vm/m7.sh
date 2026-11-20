@@ -4,8 +4,6 @@
 #   phase doctor    nx doctor passes on a set-up system and flags a leak
 #   phase apply     nx apply adds what a manifest file has, and takes it
 #                   back with the old one
-#   phase migrate   a package in tester's Nix profile (and a registry pin)
-#                   moves into nx; the profile and the pin are gone
 #   phase notify    a recorded failure reaches the session once
 #   phase upgrade   nx-upgrade.service runs and leaves no failure behind;
 #                   nx-refresh.service collects the Nix store
@@ -62,23 +60,6 @@ EOF
 	as tester "nx apply $before" 2>&1 | tee /tmp/m7-back.txt
 	grep -q -- "- $extra" /tmp/m7-back.txt || fail "applying the old manifest didn't remove $extra"
 	echo "apply: ok"
-	;;
-migrate)
-	as tester "nx list" | grep -q '^  hello ' && as tester "nx remove hello" >/dev/null
-	as tester "nix profile add nixpkgs#hello"
-	as tester "nix registry add nixpkgs github:NixOS/nixpkgs/nixos-unstable"
-	as tester "nx migrate --dry-run" | tee /tmp/m7-dry.txt
-	grep -q '+ hello' /tmp/m7-dry.txt || fail "the dry run doesn't list hello"
-	as tester "nx migrate" 2>&1 | tee /tmp/m7-migrate.txt
-	as tester "nx list" | grep -q '^  hello ' || fail "hello isn't in nx"
-	[[ -z $(as tester "nix profile list --json" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["elements"]))') ]] ||
-		fail "the Nix profile still has packages"
-	! as tester "nix registry list" | grep -q '^user .*flake:nixpkgs' || fail "the registry pin is still there"
-	as tester "nx doctor" | grep -q "nx 0.x" && fail "doctor still sees nx 0.x"
-	[[ $(as tester "command -v hello") == /var/lib/nx/current/bin/hello ]] || fail "hello isn't nx's"
-	# Leave tester without a profile again, as m6 expects.
-	as tester "rm -rf ~/.nix-profile ~/.local/state/nix/profiles"
-	echo "migrate: ok"
 	;;
 notify)
 	fake=/tmp/m7-fakebin

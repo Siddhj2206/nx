@@ -201,12 +201,10 @@ pub fn fetch_unpinned(
         .into_iter()
         .map(|r| r.id)
         .collect();
-    let dir = crate::keys::dir(&host::state());
     let pinned = |id: &str| {
         current
             .and_then(|g| g.lock.repo(id))
             .is_some_and(|r| r.key.is_some())
-            || dir.join(nx_rpm::packages::legacy_pinned_key(id)).is_file()
     };
     let http = Ureq::new();
     let fetched = wanted

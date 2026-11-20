@@ -11,7 +11,6 @@
 //! - [`narinfo`]: closures and sizes from the binary caches, for the plan.
 //! - [`log`]: Nix's `--log-format internal-json` stream, as notes to draw.
 //! - [`nix`]: running `nix` itself, behind a trait so tests need no Nix.
-//! - [`profile`]: nx 0.x's Nix profile and registry, for `nx migrate`.
 
 pub mod catalog;
 pub mod channel;
@@ -19,7 +18,6 @@ pub mod eval;
 pub mod log;
 pub mod narinfo;
 pub mod nix;
-pub mod profile;
 pub mod web;
 
 pub use catalog::Catalog;
