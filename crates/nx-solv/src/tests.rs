@@ -322,3 +322,63 @@ fn reads_provides_and_requires() -> Result<()> {
     assert_eq!(f.pool.deps(id, Deps::Requires), ["libxkbcommon", "pkgconf"]);
     Ok(())
 }
+
+#[test]
+fn a_favored_build_the_image_has_is_not_installed_again() -> Result<()> {
+    // The image has libxml2-devel; the repo has the identical build. A lock
+    // from a generation of another image favors that NEVRA.
+    let mut image = image();
+    image.push(pkg("libxml2-devel", "2.15.4", "1.fc45", ""));
+    let fedora = vec![
+        pkg("libxml2-devel", "2.15.4", "1.fc45", ""),
+        pkg(
+            "libxkbcommon-devel",
+            "1.11.0",
+            "1.fc45",
+            &requires(&["libxkbcommon", "libxml2-devel"]),
+        ),
+    ];
+    let mut f = fixture("favor-image", &image, &fedora)?;
+    let favored = f.pool.select("libxml2-devel-2.15.4-1.fc45.x86_64")?;
+    let s = f.pool.install(&["libxkbcommon-devel"], &[], &favored)?;
+    assert_eq!(names(&s), vec!["libxkbcommon-devel-1.11.0-1.fc45.x86_64"]);
+    Ok(())
+}
+
+#[test]
+fn reads_the_rpmdb_under_the_root_not_the_running_system() -> Result<()> {
+    // An rpmdb in a temporary root that holds only the fixture package: a
+    // deployment's tree, as nx reads a staged or rollback image.
+    let root = std::env::temp_dir().join(format!("nx-solv-rpmdb-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|e| Error::Write {
+        path: root.clone(),
+        message: e.to_string(),
+    })?;
+    let rpm = |args: &[&std::ffi::OsStr]| {
+        std::process::Command::new("rpm")
+            .arg("--root")
+            .arg(&root)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let fixture = fixture_rpm();
+    assert!(rpm(&["--initdb".as_ref()]));
+    assert!(rpm(&[
+        "-i".as_ref(),
+        "--justdb".as_ref(),
+        "--nodeps".as_ref(),
+        "--nosignature".as_ref(),
+        fixture.as_os_str(),
+    ]));
+    let mut pool = Pool::new("x86_64")?;
+    let loaded = pool.load_rpmdb("@image", &root);
+    let _ = std::fs::remove_dir_all(&root);
+    loaded?;
+    pool.prepare();
+    assert_eq!(pool.select("libxkbcommon-devel")?.len(), 1);
+    // The running system (the dev container) has rpm; the root doesn't.
+    assert!(pool.select("rpm")?.is_empty());
+    Ok(())
+}

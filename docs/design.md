@@ -295,7 +295,7 @@ All nx state lives under `/var/lib/nx` and is addressed by content. A generation
   sync-failures.json, upgrade-failure.json   # what the background jobs couldn't do
   cache/                       # shared by administrators (else ~/.cache/nx)
     solv/<repo>-<checksum>.solv
-    solv/installed-<image-digest>.solv
+    solv/image-<image-digest>.solv
     repodata/<repo>/           # repomd.xml and primary metadata
     packages/, koji/           # downloads
     nix/                       # one catalog per nixpkgs release
@@ -351,7 +351,7 @@ Every new image digest invalidates the host tier, not only a Fedora major bump: 
 
 1. Trigger: bootc ships `bootc-status-updated.path`, which watches the bootc root directory for changes. nx hooks a service onto its target.
 2. Read the staged deployment's digest from `rpm-ostree status --json` and its `VERSION_ID` from that deployment's own `usr/lib/os-release`.
-3. Build `installed-<staged-digest>.solv` from the staged deployment's rpmdb, read in place at `/sysroot/ostree/deploy/<osname>/deploy/<checksum>.<serial>/usr/lib/sysimage/rpm` (readable unprivileged).
+3. Build `image-<staged-digest>.solv` from the staged deployment's rpmdb, read in place at `/sysroot/ostree/deploy/<osname>/deploy/<checksum>.<serial>/usr/lib/sysimage/rpm` (readable unprivileged).
 4. Re-solve the manifest against it and assemble a new generation tagged with the staged digest. Packages now provided by the image are dropped from the host tier automatically.
 5. If anything fails to resolve, keep going with the rest and record the failures for `nx status`. Send a desktop notification.
 6. The tool tier is carried over as it is: it doesn't depend on the image.
@@ -555,7 +555,7 @@ nx should feel instant for reads and take about a second plus download time for 
 
 1. **Background metadata refresh.** A systemd timer refreshes repo metadata and the nixpkgs index. Commands use the cache; `nx add --refresh` forces it. Never auto-update in the foreground like brew.
 2. **Primary metadata only.** `filelists` is never fetched: the classifier needs only the files `primary.xml` lists. zchunk isn't used; a daily refresh downloads a repo's primary when it changed.
-3. **Precomputed installed set.** The image's rpmdb is turned into `installed-<digest>.solv` once per image digest.
+3. **Precomputed installed set.** The image's rpmdb is turned into `image-<digest>.solv` once per image digest.
 4. **libsolv directly** (the solver dnf5 uses), loading cached `.solv` files. No Python, no dnf process.
 5. **Nix evaluation only for new attributes.** Search and info use the prebuilt catalog; store paths are evaluated once per attribute and pin and kept in the lockfile; closures come from `.narinfo` references.
 6. **Parallel I/O.** Four package downloads at once, each streamed to disk and hashed on the way; mirrors in the metalink's order, the next on a failure.
