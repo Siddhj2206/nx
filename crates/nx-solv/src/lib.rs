@@ -20,6 +20,7 @@ use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::{Mutex, PoisonError};
 
 /// Errors from libsolv.
 #[derive(Debug, thiserror::Error)]
@@ -175,8 +176,14 @@ impl Pool {
         // Without REPO_USE_ROOTDIR libsolv ignores the pool's rootdir and
         // reads the running system's rpmdb.
         let flags = sys::REPO_USE_ROOTDIR as i32;
+        // librpm keeps the database path in process-wide macros, which
+        // libsolv sets per call: two loads at once read the wrong root or
+        // none. One at a time; a poisoned lock guards nothing that broke.
+        static RPMDB: Mutex<()> = Mutex::new(());
+        let guard = RPMDB.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: repo belongs to this pool; no reference repo.
         let rc = unsafe { sys::repo_add_rpmdb(repo, std::ptr::null_mut(), flags) };
+        drop(guard);
         // SAFETY: as above; an empty rootdir resets it.
         unsafe { sys::pool_set_rootdir(self.p(), std::ptr::null()) };
         if rc != 0 {

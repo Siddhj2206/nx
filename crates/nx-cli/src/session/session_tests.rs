@@ -114,6 +114,14 @@ impl Fixture {
                 "[fedora]\nbaseurl={REPO}\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/fedora\n"
             ),
         )?;
+        // An empty rpmdb: the image has nothing. Without one, loading the
+        // installed set fails (before 1.0.1 it read the running system's).
+        let initdb = std::process::Command::new("rpm")
+            .arg("--root")
+            .arg(&root)
+            .arg("--initdb")
+            .status()?;
+        anyhow::ensure!(initdb.success(), "rpm --initdb failed");
         let rpm = std::fs::read(testdata(RPM))?;
         let sha = nx_rpm::fetch::sha256_hex(&rpm);
         let primary = format!(
