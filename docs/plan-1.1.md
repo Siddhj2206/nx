@@ -204,6 +204,24 @@ spec. Measure `nx sync` before and after on a manifest of 30 packages.
 Audit 15 stays as decided. Once 2.x, 5.1–5.3 are done, delete
 `audit-1.0.md`.
 
+Found moving the laptop from 1.0.0 to 1.0.1 (2026-11-20):
+
+**5.4 A generation built by a known-bad nx is trusted.** `bootc upgrade`
+staged the image with 1.0.1 while 1.0.0 was running; bootc's hook ran
+1.0.0's `nx sync`, which built the staged image's generation from the
+booted image's rpmdb. After the reboot 1.0.1 kept it: same digest, same
+manifest, so up to date. It happened to fit. `lock.toml` records the nx
+version that built it; `nx sync` rebuilds, for every deployed image, a
+generation whose builder is older than a floor nx carries
+(`REBUILD_BEFORE = 1.0.1`, raised whenever a bug makes old generations
+suspect). `nx sync --rebuild` does the same for all of them by hand.
+
+**5.5 Interrupted builds leave `.N.part` behind.** A reboot during a build
+left `generations/.65.part` (root's, empty); only the next build of that
+number removes it, and with 2.x it would be `nx`'s alone. `nx gc`, which
+holds the state lock, removes every `.N.part` and `.<sha256>.part` in the
+store, since no build is running while it holds the lock.
+
 ## Phase 6: distribution and early warning
 
 **6.1 COPR with Packit (ADR, amends ADR-0005).** `nx.spec` in the repo;
