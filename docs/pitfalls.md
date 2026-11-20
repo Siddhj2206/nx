@@ -165,12 +165,7 @@ hard way.
 - Don't set `SSL_CERT_FILE` or `LOCALE_ARCHIVE` for Nix tools: they find the
   host's certificates and locale archive by default, and Fedora 45 has no
   `/etc/pki/tls/certs/ca-bundle.crt`. Only `TERMINFO_DIRS` is needed.
-- The daemon reads `nix.conf` only at start; an extra cache works for an
-  untrusted user only once it is in `trusted-substituters` and the daemon
-  has restarted.
 - `nix store gc` prints its "… freed" summary on stdout, not stderr.
-- `--impure` (needed for `NIXPKGS_ALLOW_UNFREE`) also turns off the eval
-  cache. Use it only when an unfree package is involved.
 
 Nix's internal-json log, from nx 0.x:
 

@@ -1,62 +1,34 @@
-//! Extra Nix binary caches (design, *Unfree and uncached packages*). The
-//! daemon trusts a substituter for an unprivileged client only when its
-//! own configuration lists it in `trusted-substituters`, and it reads that
-//! only when it starts. So nxd, as root, writes the current generation's
-//! `[[cache]]` entries into `/etc/nix/nx.conf`, makes sure `nix.conf`
-//! includes it, and restarts `nix-daemon` when it changed (11 ms;
-//! `KillMode=process` leaves running builds alone). The CLI then passes
-//! `--option extra-substituters` on its own calls.
+//! What nx 1.0 left in Nix's configuration. 1.0 listed a generation's
+//! extra binary caches (`[[cache]]`) in `/etc/nix/nx.conf`, included from
+//! `nix.conf`, and restarted `nix-daemon` to trust them. 1.1 dropped extra
+//! caches, so nxd removes both on activation and restarts the daemon once
+//! if it changed anything. Goes in 1.2.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use nx_core::CacheEntry;
-
 use crate::{Runner, Services};
 
-/// The file nxd owns, beside `nix.conf`.
+/// The file nx 1.0's nxd wrote, beside `nix.conf`.
 pub const FILE: &str = "nx.conf";
 const INCLUDE: &str = "!include nx.conf";
+const COMMENT: &str = "# Extra caches nx trusts (nx cache add).";
 
-/// What `nx.conf` says for `caches`; empty for none.
-pub fn render(caches: &[CacheEntry]) -> String {
-    if caches.is_empty() {
-        return String::new();
-    }
-    let urls: Vec<&str> = caches.iter().map(|c| c.url.as_str()).collect();
-    let keys: Vec<&str> = caches.iter().map(|c| c.key.as_str()).collect();
-    format!(
-        "# Written by nxd from the current nx generation's [[cache]] entries; nx cache changes it.\n\
-         extra-trusted-substituters = {}\n\
-         extra-trusted-public-keys = {}\n",
-        urls.join(" "),
-        keys.join(" ")
-    )
-}
-
-/// Brings `dir/nx.conf` in line with `caches` and restarts the daemon if
-/// it changed. Problems are warnings: the generation is live either way,
-/// only the extra caches aren't.
-pub fn apply(dir: &Path, runner: &dyn Runner, caches: &[CacheEntry], services: &mut Services) {
-    let (ok, bad): (Vec<CacheEntry>, Vec<CacheEntry>) =
-        caches.iter().cloned().partition(CacheEntry::acceptable);
-    for c in &bad {
-        services.warnings.push(format!(
-            "skipped the extra cache {:?}: not an https URL with a name:key",
-            c.url
-        ));
-    }
-    let file = dir.join(FILE);
-    let want = render(&ok);
-    let have = std::fs::read_to_string(&file).unwrap_or_default();
-    if want == have {
-        return;
-    }
-    if let Err(e) = write(dir, &want).and_then(|()| include(dir)) {
-        services
-            .warnings
-            .push(format!("the extra Nix caches were not set up: {e}"));
+/// Removes `dir/nx.conf` and `nix.conf`'s include of it, and restarts the
+/// daemon if either was there. Problems are warnings: the generation is
+/// live either way.
+pub fn clean(dir: &Path, runner: &dyn Runner, services: &mut Services) {
+    let removed = match remove(dir).and_then(|file| Ok(uninclude(dir)? || file)) {
+        Ok(changed) => changed,
+        Err(e) => {
+            services
+                .warnings
+                .push(format!("removing nx 1.0's extra Nix caches failed: {e}"));
+            return;
+        }
+    };
+    if !removed {
         return;
     }
     let restarted = runner.run(
@@ -64,17 +36,9 @@ pub fn apply(dir: &Path, runner: &dyn Runner, caches: &[CacheEntry], services: &
         &["try-restart".as_ref(), "nix-daemon.service".as_ref()],
     );
     match restarted {
-        Ok(out) if out.success => services.events.push(if ok.is_empty() {
-            "restarted nix-daemon without extra caches".to_owned()
-        } else {
-            format!(
-                "restarted nix-daemon to trust {}",
-                ok.iter()
-                    .map(|c| c.url.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }),
+        Ok(out) if out.success => services
+            .events
+            .push("restarted nix-daemon without nx 1.0's extra caches".to_owned()),
         Ok(out) => services.warnings.push(format!(
             "restarting nix-daemon failed: {}",
             out.stderr.trim()
@@ -85,16 +49,47 @@ pub fn apply(dir: &Path, runner: &dyn Runner, caches: &[CacheEntry], services: &
     }
 }
 
-/// Replaces `nx.conf`, or removes it for no caches.
-fn write(dir: &Path, text: &str) -> std::io::Result<()> {
-    let file = dir.join(FILE);
-    if text.is_empty() {
-        return match std::fs::remove_file(&file) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        };
+/// Removes `nx.conf`; whether it was there.
+fn remove(dir: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(dir.join(FILE)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
-    replace(&file, text, 0o644)
+}
+
+/// Takes the include (and the comment nx put above it) out of `nix.conf`;
+/// whether it was there. The file is replaced, not edited in place: nxd
+/// runs as root and never writes through a link.
+fn uninclude(dir: &Path) -> std::io::Result<bool> {
+    let conf = dir.join("nix.conf");
+    let meta = match std::fs::symlink_metadata(&conf) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let text = std::fs::read_to_string(&conf)?;
+    if !text.lines().any(|l| l.trim() == INCLUDE) {
+        return Ok(false);
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a plain file",
+            conf.display()
+        )));
+    }
+    let mut new = text
+        .lines()
+        .filter(|l| !matches!(l.trim(), INCLUDE | COMMENT))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // 1.0 put a blank line before its comment.
+    new.truncate(new.trim_end().len());
+    if !new.is_empty() {
+        new.push('\n');
+    }
+    replace(&conf, &new, meta.permissions().mode() & 0o7777)?;
+    Ok(true)
 }
 
 /// Writes `text` to a fresh name beside `file` (`create_new` never follows
@@ -112,32 +107,6 @@ fn replace(file: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     f.set_permissions(std::fs::Permissions::from_mode(mode))?;
     f.sync_all()?;
     std::fs::rename(&tmp, file)
-}
-
-/// Makes `nix.conf` include `nx.conf`, once. A missing include is no error
-/// for Nix (`!include`), so the line can stay when there are no caches.
-/// The file is replaced, not appended to: nxd runs as root and never writes
-/// through a link.
-fn include(dir: &Path) -> std::io::Result<()> {
-    let conf = dir.join("nix.conf");
-    let meta = std::fs::symlink_metadata(&conf)?;
-    if !meta.is_file() {
-        return Err(std::io::Error::other(format!(
-            "{} is not a plain file",
-            conf.display()
-        )));
-    }
-    let text = std::fs::read_to_string(&conf)?;
-    if text.lines().any(|l| l.trim() == INCLUDE) {
-        return Ok(());
-    }
-    let sep = if text.ends_with('\n') || text.is_empty() {
-        ""
-    } else {
-        "\n"
-    };
-    let new = format!("{text}{sep}\n# Extra caches nx trusts (nx cache add).\n{INCLUDE}\n");
-    replace(&conf, &new, meta.permissions().mode() & 0o7777)
 }
 
 #[cfg(test)]
@@ -164,67 +133,58 @@ mod tests {
         }
     }
 
-    fn cache(url: &str, key: &str) -> CacheEntry {
-        CacheEntry {
-            url: url.into(),
-            key: key.into(),
-        }
+    fn dir(tag: &str) -> std::io::Result<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("nx-nixconf-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
     #[test]
-    fn writes_includes_and_restarts_only_on_change() -> std::io::Result<()> {
-        let dir = std::env::temp_dir().join(format!("nx-nixconf-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("nix.conf"), "max-jobs = auto")?;
+    fn removes_what_1_0_wrote_and_restarts_once() -> std::io::Result<()> {
+        let dir = dir("clean")?;
+        // What nx 1.0's nxd left after `nx cache add`.
+        std::fs::write(
+            dir.join("nix.conf"),
+            "max-jobs = auto\n\n# Extra caches nx trusts (nx cache add).\n!include nx.conf\n",
+        )?;
+        std::fs::write(
+            dir.join(FILE),
+            "extra-trusted-substituters = https://nix-community.cachix.org\n",
+        )?;
         let runner = Calls(RefCell::default());
-        let caches = [cache(
-            "https://nix-community.cachix.org",
-            "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=",
-        )];
         let mut s = Services::default();
-        apply(&dir, &runner, &caches, &mut s);
-        let conf = std::fs::read_to_string(dir.join(FILE))?;
-        assert!(conf.contains("extra-trusted-substituters = https://nix-community.cachix.org\n"));
-        assert!(conf.contains("extra-trusted-public-keys = nix-community.cachix.org-1:"));
-        let main = std::fs::read_to_string(dir.join("nix.conf"))?;
-        assert!(main.starts_with("max-jobs = auto\n") && main.ends_with("!include nx.conf\n"));
+        clean(&dir, &runner, &mut s);
+        assert!(!dir.join(FILE).exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("nix.conf"))?,
+            "max-jobs = auto\n"
+        );
         assert_eq!(
             *runner.0.borrow(),
             ["systemctl try-restart nix-daemon.service"]
         );
         assert_eq!(
             s.events,
-            ["restarted nix-daemon to trust https://nix-community.cachix.org"]
+            ["restarted nix-daemon without nx 1.0's extra caches"]
         );
-        // The same again: nothing to do.
-        apply(&dir, &runner, &caches, &mut s);
+        // Nothing left: nothing to do.
+        clean(&dir, &runner, &mut s);
         assert_eq!(runner.0.borrow().len(), 1);
-        assert_eq!(std::fs::read_to_string(dir.join("nix.conf"))?, main);
-        // None left: the file goes, the daemon restarts once more.
-        apply(&dir, &runner, &[], &mut s);
-        assert!(!dir.join(FILE).exists());
-        assert_eq!(runner.0.borrow().len(), 2);
         std::fs::remove_dir_all(&dir)
     }
 
     #[test]
     fn never_writes_through_a_link() -> std::io::Result<()> {
-        let dir = std::env::temp_dir().join(format!("nx-nixconf-link-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir)?;
+        let dir = dir("link")?;
         let target = dir.join("elsewhere");
-        std::fs::write(&target, "untouched\n")?;
+        std::fs::write(&target, "a = b\n!include nx.conf\n")?;
         std::os::unix::fs::symlink(&target, dir.join("nix.conf"))?;
-        assert!(include(&dir).is_err());
-        assert_eq!(std::fs::read_to_string(&target)?, "untouched\n");
+        assert!(uninclude(&dir).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&target)?,
+            "a = b\n!include nx.conf\n"
+        );
         std::fs::remove_dir_all(&dir)
-    }
-
-    #[test]
-    fn refuses_what_could_add_a_line() {
-        assert!(!cache("https://x.org\ntrusted-users = *", "a:b").acceptable());
-        assert!(!cache("http://x.org", "a:b").acceptable());
-        assert!(!cache("https://x.org", "nokey").acceptable());
-        assert!(cache("https://x.org", "x.org-1:abc=").acceptable());
     }
 }

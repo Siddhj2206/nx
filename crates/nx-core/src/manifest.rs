@@ -24,9 +24,6 @@ pub struct Manifest {
     /// nixpkgs packages, sealed beside the image (design, *Tool tier*).
     #[serde(default, skip_serializing_if = "Tool::is_empty")]
     pub tool: Tool,
-    /// Extra Nix binary caches, tried with cache.nixos.org.
-    #[serde(default, rename = "cache", skip_serializing_if = "Vec::is_empty")]
-    pub caches: Vec<CacheEntry>,
     #[serde(default, skip_serializing_if = "Routing::is_default")]
     pub routing: Routing,
     #[serde(default, skip_serializing_if = "Overrides::is_empty")]
@@ -50,7 +47,6 @@ impl Default for Manifest {
             repos: Vec::new(),
             scriptlets: Vec::new(),
             tool: Tool::default(),
-            caches: Vec::new(),
             routing: Routing::default(),
             overrides: Overrides::default(),
             gc: Gc::default(),
@@ -71,45 +67,19 @@ pub struct Host {
 }
 
 /// The tool tier's intent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tool {
     /// nixpkgs attribute paths (`ripgrep`, `python3Packages.black`).
     #[serde(default)]
     pub packages: Vec<String>,
-    /// Package names (`lib.getName`) allowed despite an unfree license.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unfree: Vec<String>,
+    /// Keys this nx doesn't know (or no longer uses), kept as written.
+    #[serde(flatten)]
+    pub rest: toml::Table,
 }
 
 impl Tool {
     pub fn is_empty(&self) -> bool {
-        self.packages.is_empty() && self.unfree.is_empty()
-    }
-}
-
-/// A trusted extra Nix binary cache: its URL and the key its paths are
-/// signed with (`name:base64`). nxd lists it in the daemon's
-/// `trusted-substituters` when the generation goes live.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CacheEntry {
-    pub url: String,
-    pub key: String,
-}
-
-impl CacheEntry {
-    /// Safe to write into the Nix daemon's configuration: an https URL
-    /// and a `name:key`, neither with whitespace, so nothing a client wrote
-    /// can add a line of its own, nor `#`, which starts a comment there and
-    /// would drop the rest of the line. `nx cache add` and nxd both check it.
-    pub fn acceptable(&self) -> bool {
-        Https::parse(&self.url).is_some()
-            && !self.url.contains('#')
-            && !self.key.contains('#')
-            && plain(&self.key)
-            && self
-                .key
-                .split_once(':')
-                .is_some_and(|(n, k)| !n.is_empty() && !k.is_empty())
+        self.packages.is_empty() && self.rest.is_empty()
     }
 }
 
@@ -283,6 +253,19 @@ pub struct RepoEntry {
 }
 
 impl Manifest {
+    /// What nx 1.0 read here and 1.1 ignores: `[tool] unfree` and
+    /// `[[cache]]`. They stay as written, for an older nx after a rollback.
+    pub fn obsolete(&self) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        if self.tool.rest.contains_key("unfree") {
+            found.push("[tool] unfree");
+        }
+        if self.rest.contains_key("cache") {
+            found.push("[[cache]]");
+        }
+        found
+    }
+
     pub fn parse(text: &str, path: &Path) -> Result<Self> {
         let m: Self = toml::from_str(text).map_err(|e| Error::Toml {
             path: path.to_owned(),
@@ -397,8 +380,11 @@ priority = 50
         assert_eq!(Manifest::parse(&text, Path::new("m"))?, m);
         assert!(text.contains("[future]"), "{text}");
         assert_eq!(m.tool.packages, ["ripgrep"]);
-        assert_eq!(m.tool.unfree, ["terraform"]);
-        assert_eq!(m.caches.len(), 1);
+        // nx 1.0's, ignored but kept.
+        assert_eq!(m.obsolete(), ["[tool] unfree", "[[cache]]"]);
+        assert!(text.contains("unfree = [\"terraform\"]"), "{text}");
+        assert!(text.contains("[[cache]]"), "{text}");
+        assert!(Manifest::default().obsolete().is_empty());
         assert_eq!(m.routing.cli_tools, CliTools::Fedora);
         assert_eq!(m.routing.toolchains, ["dmd"]);
         assert_eq!(m.routing.standalone, ["zig"]);
@@ -441,15 +427,5 @@ priority = 50
         ] {
             assert_eq!(Https::parse(bad), None, "{bad}");
         }
-        let cache = |url: &str, key: &str| CacheEntry {
-            url: url.into(),
-            key: key.into(),
-        };
-        assert!(cache("https://x.org", "x.org-1:abc=").acceptable());
-        assert!(!cache("https://x.org", "nokey").acceptable());
-        assert!(cache("https://x.org?priority=40", "x:y").acceptable());
-        assert!(!cache("https://x.org/#a", "x:y").acceptable());
-        assert!(!cache("https://x.org", "x:y#z").acceptable());
-        assert!(!cache("https://x.org\ntrusted-users = *", "x:y").acceptable());
     }
 }

@@ -22,7 +22,6 @@ pub struct Options {
     pub allow_scriptlets: Vec<String>,
     pub refresh: Option<Refresh>,
     pub forced: Option<Forced>,
-    pub allow_unfree: bool,
     pub overrides: Vec<String>,
     pub without: Vec<String>,
 }
@@ -81,7 +80,6 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         && (routing.cli_tools == CliTools::Nix || opts.forced == Some(Forced::Tool));
     let toolchains = route::toolchains(&routing);
     let (mut fresh_host, mut fresh_tool, mut problems) = (Vec::new(), Vec::new(), Vec::new());
-    let mut unfree = session.manifest().tool.unfree.clone();
     for spec in specs {
         if session.manifest().has(spec) {
             continue;
@@ -97,10 +95,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         }
         if use_tool && !route::host_only(spec) {
             let catalog = session.tier(ui)?.catalog(ui)?;
-            found.nix = catalog.find(spec).map(|p| {
-                let allowed = opts.allow_unfree || unfree.contains(&p.pname);
-                Nixpkg::new(p, allowed, &toolchains)
-            });
+            found.nix = catalog.find(spec).map(|p| Nixpkg::new(p, &toolchains));
             if found.rpm.is_none() && found.nix.is_none() {
                 found.similar = catalog.similar(spec, 3);
             }
@@ -123,11 +118,6 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             }
             Route::Tool { attr, reason } => {
                 session.route(&attr, reason);
-                if let Some(n) = found.nix.as_ref().filter(|n| n.unfree)
-                    && !unfree.contains(&n.pname)
-                {
-                    unfree.push(n.pname.clone());
-                }
                 if !session.manifest().tool.packages.contains(&attr) && !fresh_tool.contains(&attr)
                 {
                     fresh_tool.push(attr);
@@ -149,7 +139,6 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
     session.edit(|m| {
         m.add_host(&fresh_host);
         m.add_tool(&fresh_tool);
-        m.tool.unfree = unfree;
     })?;
     let outcome = session.plan(
         ui,

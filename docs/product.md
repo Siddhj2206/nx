@@ -33,7 +33,7 @@ image or rebooting. It covers the everyday half of package management:
 
 | Command | Does |
 |---|---|
-| `add <pkg>…` | Adds packages, live. Takes names, commands (`rg`), provides (`pkgconfig(xkbcommon)`) and files; `name@repo` pins the repo. Typos get "did you mean". A package the image must ship (kernel, drivers) gets a hint instead. `--host`/`--tool` pick the tier; `--override` and `--without` settle a command two packages provide; `--allow-unfree` and `--allow-scriptlets` allow what nx otherwise refuses. |
+| `add <pkg>…` | Adds packages, live. Takes names, commands (`rg`), provides (`pkgconfig(xkbcommon)`) and files; `name@repo` pins the repo. Typos get "did you mean". A package the image must ship (kernel, drivers) gets a hint instead. `--host`/`--tool` pick the tier; `--override` and `--without` settle a command two packages provide; `--allow-scriptlets` installs despite scriptlets nx can't translate. |
 | `remove <pkg>…` | Removes packages and the dependencies only they needed; stops and disables their units first |
 | `upgrade` | Host packages to newer builds for the image, and the nixpkgs pin to its current release (`--host` or `--tool` for one tier) |
 | `list` (`ls`) | Installed packages: host packages with their versions and what pulled them in, then tools with their release and commands |
@@ -44,7 +44,6 @@ image or rebooting. It covers the everyday half of package management:
 | `rollback [N]` | Makes the previous generation (or `N`) current again |
 | `apply [file]` | Makes the system match a manifest: a new machine copies `manifest.toml` and runs it |
 | `repo add\|list\|remove` | Third-party RPM repos: `copr:owner/project`, a `.repo` file's URL, or a base URL with `--key`. Keys are pinned by content |
-| `cache add\|list\|remove` | Extra Nix binary caches for the tool tier |
 | `shell [cmd]` | A shell, or one command, with the host tier on its paths |
 | `status` | The images nx resolves against (booted, staged, rollback), each one's generation, and the tool tier's release |
 | `doctor` | Checks that what nx set up is what the system runs: nxd, the merge, `PATH` order, leaked Nix variables, background failures. Exits 1 on a failure |

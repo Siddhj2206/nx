@@ -37,11 +37,7 @@ pub struct Found {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Nixpkg {
     pub attr: String,
-    /// `lib.getName`: what the unfree allowlist names.
-    pub pname: String,
     pub unfree: bool,
-    /// On the manifest's allowlist, or `--allow-unfree`.
-    pub allowed: bool,
     /// Broken, or not available on this platform.
     pub broken: bool,
     /// A compiler, linker or interpreter: never the tool tier unless asked
@@ -50,13 +46,11 @@ pub struct Nixpkg {
 }
 
 impl Nixpkg {
-    /// What the catalog says about `p`; `allowed` if its license is.
-    pub fn new(p: &nx_nix::catalog::Package, allowed: bool, toolchains: &Toolchains) -> Self {
+    /// What the catalog says about `p`.
+    pub fn new(p: &nx_nix::catalog::Package, toolchains: &Toolchains) -> Self {
         Self {
             attr: p.attr.clone(),
-            pname: p.pname.clone(),
             unfree: p.unfree,
-            allowed,
             broken: p.broken || p.unavailable,
             toolchain: toolchains.nixpkg(&p.main_program, &p.pname),
         }
@@ -93,7 +87,7 @@ pub fn host_only(spec: &str) -> bool {
 /// 5. a usable nixpkgs package that isn't a toolchain, unless
 ///    `routing.cli_tools = "fedora"` → tool;
 /// 6. an RPM → host;
-/// 7. a nixpkgs toolchain, or a package that needs allowing (unfree) or
+/// 7. a nixpkgs toolchain, or a package nx doesn't install (unfree) or
 ///    can't build → refuse and say why;
 /// 8. nothing → refuse, with names that are close.
 pub fn decide(spec: &str, forced: Option<Forced>, cli_tools: CliTools, found: &Found) -> Route {
@@ -152,18 +146,13 @@ pub fn decide(spec: &str, forced: Option<Forced>, cli_tools: CliTools, found: &F
 }
 
 fn usable(n: &Nixpkg) -> bool {
-    !n.broken && (!n.unfree || n.allowed)
+    !n.broken && !n.unfree
 }
 
 fn tool(n: &Nixpkg, why: &str) -> Route {
-    let reason = if n.unfree {
-        format!("{why}; unfree, allowed")
-    } else {
-        why.to_owned()
-    };
     Route::Tool {
         attr: n.attr.clone(),
-        reason,
+        reason: why.to_owned(),
     }
 }
 
@@ -174,10 +163,16 @@ fn refuse_nix(n: &Nixpkg) -> Route {
             n.attr
         ));
     }
-    Route::Refuse(format!(
-        "{} is unfree; if its license is fine with you: nx add --allow-unfree {}",
-        n.attr, n.attr
-    ))
+    Route::Refuse(unfree(&n.attr))
+}
+
+/// Why an unfree nixpkgs package is refused, and where to get it instead.
+pub fn unfree(attr: &str) -> String {
+    format!(
+        "{attr} is unfree, and nx installs only free tools from nixpkgs; if its vendor \
+         publishes an RPM repo, nx repo add <its .repo URL> and then nx add --host <its \
+         package> take it from there; otherwise use its Flatpak"
+    )
 }
 
 fn hint(similar: &[String]) -> String {
@@ -203,7 +198,6 @@ mod tests {
     fn nixpkg(attr: &str) -> Nixpkg {
         Nixpkg {
             attr: attr.into(),
-            pname: attr.into(),
             ..Nixpkg::default()
         }
     }
@@ -315,18 +309,22 @@ mod tests {
     }
 
     #[test]
-    fn unfree_needs_allowing_and_fedora_comes_next() {
-        let mut ngrok = Nixpkg {
+    fn unfree_is_refused_and_fedora_comes_next() {
+        let ngrok = Nixpkg {
             unfree: true,
             ..nixpkg("ngrok")
         };
-        assert_eq!(
-            decide("ngrok", None, CliTools::Nix, &ask(None, Some(&ngrok), &[])),
-            Route::Refuse(
-                "ngrok is unfree; if its license is fine with you: nx add --allow-unfree ngrok"
-                    .into()
-            )
-        );
+        for forced in [None, Some(Forced::Tool)] {
+            assert_eq!(
+                decide(
+                    "ngrok",
+                    forced,
+                    CliTools::Nix,
+                    &ask(None, Some(&ngrok), &[])
+                ),
+                Route::Refuse(unfree("ngrok"))
+            );
+        }
         // A vendor RPM repo is the next choice.
         assert_eq!(
             decide(
@@ -336,11 +334,6 @@ mod tests {
                 &ask(Some(&rpm(None)), Some(&ngrok), &[])
             ),
             Route::Host("a standalone tool nixpkgs doesn't have".into())
-        );
-        ngrok.allowed = true;
-        assert_eq!(
-            decide("ngrok", None, CliTools::Nix, &ask(None, Some(&ngrok), &[])),
-            tool_route("ngrok", "a standalone tool; unfree, allowed")
         );
     }
 

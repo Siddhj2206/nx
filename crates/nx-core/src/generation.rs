@@ -882,7 +882,6 @@ mod tests {
                 name: "rg".into(),
                 path: format!("{out}/bin/rg"),
             }],
-            unfree: false,
         };
         lock.tool = Some(LockedTool {
             packages: vec![package.clone()],

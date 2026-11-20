@@ -7,7 +7,6 @@
 mod add;
 mod apply;
 mod boot;
-mod cache;
 mod changes;
 mod compat;
 mod complete;
@@ -78,9 +77,6 @@ enum Command {
         /// a nixpkgs package in the tool tier, wherever nx would put it
         #[arg(long)]
         tool: bool,
-        /// allow these nixpkgs packages despite an unfree license
-        #[arg(long)]
-        allow_unfree: bool,
         /// let this package have a command another tool package has
         #[arg(long = "override", value_name = "command")]
         overrides: Vec<String>,
@@ -163,12 +159,6 @@ enum Command {
         #[command(subcommand)]
         action: RepoAction,
     },
-    /// extra Nix binary caches for the tool tier: add, list, remove
-    #[command(subcommand_required = true, arg_required_else_help = true)]
-    Cache {
-        #[command(subcommand)]
-        action: CacheAction,
-    },
     /// find packages by name or summary
     Search {
         #[arg(value_name = "term", required = true)]
@@ -244,31 +234,6 @@ enum RepoAction {
     },
 }
 
-#[derive(Subcommand)]
-enum CacheAction {
-    /// trust a binary cache and the key it signs with
-    Add {
-        #[arg(value_name = "url")]
-        url: String,
-        /// as the cache publishes it: name-1:base64…
-        #[arg(value_name = "key")]
-        key: String,
-        /// check the entry and resolve with it; change nothing
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// cache.nixos.org and the caches nx added
-    List,
-    /// stop trusting a cache nx added
-    Remove {
-        #[arg(value_name = "url", add = ArgValueCandidates::new(complete::caches))]
-        url: String,
-        /// resolve without the cache; change nothing
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
 /// How the host-tier commands treat cached repo metadata.
 #[derive(Args)]
 struct Metadata {
@@ -323,7 +288,6 @@ fn main() -> ExitCode {
             dry_run,
             host,
             tool,
-            allow_unfree,
             overrides,
             without,
             allow_scriptlets,
@@ -338,7 +302,6 @@ fn main() -> ExitCode {
                     (_, true) => Some(route::Forced::Tool),
                     _ => None,
                 },
-                allow_unfree,
                 overrides,
                 without,
             };
@@ -359,15 +322,6 @@ fn main() -> ExitCode {
             }
             result
         }
-        Command::Cache { action } => match action {
-            CacheAction::Add { url, key, dry_run } => {
-                machine().and_then(|m| cache::add(&mut ui, &m, &url, &key, dry_run))
-            }
-            CacheAction::List => cache::list(&mut ui),
-            CacheAction::Remove { url, dry_run } => {
-                machine().and_then(|m| cache::remove(&mut ui, &m, &url, dry_run))
-            }
-        },
         Command::Remove {
             packages,
             dry_run,

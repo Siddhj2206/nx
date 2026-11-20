@@ -87,9 +87,6 @@ pub struct ToolPackage {
     /// The commands it exposes; names something else owns are left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bins: Vec<Bin>,
-    /// Built locally because it is unfree (no cache has it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unfree: bool,
 }
 
 impl ToolPackage {
@@ -240,7 +237,6 @@ mod tests {
                     name: "jq".into(),
                     path: "/nix/store/nh0wly5a1h79bfjgw46sly70ljdy1xkl-jq-1.8.2-bin/bin/jq".into(),
                 }],
-                unfree: false,
             }],
         });
         lock.routes.insert("jq".into(), "a standalone tool".into());

@@ -21,7 +21,7 @@ pub struct Output {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evaluated {
     Found {
-        /// `lib.getName`: what an unfree allowance names.
+        /// `lib.getName`.
         name: String,
         version: String,
         /// The derivation, for building what no cache has.
@@ -78,15 +78,15 @@ fn quote(s: &str) -> String {
 }
 
 /// The function `nix eval --apply` gets: nixpkgs' entry point, called for
-/// `system` with only the `unfree` names allowed, mapped over `attrs`.
-/// Forcing each result inside `tryEval` (with `deepSeq`) is what turns an
-/// unfree or broken package into a value instead of an error that would
-/// fail the whole evaluation.
-pub fn expression(system: &str, attrs: &[String], unfree: &[String]) -> String {
+/// `system` with nixpkgs' default config (nothing unfree, broken or
+/// insecure allowed), mapped over `attrs`. Forcing each result inside
+/// `tryEval` (with `deepSeq`) is what turns an unfree or broken package
+/// into a value instead of an error that would fail the whole evaluation.
+pub fn expression(system: &str, attrs: &[String]) -> String {
     let list = |v: &[String]| v.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
     format!(
         r#"f: let
-  pkgs = f {{ system = {system}; overlays = [ ]; config = {{ allowUnfreePredicate = p: builtins.elem (pkgs.lib.getName p) [ {unfree} ]; }}; }};
+  pkgs = f {{ system = {system}; overlays = [ ]; config = {{ }}; }};
   lib = pkgs.lib;
   one = a: let
     p = lib.attrByPath (lib.splitString "." a) null pkgs;
@@ -103,19 +103,17 @@ pub fn expression(system: &str, attrs: &[String], unfree: &[String]) -> String {
     else {{ error = "refused"; unfree = p.meta.unfree or false; broken = p.meta.broken or false; insecure = p.meta.insecure or false; }};
 in builtins.listToAttrs (map (a: {{ name = a; value = one a; }}) [ {attrs} ])"#,
         system = quote(system),
-        unfree = list(unfree),
         attrs = list(attrs),
     )
 }
 
 /// Evaluates `attrs` from the nixpkgs at `source` (a release's
-/// `nixexprs.tar.xz`) for `system`, allowing the `unfree` names.
+/// `nixexprs.tar.xz`) for `system`.
 pub fn evaluate(
     nix: &dyn Nix,
     source: &str,
     system: &str,
     attrs: &[String],
-    unfree: &[String],
 ) -> Result<BTreeMap<String, Evaluated>> {
     if attrs.is_empty() {
         return Ok(BTreeMap::new());
@@ -126,7 +124,7 @@ pub fn evaluate(
         "--file".to_owned(),
         source.to_owned(),
         "--apply".to_owned(),
-        expression(system, attrs, unfree),
+        expression(system, attrs),
     ];
     let out = nix.run(&args, &mut |_| {})?;
     parse(&out)
@@ -169,7 +167,7 @@ mod tests {
     fn reads_found_missing_and_refused() -> Result<()> {
         let nix = Fake::answering(ANSWER);
         let attrs = ["jq", "lib", "nope", "vscode"].map(String::from);
-        let got = evaluate(&nix, "nixexprs.tar.xz", "x86_64-linux", &attrs, &[])?;
+        let got = evaluate(&nix, "nixexprs.tar.xz", "x86_64-linux", &attrs)?;
         match &got["jq"] {
             Evaluated::Found {
                 version, outputs, ..
@@ -199,13 +197,8 @@ mod tests {
 
     #[test]
     fn quotes_what_it_puts_in_the_expression() {
-        let e = expression(
-            "x86_64-linux",
-            &["a\"${b}".to_owned()],
-            &["terraform".to_owned()],
-        );
+        let e = expression("x86_64-linux", &["a\"${b}".to_owned()]);
         assert!(e.contains(r#"[ "a\"\${b}" ]"#), "{e}");
-        assert!(e.contains(r#"[ "terraform" ]"#), "{e}");
         assert!(e.contains(r#"system = "x86_64-linux""#), "{e}");
     }
 }
