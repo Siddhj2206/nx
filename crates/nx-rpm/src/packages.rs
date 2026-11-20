@@ -60,12 +60,6 @@ pub fn keyring(repo: &Repo, root: &Path, pinned: Option<&str>) -> Result<RepoKey
     })
 }
 
-/// The file name a repo's key was pinned under before nx kept keys by
-/// content (`keys/<sha256>.asc`); read when a lockfile names no key.
-pub fn legacy_pinned_key(repo_id: &str) -> String {
-    format!("{}.asc", repo_id.replace(['/', ':'], "_"))
-}
-
 /// Downloads `p` from `from` into `dir`, checked against the SHA-256 in the
 /// repo metadata. Tries the mirror the metadata came from, then the others.
 pub fn download(http: &dyn Http, from: &Loaded, p: &Package, dir: &Path) -> Result<PathBuf> {

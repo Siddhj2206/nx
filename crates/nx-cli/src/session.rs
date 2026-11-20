@@ -626,7 +626,7 @@ impl<'m> Session<'m> {
             &exposure,
             &fresh,
             previous,
-            &manifest.overrides.may_lack(),
+            &manifest.overrides.without,
         )?;
         Ok(Some(tool))
     }

@@ -224,8 +224,7 @@ pub struct Overrides {
     pub names: Vec<String>,
     /// Names the image or the host tier has that a tool package is added
     /// without (`nx add --without`): they come first on `PATH`, so the tool
-    /// package's copy is never exposed. Before 1.0, `names` said this too,
-    /// and still does for those entries.
+    /// package's copy is never exposed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub without: Vec<String>,
 }
@@ -233,12 +232,6 @@ pub struct Overrides {
 impl Overrides {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty() && self.without.is_empty()
-    }
-
-    /// Every name a package may go without: `without`, and the older
-    /// `names` entries that said the same.
-    pub fn may_lack(&self) -> Vec<String> {
-        self.without.iter().chain(&self.names).cloned().collect()
     }
 }
 

@@ -50,7 +50,6 @@ image or rebooting. It covers the everyday half of package management:
 | `doctor` | Checks that what nx set up is what the system runs: nxd, the merge, `PATH` order, leaked Nix variables, background failures. Exits 1 on a failure |
 | `sync` | Builds a generation for every deployed image; the staged-image hook, boot and the daily timer run it |
 | `gc` | Removes generations nothing deployed needs, and the packages only they used |
-| `migrate` | Moves nx 0.x's Nix profile into the tool tier |
 
 `add`, `remove`, `upgrade`, `rollback`, `apply` and `gc` take `--dry-run`. Exit codes: 0
 success, 1 failure, 2 misuse, 130 interrupted.

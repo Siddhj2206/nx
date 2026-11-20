@@ -178,31 +178,17 @@ impl Keys {
     }
 
     /// An added repo's pinned key: the one this command chose, else the
-    /// one the current generation names, else (a lock from before keys
-    /// were kept by content) the file nx 1.0's first builds pinned under
-    /// the repo's name, which is pinned by content from then on. `None`
-    /// when there is none.
+    /// one the current generation names. `None` when there is none.
     fn pinned_text(&mut self, id: &str) -> nx_rpm::Result<Option<String>> {
         let sha = self
             .chosen
             .get(id)
             .or_else(|| self.pinned.get(id).and_then(|r| r.key.as_ref()))
             .cloned();
-        let (sha, text) = match sha {
-            Some(sha) => {
-                let text = read(&self.dir, &sha)?;
-                (sha, text)
-            }
-            None => {
-                let legacy = self.dir.join(nx_rpm::packages::legacy_pinned_key(id));
-                let Ok(text) = std::fs::read_to_string(&legacy) else {
-                    return Ok(None);
-                };
-                let sha =
-                    pin(&self.dir, &text).map_err(|e| nx_rpm::Error::Invalid(format!("{e:#}")))?;
-                (sha, text)
-            }
+        let Some(sha) = sha else {
+            return Ok(None);
         };
+        let text = read(&self.dir, &sha)?;
         self.used.insert(id.to_owned(), sha);
         Ok(Some(text))
     }
@@ -332,16 +318,6 @@ mod tests {
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(err.contains("no longer holds the key"), "{err}");
-
-        std::fs::remove_file(dir.join(format!("{sha}.asc")))?;
-        std::fs::write(
-            dir.join(nx_rpm::packages::legacy_pinned_key(&repo.id)),
-            &text,
-        )?;
-        let mut k = keys(&dir, None, &repo.id);
-        assert_eq!(k.get(&repo)?.fingerprints.len(), 1);
-        assert_eq!(k.pin_of(&repo.id), Some(sha.clone()));
-        assert!(dir.join(format!("{sha}.asc")).is_file());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
