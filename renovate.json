@@ -54,7 +54,7 @@
       "automerge": true
     },
     {
-      "description": "Dev tools in mise.toml (git-cliff).",
+      "description": "Dev tools in mise.toml (git-cliff, shellcheck).",
       "matchManagers": [
         "mise"
       ],
@@ -66,7 +66,7 @@
       "automerge": true
     },
     {
-      "description": "nx is built for Neptuno's Fedora: 45 -> 46 moves with the image, by hand (dev/Containerfile, both workflows, dev/dist's tarball name).",
+      "description": "nx is built for Neptuno's Fedora: 45 -> 46 moves with the image, by hand (both workflows, dev/dist's tarball name).",
       "matchDepNames": [
         "quay.io/fedora/fedora",
         "registry.fedoraproject.org/fedora"

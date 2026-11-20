@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds a release tarball: the tree an image unpacks at / (design, M7
 # Packaging), for this machine's Fedora release and architecture, and its
-# line in SHA256SUMS. Run it where nx builds: dev/run dev/dist v1.0.0, or
+# line in SHA256SUMS. Run it on the image's Fedora (mise run dist), or in
 # the release workflow's fedora container.
 #   dev/dist <version> [out-dir]
 set -euo pipefail

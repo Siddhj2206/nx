@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates src/sys.rs from the installed libsolv headers (ADR-0007).
-# Run inside the dev container: dev/run crates/nx-solv/generate.sh
+# Needs libsolv-devel and bindgen (mise x cargo:bindgen-cli -- crates/nx-solv/generate.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
 

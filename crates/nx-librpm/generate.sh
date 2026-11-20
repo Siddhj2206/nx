@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates src/sys.rs from the installed librpm headers (ADR-0008).
-# Run inside the dev container: dev/run crates/nx-librpm/generate.sh
+# Needs rpm-devel and bindgen (mise x cargo:bindgen-cli -- crates/nx-librpm/generate.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -2,25 +2,39 @@
 
 ## Tools
 
-nx builds in the dev container (`dev/Containerfile`, the image's Fedora
-with libsolv and librpm headers); `dev/run <command>` runs a command in it
-with the checkout mounted at the same path. The host's tools come from
+nx builds on the host. It links the image's libsolv and librpm, so the
+host needs their headers once:
+
+```
+nx add libsolv-devel rpm-devel
+```
+
+Building on the image itself is what keeps nx on the same glibc, libsolv
+and librpm it runs with. The other tools come from
 [mise](https://mise.jdx.dev) (`mise.toml`): run `mise trust` and
 `mise install` once.
+
+The loop is plain cargo, then the VM for anything that touches the system:
+
+```
+cargo test                    # or cargo test -p nx-rpm some_test
+mise run check                # before a commit
+mise run vm                   # build, and install into the Neptuno test VM
+```
 
 | Task | What it does |
 |---|---|
 | `mise run check` | Every gate CI runs: `cargo fmt --check`, clippy with warnings denied, `cargo test`, shellcheck |
-| `mise run fmt` | Format the workspace |
-| `mise run lint` / `test` | Clippy, or the tests (`mise run test -- -p nx-rpm some_test`) |
+| `mise run vm` | Build nx and install it into the Neptuno test VM (`dev/vm-install`) |
 | `mise run dist` | The release tarball for the workspace version, into `dist/` |
 | `mise run changelog` | What the next release's changelog section would say |
 | `mise run release X.Y.Z` | Cut a release (below) |
-| `mise run dev-image` | Rebuild the dev container after `dev/Containerfile` changes |
-| `mise run vm-install` | Build nx and install it into the Neptuno test VM |
 
-Every task runs through `dev/run`; in CI (`CI=true`) `dev/run` runs the
-command directly, since the job already runs in that Fedora.
+CI runs `mise run check` in `fedora:45` with the same packages installed.
+
+Regenerating the bindings (`crates/nx-solv/generate.sh`,
+`crates/nx-librpm/generate.sh`) also needs bindgen:
+`mise x cargo:bindgen-cli -- crates/nx-solv/generate.sh`.
 
 ## Branches
 
@@ -97,5 +111,5 @@ Renovate (the hosted app, `renovate.json`) opens one PR a week, on Monday
 morning, per group: crates, GitHub Actions (after three days), mise's
 tools. Non-major updates to crates, first-party actions and tools merge
 themselves once CI is green. Majors wait for a human, and the Fedora
-release (`fedora:45` in `dev/Containerfile` and both workflows) moves with
+release (`fedora:45` in both workflows) moves with
 Neptuno's image, by hand.

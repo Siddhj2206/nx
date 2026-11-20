@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cuts a release on main (a minor or major) or on release/X.Y (a patch):
 # bumps the workspace version, writes CHANGELOG.md with git-cliff (mise
-# install), runs the gates in the dev container, commits
+# install), runs the gates, commits
 # `chore(release): X.Y.Z` and tags vX.Y.Z. It pushes nothing: it prints the
 # push, which starts .github/workflows/release.yml.
 #   dev/release 1.1.0
@@ -39,11 +39,11 @@ grep -q "^## \[$version\]" CHANGELOG.md ||
 sed -i "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml
 grep -qx "version = \"$version\"" Cargo.toml || die "Cargo.toml has no workspace version to bump"
 # The members' new version into Cargo.lock; nothing else moves.
-dev/run cargo update --workspace --offline --quiet
+cargo update --workspace --offline --quiet
 
-dev/run cargo fmt --check
-dev/run cargo clippy --all-targets --locked -- -D warnings
-dev/run cargo test --locked
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
 
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -q -m "chore(release): $version"

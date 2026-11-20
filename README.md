@@ -94,17 +94,16 @@ nx 1.0 replaced nx 0.x, a front end to a Nix profile (tag `v0.2.0`);
 
 ## Building
 
-nx builds in a Fedora container of the image's release
-(`dev/Containerfile`), since the host has libsolv's and librpm's runtimes
-but not their headers. `dev/run` runs a command in it with this checkout
-mounted:
+nx builds on the Fedora bootc system it runs on, against the image's own
+libsolv and librpm:
 
 ```
-dev/run cargo build --release
-dev/run cargo test
+nx add libsolv-devel rpm-devel
+cargo build --release
+cargo test
 ```
 
 With [mise](https://mise.jdx.dev), `mise run check` runs every gate CI
-runs. Branches, releases and the changelog are in
+runs and `mise run vm` installs a build into a test VM. Branches, releases and the changelog are in
 [docs/development.md](docs/development.md); what changed in each release
 is in [CHANGELOG.md](CHANGELOG.md).

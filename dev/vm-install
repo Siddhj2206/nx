@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds nx, nxd and nx-shim in the dev container and installs them, their
+# Builds nx, nxd and nx-shim and installs them, their
 # units, the polkit files and the PATH snippets into the Neptuno test VM (`vm
 # start` first). Never the daily driver. /usr is read-only in the VM, so
 # binaries go to /usr/local/bin (nx-shim to /usr/local/libexec/nx), units,
@@ -10,11 +10,9 @@
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 vm=${NX_VM:-$HOME/.local/share/nx-vm/vm}
-"$repo/dev/run" cargo build --release
-out=$(mktemp -d)
-trap 'rm -rf "$out"' EXIT
-podman run --rm --security-opt label=disable -v nx-dev-target:/target:ro -v "$out:/out" \
-	localhost/nx-dev:45 cp /target/release/nx /target/release/nxd /target/release/nx-shim /out/
+cd "$repo"
+cargo build --release --locked
+out=${CARGO_TARGET_DIR:-$repo/target}/release
 "$vm" cp "$out/nx" "$out/nxd" "$out/nx-shim" "$repo"/systemd/*.* "$repo"/systemd/user/nx-notify.* \
 	"$repo"/polkit/* "$repo"/shell/* \
 	"$repo/dev/vm-test.rules"
