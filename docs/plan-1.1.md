@@ -157,7 +157,7 @@ image version doesn't merge.
 
 ## Phase 4: deletions
 
-**4.1 Prefix backend.** Goes: probing and the fallback in nxd,
+**~~4.1 Prefix backend.~~** *Done (ADR-0011; `nx shell` dropped, not kept as an error).* Goes: probing and the fallback in nxd,
 `nx-settle.service` and `nx select --after-merge`, `/var/lib/nx/backend`,
 `[host] backend`, `nx shell` (it has nothing to export with sysext; keep
 the verb as an error that says so for one release, or drop it), the prefix
@@ -169,7 +169,7 @@ cause, and `nx doctor` says whether nx's extension is merged. Update ADR-0006's
 `data/signed/<short key id>/`, `Universe::missing` as a fetch source (it
 stays as an error: "the image's build of X is in no repo").
 
-**4.3 Unfree packages and extra caches.** Goes: `[tool] unfree`,
+**~~4.3 Unfree packages and extra caches.~~** *Done (ADR-0010).* Goes: `[tool] unfree`,
 `--allow-unfree`, `allowUnfreePredicate` in the evaluation, the unfree
 branch of routing (route says: unfree, so a vendor RPM repo with `nx repo
 add`, or Flatpak), `nx cache` and `[[cache]]`, `nx-activate/nixconf.rs`,
@@ -179,7 +179,7 @@ upgrading, `nx remove` the unfree packages; on its first activation 1.1's
 nxd removes `/etc/nix/nx.conf` and its `!include` (that cleanup goes in
 1.2). A manifest with `unfree` or `[[cache]]` is read with a warning.
 
-**4.4 nx 0.x compatibility.** Goes: `nx migrate` and `nx_nix::profile`,
+**~~4.4 nx 0.x compatibility.~~** *Done.* Goes: `nx migrate` and `nx_nix::profile`,
 the `[overrides] names` reading, `keys/<repo id>.asc` pins, the doctor
 check for `~/.nix-profile`. The laptop has migrated.
 
@@ -259,7 +259,8 @@ know.
 | 7.8 | Prefetch nixexprs | `nx sync --refresh` fetches the newest release's `nixexprs.tar.xz`, so the first `nx add` after the weekly pin move doesn't wait for it (34 s on the VM). Left over from M6. |
 | 7.9 | COPR chroot check before a rebase | When the staged image's `VERSION_ID` differs, check each added COPR for that release's chroot and name the missing ones in the notification before the reboot. |
 | 7.10 | COPR key rotation | `nx add`/`upgrade` show the old and new fingerprints and the exact `nx repo add <repo> --new-key` to run. |
-| 7.11 | *Stretch:* COPR search | `nx search --copr <term>` through COPR's API, results marked as COPR with the `nx repo add copr:…` to run. Depends on a service nx doesn't otherwise need; only if the rest is done. |
+| 7.11 | Refresh expired metadata instead of warning | Today every command warns `metadata for updates, updates-archive is out of date; --refresh updates it`, nearly always: `updates` sets `metadata_expire=6h` and `nx-refresh.timer` runs daily. Commands that change the manifest (`add`, `remove`, `upgrade`, `apply`, `repo`) load with `Refresh::IfStale` (already in `nx-rpm`): a repo past its expiry costs one `repomd.xml` fetch, and `primary` only when it changed. Reads (`search`, `info`, `list`, `why`) stay local and instant (invariant 7, performance rule 1); the timer runs every 6 h so they rarely see old metadata, and they warn only when the cache is older than a day or the last refresh failed. Offline, an expired repo falls back to its cache with the existing `using cached metadata` warning. |
+| 7.12 | *Stretch:* COPR search | `nx search --copr <term>` through COPR's API, results marked as COPR with the `nx repo add copr:…` to run. Depends on a service nx doesn't otherwise need; only if the rest is done. |
 
 ## Phase 8: output
 
