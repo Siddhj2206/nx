@@ -84,9 +84,22 @@ fn wanted(machine: &Machine) -> Vec<(Role, Deployment)> {
     out
 }
 
+/// Deployed images left without a host tier, one line each: which image,
+/// and why. Reported once, by whoever called [`deployed`].
+#[derive(Debug)]
+pub struct Unbuilt(pub Vec<String>);
+
+impl std::fmt::Display for Unbuilt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.join("\n"))
+    }
+}
+
+impl std::error::Error for Unbuilt {}
+
 /// Builds a generation for each deployed image that lacks one for the
 /// current manifest; returns how many it built. Every image is tried; the
-/// first failure is returned once the rest are done.
+/// failures are returned together ([`Unbuilt`]) once the rest are done.
 pub fn deployed(
     ui: &mut Ui,
     machine: &Machine,
@@ -99,8 +112,8 @@ pub fn deployed(
         Ok(None) => return Ok(0),
         Err(e) => return Err(anyhow::Error::new(e).context("reading the current generation")),
     };
-    let (mut built, mut first_error) = (0, None);
-    let mut failures = BTreeMap::new();
+    let mut built = 0;
+    let (mut failures, mut unbuilt) = (BTreeMap::new(), Vec::new());
     for (role, d) in wanted(machine) {
         let Some(digest) = d.image_digest.as_deref() else {
             continue;
@@ -112,21 +125,21 @@ pub fn deployed(
         match result {
             Ok(()) => built += 1,
             Err(e) => {
-                ui.warn(format_args!(
+                unbuilt.push(format!(
                     "no host tier for the {role} image ({}): {e:#}",
                     crate::ui::short_digest(digest)
                 ));
                 failures.insert(digest.to_owned(), first_line(&e));
-                first_error.get_or_insert(e);
             }
         }
     }
     // Only this run's failures stand: an image that now has a host tier, or
     // is no longer deployed, drops out.
     select::record_failures(state, &failures);
-    match first_error {
-        Some(e) => Err(e.context("some deployed images have no host tier yet")),
-        None => Ok(built),
+    if unbuilt.is_empty() {
+        Ok(built)
+    } else {
+        Err(Unbuilt(unbuilt).into())
     }
 }
 

@@ -189,6 +189,59 @@ pub fn reword(rendered: &str) -> (String, Vec<String>) {
     (message, tips)
 }
 
+/// clap's "the following required arguments were not provided" as nx
+/// says it: `nx add needs a package: nx add <package>...`. `None` for any
+/// other error.
+pub fn missing(err: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if err.kind() != ErrorKind::MissingRequiredArgument {
+        return None;
+    }
+    let Some(ContextValue::Strings(args)) = err.get(ContextKind::InvalidArg) else {
+        return None;
+    };
+    let usage = match err.get(ContextKind::Usage) {
+        Some(ContextValue::StyledStr(u)) => u.to_string(),
+        _ => return None,
+    };
+    Some(missing_message(&usage, args))
+}
+
+/// [`missing`] from clap's usage line and the missing arguments as clap
+/// names them (`<PACKAGE>...`).
+fn missing_message(usage: &str, args: &[String]) -> String {
+    let path: Vec<&str> = usage
+        .trim()
+        .trim_start_matches("Usage:")
+        .split_whitespace()
+        .take_while(|w| !w.starts_with(['[', '<', '-']))
+        .collect();
+    let path = path.join(" ");
+    let names: Vec<String> = args
+        .iter()
+        .map(|a| {
+            let name = a
+                .trim_end_matches("...")
+                .trim_matches(['<', '>'])
+                .to_lowercase()
+                .replace(['_', '-'], " ")
+                .replace('|', " or ");
+            let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {name}")
+        })
+        .collect();
+    let example: Vec<String> = args.iter().map(|a| a.to_lowercase()).collect();
+    format!(
+        "{path} needs {}: {path} {}",
+        names.join(" and "),
+        example.join(" ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +266,33 @@ mod tests {
         assert!(text.contains("  Usage: nx <command> [args]\n"));
         assert!(text.contains("\n  System\n    status"));
         assert!(text.contains("the image nx resolves against"));
+    }
+
+    fn missing_for(args: &[&str]) -> Option<String> {
+        Cli::command()
+            .try_get_matches_from(args)
+            .err()
+            .and_then(|e| missing(&e))
+    }
+
+    #[test]
+    fn says_what_a_command_needs() {
+        assert_eq!(
+            missing_for(&["nx", "add"]).as_deref(),
+            Some("nx add needs a package: nx add <package>...")
+        );
+        assert_eq!(
+            missing_for(&["nx", "why"]).as_deref(),
+            Some("nx why needs a name or path: nx why <name|path>")
+        );
+        assert_eq!(missing_for(&["nx", "statsu"]), None);
+        assert_eq!(
+            missing_message(
+                "Usage: nx repo add [OPTIONS] <REPO> <KEY_FILE>",
+                &["<REPO>".into(), "<KEY_FILE>".into()]
+            ),
+            "nx repo add needs a repo and a key file: nx repo add <repo> <key_file>"
+        );
     }
 
     #[test]

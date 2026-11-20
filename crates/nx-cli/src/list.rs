@@ -40,18 +40,36 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
         .max()
         .unwrap_or(0)
         + 2;
+    // The version column is as wide as its longest, so notes line up.
+    let versions = g
+        .lock
+        .host
+        .iter()
+        .map(|p| p.evr().len())
+        .chain(tools.iter().map(|p| p.version.len()))
+        .max()
+        .unwrap_or(0)
+        + 2;
+    // A row without a note gets no trailing padding.
+    let version = |v: &str, note: &str| {
+        if note.is_empty() {
+            style.dim(v)
+        } else {
+            ui::pad(&style.dim(v), versions)
+        }
+    };
     let mut row = |p: &LockedPackage, note: String| {
         out.line(format_args!(
             "{}{}{note}",
             ui::pad(&style.bold(&p.name), width),
-            style.dim(p.evr())
+            version(p.evr(), &note)
         ));
     };
     for p in &direct {
         row(p, String::new());
     }
     for p in &deps {
-        row(p, style.dim(&format!("  · for {}", p.requested.join(", "))));
+        row(p, style.dim(&format!("· for {}", p.requested.join(", "))));
     }
     for spec in &in_image {
         out.line(format_args!(
@@ -63,14 +81,14 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
     for p in tools {
         let names: Vec<&str> = p.bins.iter().map(|b| b.name.as_str()).collect();
         let runs = match names.as_slice() {
-            [] => "  · nixpkgs, no commands exposed".to_owned(),
-            [one] if *one == p.attr => "  · nixpkgs".to_owned(),
-            _ => format!("  · nixpkgs · {}", names.join(" ")),
+            [] => "· nixpkgs, no commands exposed".to_owned(),
+            [one] if *one == p.attr => "· nixpkgs".to_owned(),
+            _ => format!("· nixpkgs · {}", names.join(" ")),
         };
         out.line(format_args!(
             "{}{}{}",
             ui::pad(&style.bold(&p.attr), width),
-            style.dim(&p.version),
+            version(&p.version, &runs),
             style.dim(&runs)
         ));
     }
@@ -119,6 +137,7 @@ mod tests {
         lock.host = vec![
             locked("libffi-devel", "3.5.1-2.fc45", &["wayland-devel"]),
             locked("wayland-devel", "1.24.0-1.fc45", &["wayland-devel"]),
+            locked("libxml2", "2.14.6-1.fc45", &["wayland-devel"]),
         ];
         let g = Generation {
             number: 2,
@@ -130,10 +149,11 @@ mod tests {
         assert_eq!(
             text(Some(&g)),
             "  wayland-devel  1.24.0-1.fc45\n\
-             \x20 libffi-devel   3.5.1-2.fc45  · for wayland-devel\n\
+             \x20 libffi-devel   3.5.1-2.fc45   · for wayland-devel\n\
+             \x20 libxml2        2.14.6-1.fc45  · for wayland-devel\n\
              \x20 glibc          ✓ in the image\n\
              \n\
-             \x20 2 host packages · generation 2\n"
+             \x20 3 host packages · generation 2\n"
         );
     }
 
@@ -157,7 +177,13 @@ mod tests {
         lock.tool = Some(nx_core::LockedTool {
             rev: "e21fec321d73511849707a7585e4ea155ee4bf40".into(),
             release: "nixpkgs-26.11pre1122334.e21fec321d73".into(),
-            packages: vec![tool("ripgrep", &["rg"]), tool("jq", &["jq"])],
+            packages: vec![
+                tool("ripgrep", &["rg"]),
+                nx_core::ToolPackage {
+                    version: "1.7.1".into(),
+                    ..tool("jq", &["jq"])
+                },
+            ],
             ..nx_core::LockedTool::default()
         });
         let g = Generation {
@@ -169,8 +195,8 @@ mod tests {
         };
         assert_eq!(
             text(Some(&g)),
-            "  ripgrep  1.0  · nixpkgs · rg\n\
-             \x20 jq       1.0  · nixpkgs\n\
+            "  ripgrep  1.0    · nixpkgs · rg\n\
+             \x20 jq       1.7.1  · nixpkgs\n\
              \n\
              \x20 0 host packages · 2 tools at nixpkgs 26.11pre1122334 · generation 3\n"
         );

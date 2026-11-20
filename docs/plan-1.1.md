@@ -288,7 +288,10 @@ stays; this changes what goes in the lines.
 5. A warning is about this change and is printed once.
 6. Times are relative ("2 h ago", "yesterday"), not UTC dates.
 
-**8.1 Bugs first**
+**~~8.1 Bugs first~~** *Done. `nx generations` diffs against `parent`
+only when it is the same image's (else the image's previous generation, or
+"from generation N" when it has none), and dates use `jiff` for the local
+zone.*
 
 - `Ui::warn` doesn't indent continuation lines: the scriptlet refusal
   prints its advice at column 0, and suggests

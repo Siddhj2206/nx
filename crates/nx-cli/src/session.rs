@@ -602,7 +602,7 @@ impl<'m> Session<'m> {
                 shim: shim.as_deref(),
             },
         )
-        .map_err(refusal_error)?;
+        .map_err(|e| refusal_error(e, all))?;
         crate::tool::add_roots(&*self.env.nix, &built.generation)?;
         Ok(built)
     }
@@ -673,7 +673,7 @@ impl<'m> Session<'m> {
         self.env
             .live
             .activate(ui, &self.env.state, built.generation.number)?;
-        for name in &built.allowed {
+        for name in newly_allowed(&built, self.current.as_ref()) {
             ui.warn(format_args!(
                 "{name}: scriptlets nx can't translate are skipped, as you allowed"
             ));
@@ -687,9 +687,13 @@ impl<'m> Session<'m> {
         self.guard = None;
         if let Err(e) = crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing)
         {
-            ui.warn(format_args!(
-                "the staged and rollback images were not updated: {e:#} (nx sync retries)"
-            ));
+            if e.downcast_ref::<crate::sync::Unbuilt>().is_some() {
+                ui.warn(format_args!("{e}\nnx sync retries"));
+            } else {
+                ui.warn(format_args!(
+                    "the staged and rollback images were not updated: {e:#}\nnx sync retries"
+                ));
+            }
         }
         Ok(built)
     }
@@ -938,6 +942,27 @@ fn image_only(
         .collect()
 }
 
+/// The packages of `built` whose skipped scriptlets are news: the build
+/// before (`previous`) didn't have them at this version. A build that
+/// keeps one as it was says nothing again.
+fn newly_allowed<'b>(built: &'b Built, previous: Option<&Generation>) -> Vec<&'b str> {
+    let nevra = |lock: &Lock, name: &str| {
+        lock.host
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.nevra.clone())
+    };
+    built
+        .allowed
+        .iter()
+        .filter(|name| {
+            let now = nevra(&built.generation.lock, name);
+            previous.is_none_or(|g| nevra(&g.lock, name) != now)
+        })
+        .map(String::as_str)
+        .collect()
+}
+
 /// The image hint (design, *Image-level packages*): why, and the line for
 /// the user's Containerfile. nx never changes the image itself.
 fn image_hint(packages: &[(String, &str)]) -> anyhow::Error {
@@ -954,8 +979,10 @@ fn image_hint(packages: &[(String, &str)]) -> anyhow::Error {
 }
 
 /// Turns a scriptlet refusal into the message the user needs: what was
-/// left, what to do about it.
-fn refusal_error(e: nx_core::Error) -> anyhow::Error {
+/// left, what to do about it. `all` is the plan, which says which of the
+/// manifest's packages pulled each refused one in: that is what the
+/// suggested `nx add` names.
+fn refusal_error(e: nx_core::Error, all: &[Planned]) -> anyhow::Error {
     let nx_core::Error::Scriptlets(refusals) = e else {
         return e.into();
     };
@@ -988,10 +1015,25 @@ fn refusal_error(e: nx_core::Error) -> anyhow::Error {
             )
         })
         .collect();
-    msg.push_str(&format!(
-        "  nx add <what you asked for> {}",
-        flags.join(" ")
-    ));
+    let mut add: Vec<&str> = Vec::new();
+    for r in &refusals {
+        let requested = all
+            .iter()
+            .find(|p| p.package.name == r.name)
+            .map(|p| p.requested.as_slice())
+            .unwrap_or_default();
+        let names = if requested.is_empty() {
+            std::slice::from_ref(&r.name)
+        } else {
+            requested
+        };
+        for n in names {
+            if !add.contains(&n.as_str()) {
+                add.push(n);
+            }
+        }
+    }
+    msg.push_str(&format!("  nx add {} {}", add.join(" "), flags.join(" ")));
     anyhow::anyhow!(msg)
 }
 
@@ -1077,6 +1119,90 @@ mod session_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn planned(name: &str, requested: &[&str]) -> Planned {
+        Planned {
+            package: Package {
+                name: name.into(),
+                ..Package::default()
+            },
+            requested: requested.iter().map(|r| (*r).to_owned()).collect(),
+            file: None,
+        }
+    }
+
+    fn generation(number: u32, host: &[(&str, &str)]) -> Generation {
+        let mut lock = Lock::new(None, "45", "x86_64");
+        lock.host = host
+            .iter()
+            .map(|(name, nevra)| LockedPackage {
+                name: (*name).into(),
+                nevra: (*nevra).into(),
+                repo: "fedora".into(),
+                sha256: String::new(),
+                requested: Vec::new(),
+            })
+            .collect();
+        Generation {
+            number,
+            dir: PathBuf::new(),
+            manifest: Manifest::default(),
+            lock,
+            activation: nx_core::Activation::default(),
+        }
+    }
+
+    /// The allowance warning is news only: a package new to this build, or
+    /// at another version than the build before had.
+    #[test]
+    fn says_skipped_scriptlets_only_when_the_package_changes() {
+        let built = |host: &[(&str, &str)]| Built {
+            generation: generation(2, host),
+            outside_usr: Vec::new(),
+            allowed: vec!["memcached-selinux".into()],
+        };
+        let before = generation(1, &[("memcached-selinux", "memcached-selinux-1.6-1")]);
+        let same = built(&[("memcached-selinux", "memcached-selinux-1.6-1")]);
+        let newer = built(&[("memcached-selinux", "memcached-selinux-1.6-2")]);
+        assert!(newly_allowed(&same, Some(&before)).is_empty());
+        assert_eq!(newly_allowed(&newer, Some(&before)), ["memcached-selinux"]);
+        assert_eq!(newly_allowed(&same, None), ["memcached-selinux"]);
+        let without = generation(1, &[]);
+        assert_eq!(newly_allowed(&same, Some(&without)), ["memcached-selinux"]);
+    }
+
+    /// The suggested `nx add` names what the manifest asked for, not the
+    /// dependency a scriptlet was refused for.
+    #[test]
+    fn a_refusal_suggests_adding_what_pulled_the_package_in() {
+        let refusal = |name: &str| nx_core::Refusal {
+            name: name.into(),
+            nevra: format!("{name}-1.0-1.fc45.noarch"),
+            digest: "0123456789abcdef".repeat(4),
+            leftovers: Vec::new(),
+        };
+        let all = [
+            planned("memcached", &["memcached"]),
+            planned("memcached-selinux", &["memcached"]),
+        ];
+        let e = refusal_error(
+            nx_core::Error::Scriptlets(vec![refusal("memcached-selinux")]),
+            &all,
+        );
+        let text = e.to_string();
+        let last = text.lines().last().unwrap_or_default();
+        assert_eq!(
+            last,
+            "  nx add memcached --allow-scriptlets memcached-selinux=0123456789abcdef"
+        );
+
+        // Not in the plan (or asked for nothing): its own name.
+        let e = refusal_error(nx_core::Error::Scriptlets(vec![refusal("other")]), &[]);
+        assert!(
+            e.to_string()
+                .ends_with("  nx add other --allow-scriptlets other=0123456789abcdef")
+        );
+    }
 
     #[test]
     fn evaluates_only_when_the_manifest_names_something_new() {

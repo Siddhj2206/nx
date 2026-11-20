@@ -84,6 +84,14 @@ impl Stream {
         let _ = writeln!(self.w, "  {text}");
     }
 
+    /// A line that starts with its kind's symbol. Continuation lines are
+    /// indented past the symbol, so a message of several lines stays one
+    /// block.
+    pub fn symbol(&mut self, sym: &str, msg: impl Display) {
+        let msg = msg.to_string().replace('\n', "\n    ");
+        self.line(format_args!("{sym} {msg}"));
+    }
+
     pub fn blank(&mut self) {
         let _ = writeln!(self.w);
     }
@@ -139,32 +147,31 @@ impl Ui {
     /// before anything changes.
     pub fn step(&mut self, msg: impl Display) {
         let sym = self.err.style.cyan(SYM_STEP);
-        self.err.line(format_args!("{sym} {msg}"));
+        self.err.symbol(&sym, msg);
     }
 
     /// Reports success, on stdout.
     pub fn done(&mut self, msg: impl Display) {
         let sym = self.out.style.green(SYM_DONE);
-        self.out.line(format_args!("{sym} {msg}"));
+        self.out.symbol(&sym, msg);
     }
 
     /// Reports something odd that didn't stop the work.
     pub fn warn(&mut self, msg: impl Display) {
         let sym = self.err.style.yellow(SYM_WARN);
-        self.err.line(format_args!("{sym} {msg}"));
+        self.err.symbol(&sym, msg);
     }
 
     /// Reports something done to a unit, user or file.
     pub fn service(&mut self, msg: impl Display) {
         let sym = self.err.style.cyan(SYM_SERVICE);
-        self.err.line(format_args!("{sym} {msg}"));
+        self.err.symbol(&sym, msg);
     }
 
-    /// Reports a failure. Continuation lines get the same indent.
+    /// Reports a failure.
     pub fn error(&mut self, msg: impl Display) {
         let sym = self.err.style.red(SYM_ERROR);
-        let msg = msg.to_string().replace('\n', "\n    ");
-        self.err.line(format_args!("{sym} {msg}"));
+        self.err.symbol(&sym, msg);
     }
 }
 
@@ -329,11 +336,17 @@ mod tests {
     }
 
     #[test]
-    fn error_indents_continuation_lines() {
-        let err = SharedBuf::default();
-        let mut ui = Ui::plain(SharedBuf::default(), err.clone());
+    fn every_kind_indents_continuation_lines() {
+        let (out, err) = (SharedBuf::default(), SharedBuf::default());
+        let mut ui = Ui::plain(out.clone(), err.clone());
         ui.error("first\nsecond");
-        assert_eq!(err.text(), "  ✗ first\n    second\n");
+        ui.warn("advice\n  nx add memcached");
+        ui.done("one\ntwo");
+        assert_eq!(
+            err.text(),
+            "  ✗ first\n    second\n  ! advice\n      nx add memcached\n"
+        );
+        assert_eq!(out.text(), "  ✓ one\n    two\n");
     }
 
     #[test]

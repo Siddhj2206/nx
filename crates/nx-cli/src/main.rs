@@ -431,6 +431,10 @@ fn parse_error(ui: &mut Ui, err: &clap::Error) -> ExitCode {
                 .raw(format_args!("nx {}\n", env!("CARGO_PKG_VERSION")));
             ExitCode::SUCCESS
         }
+        ErrorKind::MissingRequiredArgument if let Some(message) = help::missing(err) => {
+            ui.error(message);
+            ExitCode::from(EXIT_MISUSE)
+        }
         _ => {
             let (message, tips) = help::reword(&err.render().to_string());
             let mut text = format!("{message} {}", ui.err.style.dim("(see nx help)"));
