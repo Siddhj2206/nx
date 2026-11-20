@@ -65,7 +65,7 @@ pub fn run(
         };
         s.row(key, &value);
     }
-    s.row("Host tier", &host_tier(state, st));
+    s.row("Host tier", &host_tier(state, root, st));
     s.row("Tool tier", &tool_tier(state, root, st));
     s.blank();
     Ok(())
@@ -93,21 +93,19 @@ fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<
     })
 }
 
-/// The current generation and the backend that made it live.
-fn host_tier(state: &State, st: crate::ui::Style) -> String {
-    match (state.current_number(), state.backend()) {
-        (Ok(Some(n)), Ok(Some(backend))) => format!(
-            "generation {n} · {}{}",
-            backend.name(),
-            left_out(state, n, st)
-        ),
-        (Ok(Some(n)), _) => format!(
+/// The current generation, and whether nxd made it live (the link to
+/// root's copy is there).
+fn host_tier(state: &State, root: &Path, st: crate::ui::Style) -> String {
+    let live = std::fs::symlink_metadata(root.join("var/lib/extensions/nx")).is_ok();
+    match state.current_number() {
+        Ok(Some(n)) if live => format!("generation {n}{}", left_out(state, n, st)),
+        Ok(Some(n)) => format!(
             "generation {n} {}{}",
             st.dim("· not made live"),
             left_out(state, n, st)
         ),
-        (Ok(None), _) => st.dim("nothing added yet"),
-        (Err(e), _) => st.yellow(&format!("unreadable: {e}")),
+        Ok(None) => st.dim("nothing added yet"),
+        Err(e) => st.yellow(&format!("unreadable: {e}")),
     }
 }
 

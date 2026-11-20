@@ -9,7 +9,6 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use nx_core::Backend;
 use serde::{Deserialize, Serialize};
 
 /// Where nxd's socket is (`nxd.socket`).
@@ -26,23 +25,13 @@ const IO_TIMEOUT: Duration = Duration::from_secs(300);
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
     /// Makes generation `generation` the current one and live.
-    Activate {
-        generation: u32,
-        /// Forces a backend; `None` tries sysext and falls back to prefix.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        backend: Option<Backend>,
-    },
+    Activate { generation: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub enum Response {
     Activated {
-        backend: Backend,
-        /// Why sysext was passed over for this activation, when it was
-        /// tried and failed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        fallback: Option<String>,
         /// What was done to units, users and files ("started foo.service").
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         events: Vec<String>,
@@ -115,25 +104,19 @@ mod tests {
 
     #[test]
     fn requests_round_trip_as_one_line() -> Result<()> {
-        let request = Request::Activate {
-            generation: 7,
-            backend: Some(Backend::Prefix),
-        };
+        let request = Request::Activate { generation: 7 };
         let mut wire = Vec::new();
         write_line(&mut wire, &request)?;
         assert_eq!(
             String::from_utf8_lossy(&wire),
-            "{\"request\":\"activate\",\"generation\":7,\"backend\":\"prefix\"}\n"
+            "{\"request\":\"activate\",\"generation\":7}\n"
         );
         assert_eq!(read_request(&wire[..])?, request);
-        let probing: Request = serde_json::from_str("{\"request\":\"activate\",\"generation\":2}")?;
-        assert_eq!(
-            probing,
-            Request::Activate {
-                generation: 2,
-                backend: None
-            }
-        );
+        // nx 1.0 sent a backend; it is ignored.
+        let old: Request = serde_json::from_str(
+            "{\"request\":\"activate\",\"generation\":2,\"backend\":\"prefix\"}",
+        )?;
+        assert_eq!(old, Request::Activate { generation: 2 });
         Ok(())
     }
 
@@ -157,10 +140,7 @@ mod tests {
     fn an_absent_socket_is_unavailable() {
         let r = call(
             Path::new("/nonexistent/nxd.sock"),
-            &Request::Activate {
-                generation: 1,
-                backend: None,
-            },
+            &Request::Activate { generation: 1 },
         );
         assert!(matches!(r, Err(Error::Unavailable { .. })), "{r:?}");
     }

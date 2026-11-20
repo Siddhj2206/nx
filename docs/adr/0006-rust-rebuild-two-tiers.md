@@ -54,6 +54,7 @@ five things:
 - `testdata/` keeps nx 0.x's recorded Nix logs for the M6 progress parser.
 - Neptuno's `NX_VERSION` stays on 0.x until M6 ships.
 
-**Revisit when:** M0 shows sysext can't be merged on the image (the prefix
-backend then becomes the only one), or the daemon turns out to be the
-measured bottleneck for the tool tier.
+**Revisit when:** the daemon turns out to be the measured bottleneck for
+the tool tier. (Until 1.1 this also said: when M0 shows sysext can't be
+merged on the image, making the prefix backend the only one. It merged
+on every Neptuno release, and ADR-0011 dropped the prefix backend.)

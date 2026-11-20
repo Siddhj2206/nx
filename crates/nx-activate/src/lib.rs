@@ -5,14 +5,13 @@
 //! things are) and a [`Runner`] (how commands run), so tests run
 //! unprivileged against a temporary tree and a fake `systemd-sysext`.
 //!
-//! The sysext backend (design, *Activation backends*): copy the
-//! generation's extension tree into root's own directory
-//! (`/var/lib/nx-merged`, reflinked), label the copy for the paths it will
-//! appear at, point `current` at the generation, link
-//! `/var/lib/extensions/nx` to the copy, and `systemd-sysext refresh`. The
-//! generation stays its builder's; what is merged is root's. The prefix
-//! backend is the fallback when the merge fails: no link, nothing merged,
-//! and `nx shell` exports the generation's `usr` as a prefix.
+//! Activation (design, *Activation*): copy the generation's extension
+//! tree into root's own directory (`/var/lib/nx-merged`, reflinked), label
+//! the copy for the paths it will appear at, point `current` at the
+//! generation, link `/var/lib/extensions/nx` to the copy, and
+//! `systemd-sysext refresh`. The generation stays its builder's; what is
+//! merged is root's. A merge that fails puts back what was there and is an
+//! error.
 
 pub mod nixconf;
 mod units;
@@ -23,7 +22,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nx_core::{Backend, State};
+use nx_core::State;
 
 pub use units::Services;
 pub use validate::{Validated, validate, wheel_uids};
@@ -158,32 +157,23 @@ impl Runner for System {
 /// What activation did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activated {
-    pub backend: Backend,
-    /// Why the sysext backend was passed over, when it was tried and the
-    /// merge failed.
-    pub fallback: Option<String>,
     /// What was done to units, users and files, and what wasn't.
     pub services: Services,
 }
 
-/// Makes generation `number` current and live. `forced` picks a backend;
-/// otherwise every activation probes: it tries sysext, and falls back to
-/// prefix if the merge fails (overlay depth, an unsupported kernel), so a
-/// system that can merge again later goes back to sysext by itself. The
-/// backend that ended up in use is recorded for `nx shell`. `allowed` says
-/// which uids besides root may own the generation's files (see
-/// [`validate`]).
+/// Makes generation `number` current and merged. `allowed` says which
+/// uids besides root may own the generation's files (see [`validate`]).
 ///
 /// Around the merge, units follow the generation's `activation.toml`: those
 /// of packages that leave are stopped and disabled first, and after it
 /// users and files are created for packages that appear, their presets
-/// applied, and changed ones restarted. The prefix backend merges nothing,
-/// so it sets none of that up.
+/// applied, and changed ones restarted. A merge that fails (overlay depth,
+/// a kernel without overlayfs) puts back the previous generation and is an
+/// error that carries what `systemd-sysext` said.
 pub fn activate(
     layout: &Layout,
     runner: &dyn Runner,
     number: u32,
-    forced: Option<Backend>,
     allowed: &dyn Fn(u32) -> bool,
 ) -> Result<Activated> {
     let valid = validate(layout, number, allowed)?;
@@ -191,16 +181,6 @@ pub fn activate(
     let mut services = Services::default();
     if let Some(dir) = &layout.nix_conf {
         nixconf::clean(dir, runner, &mut services);
-    }
-    if forced == Some(Backend::Prefix) {
-        unmerge_units(runner, &layout.root, merged.as_ref(), &mut services);
-        prefix(layout, runner, number)?;
-        prefix_notice(&valid.activation, &mut services);
-        return Ok(Activated {
-            backend: Backend::Prefix,
-            fallback: None,
-            services,
-        });
     }
     let transition = match &merged {
         Some((old, ext)) => {
@@ -210,99 +190,17 @@ pub fn activate(
         }
         None => units::plan(&nx_core::Activation::default(), &valid.activation),
     };
-    match sysext(layout, runner, number, &valid) {
-        Ok(()) => {
-            units::start(runner, &valid.sysext, &transition, &mut services);
-            Ok(Activated {
-                backend: Backend::Sysext,
-                fallback: None,
-                services,
-            })
-        }
-        Err(Error::Command {
-            program: "systemd-sysext",
-            detail,
-        }) if forced.is_none() => {
-            unmerge_units(runner, &layout.root, merged.as_ref(), &mut services);
-            prefix(layout, runner, number)?;
-            prefix_notice(&valid.activation, &mut services);
-            Ok(Activated {
-                backend: Backend::Prefix,
-                fallback: Some(detail),
-                services,
-            })
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// What [`settle_at_boot`] found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Settled {
-    /// No generation is current, or none is linked for merging.
-    NothingToMerge,
-    /// nx's extension is merged over `/usr`.
-    Merged,
-    /// The boot-time merge didn't happen; the prefix backend is recorded
-    /// and the link removed. The reason is what `systemd-sysext` says.
-    FellBack(String),
-    /// Not merged, but the manifest forces sysext: nothing is changed, the
-    /// same error a forced activation gives.
-    ForcedAndUnmerged(String),
-}
-
-/// Run after `systemd-sysext` at boot: when a generation is linked but its
-/// extension is not merged over `/usr` (overlay depth, an unsupported
-/// kernel), switches to the prefix backend, so `nx shell` exports the
-/// generation's `usr` instead of the system booting with a host tier that
-/// silently isn't there. The next activation tries sysext again.
-pub fn settle_at_boot(layout: &Layout, runner: &dyn Runner) -> Result<Settled> {
-    let Some(number) = layout.state.current_number()? else {
-        return Ok(Settled::NothingToMerge);
-    };
-    if std::fs::symlink_metadata(layout.link()).is_err() {
-        return Ok(Settled::NothingToMerge);
-    }
-    // A placeholder generation has nothing to merge, so nothing to fall
-    // back for; a forced backend is the manifest's to decide.
-    let generation = nx_core::Generation::read(&layout.state, number)?;
-    if generation.lock.pending {
-        return Ok(Settled::NothingToMerge);
-    }
-    let status = sysext_cmd(runner, &["status", "--json=short"])?;
-    if status.success && merged_over_usr(&status.stdout) {
-        if layout.state.backend()? != Some(Backend::Sysext) {
-            layout.state.set_backend(Backend::Sysext)?;
-        }
-        return Ok(Settled::Merged);
-    }
-    let why = if status.success {
-        "nx's extension is not merged over /usr".to_owned()
-    } else {
-        detail(&status)
-    };
-    if generation.manifest.host.backend == Some(Backend::Sysext) {
-        return Ok(Settled::ForcedAndUnmerged(why));
-    }
-    // The record first: a crash between the two leaves a link nothing
-    // merges, which the next settle finds again.
-    layout.state.set_backend(Backend::Prefix)?;
-    let link = layout.link();
-    std::fs::remove_file(&link).map_err(|source| Error::Io {
-        path: link.clone(),
-        source,
-    })?;
-    sync_dir(&layout.extensions)?;
-    validate::prune(layout, None);
-    Ok(Settled::FellBack(why))
+    sysext(layout, runner, number, &valid)?;
+    units::start(runner, &valid.sysext, &transition, &mut services);
+    Ok(Activated { services })
 }
 
 /// Run by `nx select` at boot, once `current` names the generation for
 /// the booted image and before `systemd-sysext` merges: gives it root's
 /// copy and points the link at it, as an activation would (without the
 /// refresh: the boot's merge is next). Nothing to do when nothing is linked
-/// (the prefix backend, or nothing made live yet) or the link already
-/// names this generation's copy. `allowed` is as for [`validate`].
+/// (nothing made live yet) or the link already names this generation's
+/// copy. `allowed` is as for [`validate`].
 pub fn stage_at_boot(
     layout: &Layout,
     runner: &dyn Runner,
@@ -341,12 +239,10 @@ pub fn unstage(layout: &Layout) {
 }
 
 /// The record and extension of the generation that is merged now, if one
-/// is: the current one under the sysext backend, from the tree the link
-/// names (root's copy).
+/// is: the current one, when the link is there, from the tree it names
+/// (root's copy).
 fn merged_now(layout: &Layout) -> Option<(nx_core::Activation, PathBuf)> {
-    if layout.state.backend().ok()? != Some(Backend::Sysext) {
-        return None;
-    }
+    std::fs::symlink_metadata(layout.link()).ok()?;
     let n = layout.state.current_number().ok()??;
     let g = nx_core::Generation::read(&layout.state, n).ok()?;
     let ext = layout
@@ -354,35 +250,6 @@ fn merged_now(layout: &Layout) -> Option<(nx_core::Activation, PathBuf)> {
         .filter(|t| t.is_dir())
         .unwrap_or_else(|| g.sysext());
     Some((g.activation, ext))
-}
-
-/// Stops the units of everything merged, before it is unmerged.
-fn unmerge_units(
-    runner: &dyn Runner,
-    root: &Path,
-    merged: Option<&(nx_core::Activation, PathBuf)>,
-    services: &mut Services,
-) {
-    if let Some((old, ext)) = merged {
-        units::stop(runner, root, ext, &units::plan_unmerge(old), services);
-    }
-}
-
-/// The prefix backend merges nothing, so a package's units (which name
-/// `/usr` paths), users and files are not set up.
-fn prefix_notice(new: &nx_core::Activation, services: &mut Services) {
-    let any = new.packages.iter().any(|p| {
-        !p.intents.preset.is_empty()
-            || !p.intents.restart.is_empty()
-            || !p.sysusers_files.is_empty()
-            || !p.tmpfiles_files.is_empty()
-    });
-    if any {
-        services.warnings.push(
-            "the prefix backend merges nothing, so services, users and files from packages are not set up"
-                .into(),
-        );
-    }
 }
 
 /// Labels root's copy, points `current` at `number`, links the copy and
@@ -420,26 +287,7 @@ fn sysext(layout: &Layout, runner: &dyn Runner, number: u32, valid: &Validated) 
         validate::prune(layout, was_linked.as_deref());
         return Err(e);
     }
-    layout.state.set_backend(Backend::Sysext)?;
     validate::prune(layout, Some(&valid.sysext));
-    Ok(())
-}
-
-/// Unmerges whatever nx merged and records the generation as current.
-fn prefix(layout: &Layout, runner: &dyn Runner, number: u32) -> Result<()> {
-    let link = layout.link();
-    let linked = std::fs::symlink_metadata(&link).is_ok();
-    if linked {
-        std::fs::remove_file(&link).map_err(|source| Error::Io {
-            path: link.clone(),
-            source,
-        })?;
-        sync_dir(&layout.extensions)?;
-        refresh(runner)?;
-    }
-    validate::prune(layout, None);
-    layout.state.set_current(number)?;
-    layout.state.set_backend(Backend::Prefix)?;
     Ok(())
 }
 

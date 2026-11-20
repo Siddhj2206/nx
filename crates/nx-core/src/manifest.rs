@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Backend, Error, FORMAT, Result};
+use crate::{Error, FORMAT, Result};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -60,10 +60,6 @@ pub struct Host {
     /// What the user typed: names, provides or paths.
     #[serde(default)]
     pub packages: Vec<String>,
-    /// Forces the activation backend; unset, nxd probes and keeps the one
-    /// that works.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<Backend>,
 }
 
 /// The tool tier's intent.
@@ -340,7 +336,6 @@ mod tests {
         let text = r#"
 [host]
 packages = ["wayland-devel"]
-backend = "prefix"
 
 [future]
 setting = "kept"
@@ -367,7 +362,6 @@ priority = 50
 "#;
         let mut m = Manifest::parse(text, Path::new("m"))?;
         assert_eq!(m.version, FORMAT);
-        assert_eq!(m.host.backend, Some(Backend::Prefix));
         m.add_host(&["libxkbcommon-devel".into(), "wayland-devel".into()]);
         assert_eq!(m.host.packages, ["wayland-devel", "libxkbcommon-devel"]);
         assert_eq!(

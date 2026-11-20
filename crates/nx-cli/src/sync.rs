@@ -220,7 +220,7 @@ fn build(
             ));
             return Ok(());
         }
-        crate::live::activate(ui, &state, number, manifest.host.backend)?;
+        crate::live::activate(ui, &state, number)?;
     }
     ui.done(format_args!(
         "generation {number} for the {role} image{}",

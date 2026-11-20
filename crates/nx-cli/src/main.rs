@@ -27,7 +27,6 @@ mod rollback;
 mod route;
 mod search;
 mod session;
-mod shell;
 mod status;
 mod sync;
 mod tool;
@@ -133,11 +132,6 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// a shell (or command) with the host tier on its paths
-    Shell {
-        #[arg(value_name = "command", trailing_var_arg = true)]
-        command: Vec<String>,
-    },
     /// who provides a package, command or file, and why
     Why {
         #[arg(value_name = "name|path")]
@@ -190,11 +184,7 @@ enum Command {
     },
     /// at boot: make the generation built for the booted image current
     #[command(hide = true)]
-    Select {
-        /// after the boot-time merge: use the prefix backend if it didn't happen
-        #[arg(long)]
-        after_merge: bool,
-    },
+    Select,
     /// in the session: notify about what nx's background jobs couldn't do
     #[command(hide = true)]
     Notify,
@@ -341,7 +331,6 @@ fn main() -> ExitCode {
             metadata,
         } => machine()
             .and_then(|m| apply::run(&mut ui, &m, file.as_deref(), dry_run, metadata.refresh())),
-        Command::Shell { command } => shell::run(&mut ui, &command),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
         Command::Repo { action } => match action {
             RepoAction::Add {
@@ -381,8 +370,7 @@ fn main() -> ExitCode {
             machine().and_then(|m| sync::run(&mut ui, &m, metadata.refresh()))
         }
         Command::Gc { dry_run } => machine().and_then(|m| gc::run(&mut ui, &m, dry_run)),
-        Command::Select { after_merge: false } => boot::run(&mut ui),
-        Command::Select { after_merge: true } => boot::settle(&mut ui),
+        Command::Select => boot::run(&mut ui),
         Command::Notify => notify::seen_file().and_then(|seen| {
             notify::run(&mut ui, &host::state(), &RpmOstree, &notify::Busctl, &seen)
         }),

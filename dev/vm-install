@@ -27,7 +27,7 @@ install -m644 nx.sh /etc/profile.d/nx.sh
 # The units name /usr/bin; the VM keeps the binaries in /usr/local/bin.
 sed "s|/usr/bin/nxd|/usr/local/bin/nxd|" nxd@.service > /etc/systemd/system/nxd@.service
 install -m644 nxd.socket /etc/systemd/system/
-for unit in nx-select.service nx-settle.service nx-sync.service nx-refresh.service nx-upgrade.service; do
+for unit in nx-select.service nx-sync.service nx-refresh.service nx-upgrade.service; do
 	sed "s|/usr/bin/nx|/usr/local/bin/nx|" "$unit" > "/etc/systemd/system/$unit"
 done
 install -m644 nx-refresh.timer nx-upgrade.timer /etc/systemd/system/
@@ -56,8 +56,11 @@ fi
 install -m644 nx.fish $fish/
 systemd-sysusers /etc/sysusers.d/nx.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/nx.conf
+# nx 1.0 had nx-settle.service, the prefix backend boot check.
+systemctl disable nx-settle.service 2>/dev/null || true
+rm -f /etc/systemd/system/nx-settle.service
 systemctl daemon-reload
 systemctl enable --now nxd.socket
-systemctl enable nx-select.service nx-settle.service nx-sync.service nx-refresh.timer nx-upgrade.timer
+systemctl enable nx-select.service nx-sync.service nx-refresh.timer nx-upgrade.timer
 systemctl --global enable nx-notify.path nx-notify.service
 systemctl restart polkit'

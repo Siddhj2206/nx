@@ -30,7 +30,7 @@ as tester2 "nx rollback"
 # An ordinary user reads, and is told why they can't change anything.
 as tester3 "nx list" >/dev/null || fail "tester3: nx list"
 as tester3 "nx generations" >/dev/null || fail "tester3: nx generations"
-as tester3 "nx shell -- true" || fail "tester3: nx shell"
+as tester3 "nx status" >/dev/null || fail "tester3: nx status"
 out=$(as tester3 "nx add libxkbcommon-devel" 2>&1) && fail "tester3: add worked"
 [[ $out == *"needs an administrator"* ]] || fail "tester3: unhelpful error: $out"
 out=$(as tester3 "nx rollback" 2>&1) && fail "tester3: rollback worked"

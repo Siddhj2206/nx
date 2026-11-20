@@ -132,19 +132,17 @@ impl Runner for Fake {
 }
 
 #[test]
-fn the_first_activation_labels_links_merges_and_records_sysext() -> Result<()> {
+fn the_first_activation_labels_links_and_merges() -> Result<()> {
     let tmp = Tmp::new("sysext");
     let l = layout(&tmp, true).map_err(|e| Error::Io {
         path: tmp.0.clone(),
         source: e,
     })?;
     let fake = Fake::new();
-    let got = activate(&l, &fake, 2, None, &only_uid())?;
+    let got = activate(&l, &fake, 2, &only_uid())?;
     assert_eq!(
         got,
         Activated {
-            backend: Backend::Sysext,
-            fallback: None,
             services: Services::default()
         }
     );
@@ -157,7 +155,6 @@ fn the_first_activation_labels_links_merges_and_records_sysext() -> Result<()> {
         ]
     );
     assert_eq!(l.state.current_number()?, Some(2));
-    assert_eq!(l.state.backend()?, Some(Backend::Sysext));
     let copy = std::fs::read_link(l.link()).map_err(|source| Error::Io {
         path: l.link(),
         source,
@@ -183,7 +180,7 @@ fn the_merged_tree_is_a_copy_of_roots_own() -> Result<()> {
     std::fs::set_permissions(usr.join("bin/tool"), std::fs::Permissions::from_mode(0o775))
         .map_err(io)?;
     std::os::unix::fs::symlink("tool", usr.join("bin/alias")).map_err(io)?;
-    activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    activate(&l, &Fake::new(), 1, &only_uid())?;
     let copy = std::fs::read_link(l.link()).map_err(io)?;
     std::fs::write(usr.join("bin/tool"), "changed").map_err(io)?;
     assert_eq!(
@@ -202,7 +199,7 @@ fn the_merged_tree_is_a_copy_of_roots_own() -> Result<()> {
         Path::new("tool")
     );
     // Moving to generation 2 leaves only its copy.
-    activate(&l, &Fake::new(), 2, None, &only_uid())?;
+    activate(&l, &Fake::new(), 2, &only_uid())?;
     let left: Vec<_> = std::fs::read_dir(&l.merged)
         .map_err(io)?
         .flatten()
@@ -222,11 +219,11 @@ fn a_failed_merge_keeps_the_merged_copy() -> Result<()> {
         source: e,
     };
     let l = layout(&tmp, false).map_err(io)?;
-    activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    activate(&l, &Fake::new(), 1, &only_uid())?;
     let before = std::fs::read_link(l.link()).map_err(io)?;
     let mut fake = Fake::new();
     fake.merged = "[]";
-    assert!(activate(&l, &fake, 2, Some(Backend::Sysext), &only_uid()).is_err());
+    assert!(activate(&l, &fake, 2, &only_uid()).is_err());
     assert_eq!(std::fs::read_link(l.link()).map_err(io)?, before);
     assert_eq!(l.state.current_number()?, Some(1));
     assert_eq!(std::fs::read_dir(&l.merged).map_err(io)?.count(), 1);
@@ -234,7 +231,7 @@ fn a_failed_merge_keeps_the_merged_copy() -> Result<()> {
 }
 
 /// At boot the generation `nx select` made current gets its copy and the
-/// link, unless nothing is linked (prefix) or it has its copy already.
+/// link, unless nothing is linked or it has its copy already.
 #[test]
 fn boot_stages_the_selected_generation() -> Result<()> {
     let tmp = Tmp::new("stage");
@@ -247,7 +244,7 @@ fn boot_stages_the_selected_generation() -> Result<()> {
     let fake = Fake::new();
     stage_at_boot(&l, &fake, &only_uid())?;
     assert!(fake.calls().is_empty(), "nothing linked: nothing staged");
-    activate(&l, &Fake::new(), 1, None, &only_uid())?;
+    activate(&l, &Fake::new(), 1, &only_uid())?;
     l.state.set_current(2)?;
     let fake = Fake::new();
     stage_at_boot(&l, &fake, &only_uid())?;
@@ -269,36 +266,19 @@ fn boot_stages_the_selected_generation() -> Result<()> {
 }
 
 #[test]
-fn a_failed_merge_falls_back_to_prefix_and_keeps_going() -> Result<()> {
-    let tmp = Tmp::new("fallback");
+fn a_failed_merge_is_an_error_and_puts_the_old_one_back() -> Result<()> {
+    let tmp = Tmp::new("failed");
     let l = layout(&tmp, false).map_err(|e| Error::Io {
         path: tmp.0.clone(),
         source: e,
     })?;
-    activate(&l, &Fake::new(), 1, None, &only_uid())?;
-    let mut fake = Fake::new();
-    fake.fail = vec!["refresh"];
-    // refresh always fails here, so even unmerging generation 1 cannot
-    // succeed: the fallback reports that instead of hiding it.
-    let err = activate(&l, &fake, 2, None, &only_uid()).err();
-    assert!(
-        matches!(
-            err,
-            Some(Error::Command {
-                program: "systemd-sysext",
-                ..
-            })
-        ),
-        "{err:?}"
-    );
-    assert_eq!(
-        l.state.current_number()?,
-        Some(1),
-        "the old generation is back"
-    );
+    activate(&l, &Fake::new(), 1, &only_uid())?;
+    let before = std::fs::read_link(l.link()).map_err(|source| Error::Io {
+        path: l.link(),
+        source,
+    })?;
 
-    // A merge that fails once (the first, new one) and then works: the
-    // link goes, the prefix is recorded, `current` is the new generation.
+    // The new generation's refresh fails; the one putting 1 back works.
     struct FailsOnce(Fake, RefCell<bool>);
     impl Runner for FailsOnce {
         fn run(&self, program: &str, args: &[&OsStr]) -> std::io::Result<Output> {
@@ -320,20 +300,34 @@ fn a_failed_merge_falls_back_to_prefix_and_keeps_going() -> Result<()> {
         }
     }
     let runner = FailsOnce(Fake::new(), RefCell::new(false));
-    let got = activate(&l, &runner, 2, None, &only_uid())?;
-    assert_eq!(got.backend, Backend::Prefix);
-    assert_eq!(
-        got.fallback.as_deref(),
-        Some("maximum fs stacking depth exceeded")
+    let err = activate(&l, &runner, 2, &only_uid()).err();
+    assert!(
+        matches!(
+            &err,
+            Some(Error::Command {
+                program: "systemd-sysext",
+                detail,
+            }) if detail == "maximum fs stacking depth exceeded"
+        ),
+        "{err:?}"
     );
-    assert_eq!(l.state.current_number()?, Some(2));
-    assert_eq!(l.state.backend()?, Some(Backend::Prefix));
-    assert!(std::fs::symlink_metadata(l.link()).is_err(), "link removed");
+    assert_eq!(l.state.current_number()?, Some(1), "the old one is back");
+    assert_eq!(
+        std::fs::read_link(l.link()).map_err(|source| Error::Io {
+            path: l.link(),
+            source,
+        })?,
+        before
+    );
+    assert_eq!(
+        runner.0.calls(),
+        ["systemd-sysext refresh", "systemd-sysext refresh"]
+    );
     Ok(())
 }
 
 #[test]
-fn a_forced_sysext_does_not_fall_back() -> Result<()> {
+fn a_refresh_that_merges_nothing_is_an_error() -> Result<()> {
     let tmp = Tmp::new("forced");
     let l = layout(&tmp, false).map_err(|e| Error::Io {
         path: tmp.0.clone(),
@@ -341,41 +335,14 @@ fn a_forced_sysext_does_not_fall_back() -> Result<()> {
     })?;
     let mut fake = Fake::new();
     fake.merged = "[]";
-    let err = activate(&l, &fake, 1, Some(Backend::Sysext), &only_uid()).err();
+    let err = activate(&l, &fake, 1, &only_uid()).err();
     assert!(
         matches!(&err, Some(Error::Command { detail, .. }) if detail.contains("not merged over /usr")),
         "{err:?}"
     );
-    assert_eq!(l.state.backend()?, None);
     // Nothing was live before, so nothing is now: no current, no link.
     assert_eq!(l.state.current_number()?, None);
     assert!(std::fs::symlink_metadata(l.link()).is_err());
-    Ok(())
-}
-
-#[test]
-fn prefix_unmerges_only_what_was_linked() -> Result<()> {
-    let tmp = Tmp::new("prefix");
-    let l = layout(&tmp, false).map_err(|e| Error::Io {
-        path: tmp.0.clone(),
-        source: e,
-    })?;
-    let fake = Fake::new();
-    activate(&l, &fake, 1, Some(Backend::Prefix), &only_uid())?;
-    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
-    assert_eq!(l.state.backend()?, Some(Backend::Prefix));
-
-    // Switching from sysext to prefix removes the link and refreshes.
-    activate(&l, &fake, 1, Some(Backend::Sysext), &only_uid())?;
-    let fake = Fake::new();
-    activate(&l, &fake, 2, Some(Backend::Prefix), &only_uid())?;
-    assert_eq!(fake.calls(), ["systemd-sysext refresh"]);
-    assert!(std::fs::symlink_metadata(l.link()).is_err());
-    // Unforced, the next activation tries sysext again.
-    let fake = Fake::new();
-    let got = activate(&l, &fake, 1, None, &only_uid())?;
-    assert_eq!(got.backend, Backend::Sysext);
-    assert_eq!(l.state.backend()?, Some(Backend::Sysext));
     Ok(())
 }
 
@@ -388,7 +355,7 @@ fn a_label_failure_stops_before_anything_changes() -> Result<()> {
     })?;
     let mut fake = Fake::new();
     fake.fail = vec!["setfiles"];
-    assert!(activate(&l, &fake, 1, None, &only_uid()).is_err());
+    assert!(activate(&l, &fake, 1, &only_uid()).is_err());
     assert_eq!(l.state.current_number()?, None);
     assert!(std::fs::symlink_metadata(l.link()).is_err());
     assert_eq!(fake.calls(), ["setfiles"]);
@@ -406,7 +373,7 @@ fn it_never_replaces_a_real_directory_named_nx() -> Result<()> {
         path: l.link(),
         source,
     })?;
-    let err = activate(&l, &Fake::new(), 1, Some(Backend::Sysext), &only_uid()).err();
+    let err = activate(&l, &Fake::new(), 1, &only_uid()).err();
     assert!(matches!(err, Some(Error::Io { .. })), "{err:?}");
     Ok(())
 }
@@ -571,7 +538,7 @@ fn the_image_is_checked_again_at_activation() -> Result<()> {
     std::fs::write(image.join("usr/bin/tool"), "image").map_err(io)?;
     assert!(refused(&l, &only_uid()).contains("the image already has /usr/bin/tool"));
     let fake = Fake::new();
-    assert!(activate(&l, &fake, 1, None, &only_uid()).is_err());
+    assert!(activate(&l, &fake, 1, &only_uid()).is_err());
     assert!(fake.calls().is_empty(), "nothing ran");
     l.image = Image::Unreadable("rpm-ostree is broken".into());
     assert!(refused(&l, &only_uid()).contains("can't read the booted image"));
@@ -668,7 +635,7 @@ fn a_package_that_appears_gets_users_and_presets_after_the_merge() -> Result<()>
         "systemctl is-active svc.service" => Some(said("active\n")),
         _ => None,
     });
-    let got = activate(&l, &run, 2, None, &only_uid())?;
+    let got = activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     let refresh = index(&calls, "systemd-sysext refresh");
     let users = index(&calls, "systemd-sysusers /usr/lib/sysusers.d/svc.conf");
@@ -700,7 +667,7 @@ fn a_unit_without_an_install_section_is_not_preset() -> Result<()> {
         .join("generations/2/sysext/usr/lib/systemd/system/svc.service");
     std::fs::write(&unit, "[Service]\nExecStart=/usr/bin/tool\n").map_err(io)?;
     let run = Scripted::new(|_| None);
-    let got = activate(&l, &run, 2, None, &only_uid())?;
+    let got = activate(&l, &run, 2, &only_uid())?;
     assert!(
         index(&run.calls(), "systemctl preset").is_none(),
         "{:?}",
@@ -720,9 +687,9 @@ fn a_package_that_goes_is_stopped_before_its_files_do() -> Result<()> {
     let l = layout(&tmp, false).map_err(io)?;
     with_service(&l, 1, "svc", "svc-1-1.fc45.x86_64", "svc.service").map_err(io)?;
     let run = Scripted::new(|_| None);
-    activate(&l, &run, 1, None, &only_uid())?;
+    activate(&l, &run, 1, &only_uid())?;
     let run = Scripted::new(|_| None);
-    let got = activate(&l, &run, 2, None, &only_uid())?;
+    let got = activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     let stop = index(&calls, "systemctl stop --no-block svc.service");
     let disable = index(
@@ -746,9 +713,9 @@ fn a_new_version_is_restarted_not_enabled_again() -> Result<()> {
     let l = layout(&tmp, false).map_err(io)?;
     with_service(&l, 1, "svc", "svc-1-1.fc45.x86_64", "svc.service").map_err(io)?;
     with_service(&l, 2, "svc", "svc-2-1.fc45.x86_64", "svc.service").map_err(io)?;
-    activate(&l, &Scripted::new(|_| None), 1, None, &only_uid())?;
+    activate(&l, &Scripted::new(|_| None), 1, &only_uid())?;
     let run = Scripted::new(|_| None);
-    activate(&l, &run, 2, None, &only_uid())?;
+    activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     assert!(
         index(&calls, "systemctl try-restart svc.service").is_some(),
@@ -779,7 +746,7 @@ fn only_units_the_extension_ships_are_acted_on() -> Result<()> {
     )
     .map_err(io)?;
     let run = Scripted::new(|_| None);
-    let got = activate(&l, &run, 2, None, &only_uid())?;
+    let got = activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     assert!(index(&calls, "systemctl preset").is_none(), "{calls:?}");
     assert!(
@@ -797,30 +764,6 @@ fn only_units_the_extension_ships_are_acted_on() -> Result<()> {
             .any(|w| w.contains("not a unit name")),
         "{:?}",
         got.services.warnings
-    );
-    Ok(())
-}
-
-#[test]
-fn the_prefix_backend_sets_nothing_up_and_says_so() -> Result<()> {
-    let tmp = Tmp::new("prefix-units");
-    let io = |e| Error::Io {
-        path: tmp.0.clone(),
-        source: e,
-    };
-    let l = layout(&tmp, false).map_err(io)?;
-    with_service(&l, 2, "svc", "svc-1-1.fc45.x86_64", "svc.service").map_err(io)?;
-    let run = Scripted::new(|_| None);
-    let got = activate(&l, &run, 2, Some(Backend::Prefix), &only_uid())?;
-    assert!(
-        index(&run.calls(), "systemctl").is_none(),
-        "{:?}",
-        run.calls()
-    );
-    assert!(
-        got.services.warnings[0].contains("prefix backend"),
-        "{:?}",
-        got.services
     );
     Ok(())
 }
@@ -876,9 +819,9 @@ fn removing_a_template_disables_its_enabled_instances() -> Result<()> {
         wants.join("other.service"),
     )
     .map_err(io)?;
-    activate(&l, &Scripted::new(|_| None), 1, None, &only_uid())?;
+    activate(&l, &Scripted::new(|_| None), 1, &only_uid())?;
     let run = Scripted::new(|_| None);
-    activate(&l, &run, 2, None, &only_uid())?;
+    activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     assert!(
         index(&calls, "systemctl stop --no-block svc@*.service").is_some(),
@@ -908,7 +851,7 @@ fn a_template_is_preset_by_its_file_name() -> Result<()> {
     let text = std::fs::read_to_string(&path).map_err(io)?;
     std::fs::write(&path, text.replace("svc@.service", "svc@*.service")).map_err(io)?;
     let run = Scripted::new(|_| None);
-    activate(&l, &run, 2, None, &only_uid())?;
+    activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     // `svc@*.service` would enable an instance named `*`.
     assert!(
@@ -943,7 +886,7 @@ fn an_install_section_in_a_drop_in_counts() -> Result<()> {
     )
     .map_err(io)?;
     let run = Scripted::new(|_| None);
-    activate(&l, &run, 2, None, &only_uid())?;
+    activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     assert!(
         index(&calls, "systemctl preset svc.service").is_some(),
@@ -985,9 +928,9 @@ fn removing_a_user_template_disables_its_enabled_instances() -> Result<()> {
         wants.join("svc@a.service"),
     )
     .map_err(io)?;
-    activate(&l, &Scripted::new(|_| None), 1, None, &only_uid())?;
+    activate(&l, &Scripted::new(|_| None), 1, &only_uid())?;
     let run = Scripted::new(|_| None);
-    activate(&l, &run, 2, None, &only_uid())?;
+    activate(&l, &run, 2, &only_uid())?;
     let calls = run.calls();
     assert!(
         calls
@@ -995,71 +938,5 @@ fn removing_a_user_template_disables_its_enabled_instances() -> Result<()> {
             .any(|c| c == "systemctl --global disable --no-warn svc@a.service"),
         "{calls:?}"
     );
-    Ok(())
-}
-
-#[test]
-fn a_boot_that_did_not_merge_falls_back_to_prefix() -> Result<()> {
-    let tmp = Tmp::new("settle");
-    let l = layout(&tmp, false).map_err(|e| Error::Io {
-        path: tmp.0.clone(),
-        source: e,
-    })?;
-    // No current generation, nothing linked: nothing to settle.
-    assert_eq!(settle_at_boot(&l, &Fake::new())?, Settled::NothingToMerge);
-
-    activate(&l, &Fake::new(), 1, Some(Backend::Sysext), &only_uid())?;
-    assert_eq!(settle_at_boot(&l, &Fake::new())?, Settled::Merged);
-    assert_eq!(l.state.backend()?, Some(Backend::Sysext));
-
-    // The boot's merge failed: nothing of nx is listed.
-    let mut unmerged = Fake::new();
-    unmerged.merged = "[]";
-    let got = settle_at_boot(&l, &unmerged)?;
-    assert!(matches!(got, Settled::FellBack(_)), "{got:?}");
-    assert_eq!(l.state.backend()?, Some(Backend::Prefix));
-    assert!(std::fs::symlink_metadata(l.link()).is_err(), "link removed");
-    assert_eq!(l.state.current_number()?, Some(1), "current is kept");
-
-    // Settled: a second run has nothing linked, and the next activation
-    // tries sysext again.
-    assert_eq!(settle_at_boot(&l, &unmerged)?, Settled::NothingToMerge);
-    let got = activate(&l, &Fake::new(), 1, None, &only_uid())?;
-    assert_eq!(got.backend, Backend::Sysext);
-    Ok(())
-}
-
-#[test]
-fn settling_leaves_placeholders_and_forced_sysext_alone() -> Result<()> {
-    let tmp = Tmp::new("settle-skip");
-    let l = layout(&tmp, false).map_err(|e| Error::Io {
-        path: tmp.0.clone(),
-        source: e,
-    })?;
-    activate(&l, &Fake::new(), 1, Some(Backend::Sysext), &only_uid())?;
-    let mut unmerged = Fake::new();
-    unmerged.merged = "[]";
-
-    let dir = l.state.root().join("generations/1");
-    let mut manifest = Manifest::default();
-    manifest.host.backend = Some(Backend::Sysext);
-    let io = |source| Error::Io {
-        path: dir.clone(),
-        source,
-    };
-    std::fs::write(
-        dir.join("manifest.toml"),
-        manifest.to_toml().unwrap_or_default(),
-    )
-    .map_err(io)?;
-    let got = settle_at_boot(&l, &unmerged)?;
-    assert!(matches!(got, Settled::ForcedAndUnmerged(_)), "{got:?}");
-    assert_eq!(l.state.backend()?, Some(Backend::Sysext));
-    assert!(std::fs::symlink_metadata(l.link()).is_ok(), "link kept");
-
-    let mut lock = Lock::new(None, "45", "x86_64");
-    lock.pending = true;
-    std::fs::write(dir.join("lock.toml"), lock.to_toml().unwrap_or_default()).map_err(io)?;
-    assert_eq!(settle_at_boot(&l, &unmerged)?, Settled::NothingToMerge);
     Ok(())
 }

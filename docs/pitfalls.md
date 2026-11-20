@@ -105,7 +105,7 @@ hard way.
 - nxd accepts files owned by root, `nx`, the caller and wheel members, and
   checks again that the extension doesn't hide the booted image's files.
 - nxd runs as root in a directory wheel can write: it writes `current`
-  and `backend` beside their names (`create_new` or a fresh symlink, never
+  beside its name (`create_new` or a fresh symlink, never
   a plain `write` that follows a planted link), flushes, then renames.
 - The extension link names root's copy, `/var/lib/nx-merged/<N>.<pid>`,
   never a generation: a generation is its builder's, and merging it would
@@ -120,8 +120,7 @@ hard way.
   `extension-release.nx`.
 - `systemd-sysext status --json=short` lists `{"hierarchy","extensions"}`;
   nxd checks `nx` under `/usr` after a refresh, since a refresh can succeed
-  and merge nothing. A forced sysext that doesn't merge is an error; an
-  unforced one falls back to prefix.
+  and merge nothing, which is an error.
 - `setfiles -r` fails with "Not a directory" on a path through the `current`
   symlink; pass `realpath`.
 - `systemctl preset --now` is invalid; preset, check `is-enabled`, then

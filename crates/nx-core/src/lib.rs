@@ -21,7 +21,7 @@ pub use generation::{Activation, ActivationPackage, Built, Generation, Readable,
 pub use lockfile::{Bin, Lock, LockedPackage, LockedRepo, LockedTool, ToolOutput, ToolPackage};
 pub use manifest::{CliTools, Https, Manifest, RepoEntry, ScriptletAllow};
 pub use os_release::OsRelease;
-pub use state::{Backend, State, Store};
+pub use state::{State, Store};
 
 /// The version of the state format (manifest, lockfile, generation layout)
 /// this nx writes. An older nx refuses newer state rather than misread it

@@ -501,7 +501,6 @@ dependencies = [
 name = "nx-proto"
 version = "1.0.1"
 dependencies = [
- "nx-core",
  "serde",
  "serde_json",
  "thiserror",

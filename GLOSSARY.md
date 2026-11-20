@@ -63,14 +63,9 @@ The one systemd-sysext directory nx assembles from a generation's host tier.
 
 **activation**:
 Making a generation live: validate it, point `current` at it, and merge the
-extension over `/usr` (or leave it as a prefix). Only nxd does it.
+extension over `/usr`. Only nxd does it.
 _Avoid_: apply (that is `nx apply`, making the system match the manifest),
 install
-
-**backend**:
-How the host tier reaches the running system: `sysext` (the extension merged
-over `/usr`) or `prefix` (the generation's `usr` as a prefix `nx shell`
-exports). nxd tries sysext and falls back to prefix.
 
 **nxd**:
 The root daemon. Validates a generation the unprivileged `nx` wrote and
