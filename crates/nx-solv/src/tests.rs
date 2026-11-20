@@ -370,6 +370,7 @@ fn reads_the_rpmdb_under_the_root_not_the_running_system() -> Result<()> {
         "--justdb".as_ref(),
         "--nodeps".as_ref(),
         "--nosignature".as_ref(),
+        "--ignorearch".as_ref(),
         fixture.as_os_str(),
     ]));
     let mut pool = Pool::new("x86_64")?;
