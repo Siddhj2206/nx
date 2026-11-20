@@ -200,6 +200,21 @@ fn evr_order() -> Result<()> {
 }
 
 /// A real Fedora package, recorded under `testdata/rpm`.
+/// Puts a recorded rpmdb (`tests/fixtures/rpmdb/<name>`) into `root`, at
+/// both places librpm may look: Fedora's `/usr/lib/sysimage/rpm` and an
+/// ostree system's `/usr/share/rpm`. rpm 6 won't create one unprivileged.
+fn install_rpmdb(root: &std::path::Path, name: &str) -> std::io::Result<()> {
+    let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/rpmdb")
+        .join(name)
+        .join("rpmdb.sqlite");
+    for dir in ["usr/lib/sysimage/rpm", "usr/share/rpm"] {
+        std::fs::create_dir_all(root.join(dir))?;
+        std::fs::copy(&db, root.join(dir).join("rpmdb.sqlite"))?;
+    }
+    Ok(())
+}
+
 fn fixture_rpm() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/rpm/libxkbcommon-devel-1.13.1-4.fc45.x86_64.rpm")
@@ -355,31 +370,17 @@ fn reads_the_rpmdb_under_the_root_not_the_running_system() -> Result<()> {
         path: root.clone(),
         message: e.to_string(),
     })?;
-    let rpm = |args: &[&std::ffi::OsStr]| {
-        std::process::Command::new("rpm")
-            .arg("--root")
-            .arg(&root)
-            .args(args)
-            .status()
-            .is_ok_and(|s| s.success())
-    };
-    let fixture = fixture_rpm();
-    assert!(rpm(&["--initdb".as_ref()]));
-    assert!(rpm(&[
-        "-i".as_ref(),
-        "--justdb".as_ref(),
-        "--nodeps".as_ref(),
-        "--nosignature".as_ref(),
-        "--ignorearch".as_ref(),
-        fixture.as_os_str(),
-    ]));
+    install_rpmdb(&root, "xkbcommon").map_err(|e| Error::Write {
+        path: root.clone(),
+        message: e.to_string(),
+    })?;
     let mut pool = Pool::new("x86_64")?;
     let loaded = pool.load_rpmdb("@image", &root);
     let _ = std::fs::remove_dir_all(&root);
     loaded?;
     pool.prepare();
     assert_eq!(pool.select("libxkbcommon-devel")?.len(), 1);
-    // The running system (the dev container) has rpm; the root doesn't.
+    // The running system has rpm; the root doesn't.
     assert!(pool.select("rpm")?.is_empty());
     Ok(())
 }

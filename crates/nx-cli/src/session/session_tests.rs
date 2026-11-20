@@ -18,6 +18,21 @@ use crate::ui::{SharedBuf, Ui};
 const RPM: &str = "libxkbcommon-devel-1.13.1-4.fc45.x86_64.rpm";
 const REPO: &str = "https://repo.test/";
 
+/// Puts a recorded rpmdb (`tests/fixtures/rpmdb/<name>`) into `root`, at
+/// both places librpm may look: Fedora's `/usr/lib/sysimage/rpm` and an
+/// ostree system's `/usr/share/rpm`. rpm 6 won't create one unprivileged.
+fn install_rpmdb(root: &Path, name: &str) -> std::io::Result<()> {
+    let db = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/rpmdb")
+        .join(name)
+        .join("rpmdb.sqlite");
+    for dir in ["usr/lib/sysimage/rpm", "usr/share/rpm"] {
+        std::fs::create_dir_all(root.join(dir))?;
+        std::fs::copy(&db, root.join(dir).join("rpmdb.sqlite"))?;
+    }
+    Ok(())
+}
+
 fn testdata(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/rpm")
@@ -116,12 +131,7 @@ impl Fixture {
         )?;
         // An empty rpmdb: the image has nothing. Without one, loading the
         // installed set fails (before 1.0.1 it read the running system's).
-        let initdb = std::process::Command::new("rpm")
-            .arg("--root")
-            .arg(&root)
-            .arg("--initdb")
-            .status()?;
-        anyhow::ensure!(initdb.success(), "rpm --initdb failed");
+        install_rpmdb(&root, "empty")?;
         let rpm = std::fs::read(testdata(RPM))?;
         let sha = nx_rpm::fetch::sha256_hex(&rpm);
         let primary = format!(

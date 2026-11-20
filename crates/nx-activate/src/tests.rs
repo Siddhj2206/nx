@@ -23,10 +23,11 @@ impl Drop for Tmp {
     }
 }
 
-/// The uid that owns what tests create.
+/// The uid that owns what tests create: this process's (`/proc/self` is
+/// owned by it), not the temp directory's, which is root's `/tmp`.
 fn uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(std::env::temp_dir()).map_or(0, |m| m.uid())
+    std::fs::metadata("/proc/self").map_or(0, |m| m.uid())
 }
 
 /// Trusts root's files and the test's own.
@@ -428,10 +429,12 @@ fn validation_refuses_what_root_must_not_merge() -> Result<()> {
     let tool = l.state.root().join("generations/1/sysext/usr/bin/tool");
     validate(&l, 1, &only_uid())?;
 
-    // Someone else's files (root's are always fine, so a root test run
-    // can't show this).
+    // Someone else's generation (root's is always fine, so a root test run
+    // can't show this). Its directories are checked before its files.
     if uid() != 0 {
-        assert!(refused(&l, &|u| u == uid() + 1).contains("owned by uid"));
+        assert!(
+            refused(&l, &|u| u == uid() + 1).contains("must be a directory of root, nx or you")
+        );
     }
     // setuid, world-writable.
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o4755)).map_err(io)?;
