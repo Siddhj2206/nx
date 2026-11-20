@@ -12,8 +12,8 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-nx-activate = { version = "1.0.0", path = "../nx-activate" }
-nx-core = { version = "1.0.0", path = "../nx-core" }
-nx-proto = { version = "1.0.0", path = "../nx-proto" }
+nx-activate = { version = "1.0.1", path = "../nx-activate" }
+nx-core = { version = "1.0.1", path = "../nx-core" }
+nx-proto = { version = "1.0.1", path = "../nx-proto" }
 rustix = { version = "1", features = ["fs", "net"] }
 thiserror = "2.0.21"

@@ -14,5 +14,5 @@ workspace = true
 [dependencies]
 libc = "0.2.191"
 sha2 = "0.11.1"
-nx-scriptlet = { version = "1.0.0", path = "../nx-scriptlet" }
+nx-scriptlet = { version = "1.0.1", path = "../nx-scriptlet" }
 thiserror = "2"
