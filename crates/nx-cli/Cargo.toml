@@ -26,3 +26,4 @@ nx-proto = { version = "1.0.1", path = "../nx-proto" }
 nx-rpm = { version = "1.0.1", path = "../nx-rpm" }
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 clap_mangen = "0.3.3"
+jiff = "1.0.1"

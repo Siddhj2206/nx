@@ -320,7 +320,7 @@ fn main() -> ExitCode {
             machine().and_then(|m| remove::run(&mut ui, &m, &packages, dry_run, metadata.refresh()))
         }
         Command::List => list::run(&mut ui),
-        Command::Generations => generations::run(&mut ui),
+        Command::Generations => generations::run(&mut ui, &RpmOstree, &host::state()),
         Command::Rollback {
             generation,
             dry_run,
