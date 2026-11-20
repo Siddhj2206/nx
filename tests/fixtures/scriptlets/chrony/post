@@ -1,0 +1,16 @@
+# migrate from chrony-helper to sourcedir directive
+if test -a /usr/libexec/chrony-helper; then
+        grep -qi 'sourcedir /run/chrony-dhcp$' /etc/chrony.conf 2> /dev/null || \
+                echo -e '\n# Use NTP servers from DHCP.\nsourcedir /run/chrony-dhcp' >> \
+                        /etc/chrony.conf
+        mkdir -p /run/chrony-dhcp
+        for f in /var/lib/dhclient/chrony.servers.*; do
+                sed 's|.*|server &|' < $f > /run/chrony-dhcp/"${f##*servers.}.sources"
+        done 2> /dev/null
+fi
+
+ 
+if [ $1 -eq 1 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then 
+    # Initial installation 
+    /usr/lib/systemd/systemd-update-helper install-system-units chronyd.service chronyd-restricted.service chrony-wait.service || : 
+fi

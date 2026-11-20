@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the repo metadata nx resolves against
+Documentation=https://github.com/Siddhj2206/nx
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/var/lib/nx/generations
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nx sync --refresh
+UMask=0002
+Nice=10

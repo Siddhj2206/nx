@@ -1,0 +1,9 @@
+# The implied (systemctl preset) will fail and complain, but the macro hides
+# and ignores the fact.  This is in fact what we want, polkit.service does not
+# have an [Install] section and it is always started on demand.
+
+ 
+if [ $1 -eq 1 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then 
+    # Initial installation 
+    /usr/lib/systemd/systemd-update-helper install-system-units polkit.service || : 
+fi

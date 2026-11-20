@@ -1,0 +1,5 @@
+# The nx system user: owns /var/lib/nx. (nx's background services run as
+# root in 1.0; docs/design.md, *The nx user*.) Interactive wheel users write state
+# through the ACL in nx.tmpfiles. Installed as /usr/lib/sysusers.d/nx.conf.
+#Type Name ID GECOS                Home         Shell
+u!     nx   -  "nx package manager" /var/lib/nx  /usr/sbin/nologin

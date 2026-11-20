@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh nx's repo metadata daily
+Documentation=https://github.com/Siddhj2206/nx
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

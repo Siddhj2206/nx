@@ -1,0 +1,16 @@
+/usr/lib/systemd/system/podman-auto-update.service
+/usr/lib/systemd/system/podman-auto-update.timer
+/usr/lib/systemd/system/podman-clean-transient.service
+/usr/lib/systemd/system/podman-kube@.service
+/usr/lib/systemd/system/podman-restart.service
+/usr/lib/systemd/system/podman.service
+/usr/lib/systemd/system/podman.socket
+/usr/lib/systemd/user/podman-auto-update.service
+/usr/lib/systemd/user/podman-auto-update.timer
+/usr/lib/systemd/user/podman-clean-transient.service
+/usr/lib/systemd/user/podman-kube@.service
+/usr/lib/systemd/user/podman-restart.service
+/usr/lib/systemd/user/podman-user-wait-network-online.service
+/usr/lib/systemd/user/podman.service
+/usr/lib/systemd/user/podman.socket
+/usr/lib/tmpfiles.d/podman.conf

@@ -1,0 +1,14 @@
+[Unit]
+Description=nx daemon socket
+Documentation=https://github.com/Siddhj2206/nx
+
+[Socket]
+ListenStream=/run/nxd.sock
+# One nxd per connection (nxd@.service, the connection on stdin): a request is
+# handled in a fresh process that exits when it is answered. Anyone may
+# connect; polkit decides who may do what.
+Accept=yes
+SocketMode=0666
+
+[Install]
+WantedBy=sockets.target

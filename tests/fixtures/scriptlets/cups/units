@@ -1,0 +1,6 @@
+/usr/lib/systemd/system/cups.path
+/usr/lib/systemd/system/cups.service
+/usr/lib/systemd/system/cups.socket
+/usr/lib/systemd/system/system-cups.slice
+/usr/lib/tmpfiles.d/cups-lp.conf
+/usr/lib/tmpfiles.d/cups.conf

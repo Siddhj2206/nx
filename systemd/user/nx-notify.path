@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch nx's state for what its background jobs couldn't do
+Documentation=https://github.com/Siddhj2206/nx
+# Not for system accounts such as a greeter, whose session also runs user units.
+ConditionUser=!@system
+
+[Path]
+# The records nx notify reads, and the generations (a left-out package is
+# in a generation's lock.toml). Not /var/lib/nx itself: every command that
+# changes anything writes its lock file there.
+PathChanged=/var/lib/nx/sync-failures.json
+PathChanged=/var/lib/nx/upgrade-failure.json
+PathChanged=/var/lib/nx/generations
+Unit=nx-notify.service
+
+[Install]
+WantedBy=default.target

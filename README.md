@@ -1,46 +1,59 @@
 # nx
 
-Homebrew-style packages from nixpkgs, for your user, without root.
+Packages for a Fedora bootc system, live, without rebuilding the image or
+rebooting.
+
+nx 1.0 is a Rust rebuild of nx 0.x (tag `v0.2.0`, a front end to a Nix
+profile); `nx migrate` moves a 0.x profile into it. See
+[docs/adr/0006](docs/adr/0006-rust-rebuild-two-tiers.md).
+
+nx sorts every package by whose libraries it loads:
+
+- **Host tier:** Fedora RPMs for the exact booted image (`-devel` packages,
+  libraries, compilers, services), overlaid onto `/usr` with systemd-sysext,
+  so `pkg-config` and `cargo build` see them at once. Re-resolved
+  automatically for every new image.
+- **Tool tier:** standalone CLI tools from one pinned nixpkgs release, each
+  with its own sealed libraries, exposed through small shims that never leak
+  Nix's environment into host programs.
 
 ```
-$ nx add gnuplot
-  › Installing gnuplot 6.0.5
-  › Fetching 12 packages · 7.8 MiB download, 24.7 MiB unpacked
-    ↓ libcerf                3.9            154 KiB
-    ↓ libaom                 3.15.2         3.2 MiB
-    ↓ gnuplot                6.0.5          1.3 MiB
-    …
-
-  + gnuplot  6.0.5
-
-  ✓ 1 added · 28 unchanged · 7.8 MiB in 6.9s
+nx add <pkg>…        live, in seconds: tools from nixpkgs, the rest as Fedora RPMs
+nx remove <pkg>…     and what only they needed
+nx upgrade           newer host builds and the current nixpkgs release
+nx apply [file]      make the machine match a manifest
+nx list | why | search | info | status | doctor
+nx rollback [N]      an earlier generation, live again
+nx repo | cache      third-party RPM repos, extra Nix caches
+nx migrate           nx 0.x's Nix profile into nx
 ```
 
-Every package comes from one pinned nixpkgs release, and `nx upgrade` moves
-them all forward together. Search, info, list and outdated read a local
-catalog and your profile directly, so they return in milliseconds.
+Every change builds a generation for every deployed image (booted, staged,
+rollback); at boot `nx select` merges the one built for the image that
+booted. Timers refresh metadata daily (and collect garbage) and move the
+nixpkgs pin weekly; failures reach the desktop as notifications.
 
-| | |
-|---|---|
-| `nx add <name>...` | install (`--unfree` for unfree packages) |
-| `nx remove <name>...` | remove |
-| `nx list` | what's installed |
-| `nx search <term>...` | find packages |
-| `nx info <name>` | details, size, dependencies |
-| `nx try <name> [-- cmd]` | run without installing |
-| `nx upgrade` | newest nixpkgs, everything upgraded |
-| `nx outdated` | what upgrade would change |
-| `nx history` / `nx rollback` | past versions of your package set |
-| `nx clean` | drop old history, free disk space |
+## Installing
 
-Needs Nix with flakes and `nix-command` enabled. Homebrew spellings such as
-`node@22` and `python@3.13` work.
+nx links the image's libsolv and librpm, so a release is one tarball per
+Fedora release and architecture, the tree an image unpacks at `/`:
+`nx-v<version>-fc<release>-<arch>.tar.gz`, with `SHA256SUMS`. In a
+Containerfile, unpack it, check it, and enable its units (the preset does,
+or list them: `nxd.socket`, `nx-select`, `nx-settle`, `nx-sync`,
+`nx-refresh.timer`, `nx-upgrade.timer`, and the user units
+`nx-notify.path` and `.service`). The tool tier needs the image's Nix and
+its daemon. Neptuno does all of this.
+
+The design, milestones and open questions are in
+[docs/design.md](docs/design.md).
 
 ## Building
 
-```
-make build      # ./dist/nx
-make test vet
-```
+nx links the image's libsolv, so it builds in a Fedora container of the
+image's release (`dev/Containerfile`); `dev/run` runs a command in it with
+this checkout mounted:
 
-See [docs/product.md](docs/product.md) for the design.
+```
+dev/run cargo build --release   # in the container's /target/release/nx
+dev/run cargo test
+```

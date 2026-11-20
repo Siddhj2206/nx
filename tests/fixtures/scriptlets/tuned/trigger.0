@@ -1,0 +1,3 @@
+# remove ktune from old tuned, now part of tuned
+/usr/sbin/service ktune stop &>/dev/null || :
+/usr/sbin/chkconfig --del ktune &>/dev/null || :

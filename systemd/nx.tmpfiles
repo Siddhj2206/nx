@@ -1,0 +1,24 @@
+# nx's state directory. setgid keeps new files in group nx; the default ACL
+# lets wheel users (who may activate generations without a password, see the
+# polkit rule) write state too. nxd, not tmpfiles, creates
+# /var/lib/extensions/nx: the link must be absent while the prefix backend is
+# in use. Installed as /usr/lib/tmpfiles.d/nx.conf.
+#Type Path                     Mode  User Group Age Argument
+d      /var/lib/nx             2775  nx   nx    -
+d      /var/lib/nx/generations 2775  nx   nx    -
+d      /var/lib/nx/store       2775  nx   nx    -
+d      /var/lib/nx/keys        2775  nx   nx    -
+d      /var/lib/nx/cache       2775  nx   nx    -
+f      /var/lib/nx/lock        0664  nx   nx    -
+# Not recursive: it runs every boot, and the store is large. New files and
+# directories inherit the default entries.
+a+     /var/lib/nx             -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+a+     /var/lib/nx/generations -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+a+     /var/lib/nx/store       -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+a+     /var/lib/nx/lock        -     -    -     -   group:wheel:rw
+a+     /var/lib/nx/keys        -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+a+     /var/lib/nx/cache       -     -    -     -   group:wheel:rwx,default:group:wheel:rwx,default:group:nx:rwx
+# Root's copy of the merged extension (nxd makes it from the generation it
+# activates, /var/lib/extensions/nx links to it): outside /var/lib/nx, so
+# no one but root can write what appears in /usr.
+d      /var/lib/nx-merged      0755  root root  -

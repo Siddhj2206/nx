@@ -1,0 +1,31 @@
+{
+  "deployments": [
+    {
+      "id": "default-94bcce1bbd8890c12858957c436bc31afc1edcfbbf8ad003061cd09f475df045.0",
+      "osname": "default",
+      "checksum": "94bcce1bbd8890c12858957c436bc31afc1edcfbbf8ad003061cd09f475df045",
+      "booted": true,
+      "staged": false,
+      "pinned": false,
+      "container-image-reference": "ostree-unverified-registry:ghcr.io/siddhj2206/neptuno:latest",
+      "container-image-reference-digest": "sha256:92409d3fcf8435bc77e7339def63550887b5cdfde2302af8a0589c0305e7d2b8",
+      "version": "45.20261118",
+      "timestamp": 1794993478,
+      "serial": 0
+    },
+    {
+      "id": "default-30e1f7c3f36696120b98a48861728ab6840206364bc44310bfce3ca165e6bb30.0",
+      "osname": "default",
+      "checksum": "30e1f7c3f36696120b98a48861728ab6840206364bc44310bfce3ca165e6bb30",
+      "booted": false,
+      "staged": false,
+      "pinned": false,
+      "container-image-reference": "ostree-unverified-registry:ghcr.io/siddhj2206/neptuno:latest",
+      "container-image-reference-digest": "sha256:292ee1bfc6d447a4c6105961e8fe65c4ae22a7aa50dde1ec932224cdd480b311",
+      "version": "45.20261117",
+      "timestamp": 1794919597,
+      "serial": 0
+    }
+  ],
+  "transaction": null
+}

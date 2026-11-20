@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Builds a release tarball: the tree an image unpacks at / (design, M7
+# Packaging), for this machine's Fedora release and architecture, and its
+# line in SHA256SUMS. Run it where nx builds: dev/run dev/dist v1.0.0, or
+# the release workflow's fedora container.
+#   dev/dist <version> [out-dir]
+set -euo pipefail
+version=${1:?usage: dev/dist <version> [out-dir]}
+repo=$(cd "$(dirname "$0")/.." && pwd)
+out=$(realpath -m "${2:-$repo/dist}")
+# shellcheck source=/dev/null
+. /etc/os-release
+arch=$(uname -m)
+name="nx-${version}-fc${VERSION_ID}-${arch}"
+target=${CARGO_TARGET_DIR:-$repo/target}
+
+cd "$repo"
+cargo build --release --locked
+tree=$(mktemp -d)
+trap 'rm -rf "$tree"' EXIT
+bin="$target/release"
+[ "$("$bin/nx" --version)" = "nx ${version#v}" ] ||
+	{ echo "nx --version is not ${version#v}: bump the workspace version" >&2; exit 1; }
+
+install -Dm755 -t "$tree/usr/bin" "$bin/nx" "$bin/nxd"
+install -Dm755 "$bin/nx-shim" "$tree/usr/libexec/nx/nx-shim"
+install -Dm644 -t "$tree/usr/lib/systemd/system" systemd/*.service systemd/*.socket systemd/*.timer
+install -Dm644 systemd/90-nx.preset "$tree/usr/lib/systemd/system-preset/90-nx.preset"
+install -Dm644 -t "$tree/usr/lib/systemd/user" systemd/user/nx-notify.*
+install -Dm644 systemd/user/90-nx.preset "$tree/usr/lib/systemd/user-preset/90-nx.preset"
+install -Dm644 systemd/nx.sysusers "$tree/usr/lib/sysusers.d/nx.conf"
+install -Dm644 systemd/nx.tmpfiles "$tree/usr/lib/tmpfiles.d/nx.conf"
+install -Dm644 polkit/org.nx.policy "$tree/usr/share/polkit-1/actions/org.nx.policy"
+install -Dm644 polkit/50-nx.rules "$tree/usr/share/polkit-1/rules.d/50-nx.rules"
+install -Dm644 shell/nx.sh "$tree/etc/profile.d/nx.sh"
+install -Dm644 shell/nx.fish "$tree/usr/share/fish/vendor_conf.d/nx.fish"
+install -Dm644 shell/60-nx.conf "$tree/usr/lib/environment.d/60-nx.conf"
+# The shell asks nx itself; these only register it.
+mkdir -p "$tree/usr/share/bash-completion/completions" "$tree/usr/share/fish/vendor_completions.d" \
+	"$tree/usr/share/zsh/site-functions"
+COMPLETE=bash "$bin/nx" >"$tree/usr/share/bash-completion/completions/nx"
+COMPLETE=fish "$bin/nx" >"$tree/usr/share/fish/vendor_completions.d/nx.fish"
+COMPLETE=zsh "$bin/nx" >"$tree/usr/share/zsh/site-functions/_nx"
+"$bin/nx" manpages "$tree/usr/share/man/man1"
+gzip -9n "$tree"/usr/share/man/man1/*.1
+install -Dm644 LICENSE "$tree/usr/share/licenses/nx/LICENSE"
+
+mkdir -p "$out"
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' -C "$tree" -czf "$out/$name.tar.gz" etc usr
+cd "$out"
+touch SHA256SUMS
+grep -vF "  $name.tar.gz" SHA256SUMS >SHA256SUMS.new || true
+sha256sum "$name.tar.gz" >>SHA256SUMS.new
+sort -k2 SHA256SUMS.new >SHA256SUMS && rm SHA256SUMS.new
+echo "$out/$name.tar.gz"

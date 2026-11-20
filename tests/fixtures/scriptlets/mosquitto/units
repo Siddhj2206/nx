@@ -1,0 +1,2 @@
+/usr/lib/systemd/system/mosquitto.service
+/usr/lib/sysusers.d/mosquitto.conf

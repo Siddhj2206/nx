@@ -1,0 +1,10 @@
+
+    if [ $1 -lt 1 ]; then 
+        
+    if test -d /run/systemd/system; then 
+        /usr/bin/systemctl --no-reload disable --now libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tls.socket libvirtd-tcp.socket || : 
+    else 
+        /usr/bin/systemctl --no-reload disable libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tls.socket libvirtd-tcp.socket || : 
+    fi 
+    
+    fi

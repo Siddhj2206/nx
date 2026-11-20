@@ -1,0 +1,11 @@
+[Unit]
+Description=Upgrade nx's tool tier weekly
+Documentation=https://github.com/Siddhj2206/nx
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

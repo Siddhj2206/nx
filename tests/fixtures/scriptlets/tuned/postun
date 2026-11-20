@@ -1,0 +1,42 @@
+
+ 
+if [ $1 -ge 1 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then 
+    # Package upgrade, not uninstall 
+    /usr/lib/systemd/systemd-update-helper mark-restart-system-units tuned.service || : 
+fi 
+
+
+# conditional support for grub2, grub2 is not available on all architectures
+# and tuned is noarch package, thus the following hack is needed
+if [ "$1" == 0 ]; then
+  rm -f /etc/grub.d/00_tuned || :
+# unpatch /etc/default/grub
+  if [ -r "/etc/default/grub" ]; then
+    sed -i '/GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }\\$tuned_params"/d' /etc/default/grub
+  fi
+
+# cleanup for Boot loader specification (BLS)
+
+# clear grubenv variables
+  grub2-editenv - unset tuned_params tuned_initrd &>/dev/null || :
+# unpatch BLS entries
+  MACHINE_ID=`cat /etc/machine-id 2>/dev/null`
+  if [ "$MACHINE_ID" ]
+  then
+    for f in /boot/loader/entries/$MACHINE_ID-*.conf
+    do
+      # Skip non-files and rescue entries
+      if [ ! -f "$f" -o "${f: -12}" == "-rescue.conf" ]
+      then
+        continue
+      fi
+      # Skip boom managed entries
+      if [[ "$f" =~ \w*-[0-9a-f]{7,}-.*-.*.conf ]]
+      then
+        continue
+      fi
+      sed -i '/^\s*options\s\+.*\$tuned_params/ s/\s\+\$tuned_params\b//g' "$f" &>/dev/null || :
+      sed -i '/^\s*initrd\s\+.*\$tuned_initrd/ s/\s\+\$tuned_initrd\b//g' "$f" &>/dev/null || :
+    done
+  fi
+fi

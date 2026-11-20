@@ -1,5 +1,7 @@
 # Nix does every store write; nx reads its log
 
+> Still holds in nx 1.0, for the tool tier ([ADR-0006](0006-rust-rebuild-two-tiers.md)). The host tier writes its own RPM store under `/var/lib/nx`.
+
 nx changes the store only by running `nix` (`profile add`, `profile upgrade`,
 `registry pin` and so on) with `--log-format internal-json`, and draws its own
 progress from that stream. It never writes to the store, the profile or the

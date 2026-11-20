@@ -1,0 +1,16 @@
+[Unit]
+Description=Move nx's tool tier to the current nixpkgs release
+Documentation=https://github.com/Siddhj2206/nx
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/var/lib/nx/generations
+Wants=network-online.target
+After=network-online.target nx-sync.service
+
+[Service]
+Type=oneshot
+# --timer records a failure for nx-notify (a user unit) to show.
+ExecStart=/usr/bin/nx upgrade --tool --timer
+UMask=0002
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20

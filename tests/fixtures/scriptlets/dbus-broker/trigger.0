@@ -1,0 +1,8 @@
+if [ $2 -eq 0 ] && [ -x /usr/bin/systemctl ] ; then
+        # The `dbus-daemon` package used to provide the default D-Bus
+        # implementation. We continue to make sure that if you uninstall it, we
+        # re-evaluate whether to enable dbus-broker to replace it. If we didnt,
+        # you might end up without any bus implementation active.
+        systemctl --no-reload          preset dbus-broker.service || :
+        systemctl --no-reload --global preset dbus-broker.service || :
+fi

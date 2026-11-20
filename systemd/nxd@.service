@@ -1,0 +1,16 @@
+[Unit]
+Description=nx daemon (connection %i)
+Documentation=https://github.com/Siddhj2206/nx
+
+[Service]
+ExecStart=/usr/bin/nxd
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+# No ProtectSystem=, PrivateTmp=, ProtectHome= or other mount-namespace
+# options: nxd merges the extension over /usr, and in its own mount namespace
+# the merge would be invisible to everything else.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX

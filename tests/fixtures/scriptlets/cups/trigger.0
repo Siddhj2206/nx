@@ -1,0 +1,1 @@
+ln -sf /usr/libexec/samba/cups_backend_smb /usr/lib/cups/backend/smb || :

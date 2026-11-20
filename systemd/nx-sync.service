@@ -1,0 +1,21 @@
+[Unit]
+Description=Give every deployed image an nx host tier that matches the manifest
+Documentation=https://github.com/Siddhj2206/nx
+ConditionPathExists=/run/ostree-booted
+ConditionPathExists=/var/lib/nx/generations
+After=nx-select.service
+# After the network if there is one, but never needing it: a generation that
+# is already built is only checked against the manifest.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nx sync
+UMask=0002
+Nice=10
+
+[Install]
+# At boot (an update nx hadn't seen), and whenever bootc's status changes:
+# `bootc upgrade` staging an update, `bootc switch`, `bootc rollback`.
+WantedBy=multi-user.target bootc-status-updated.target
