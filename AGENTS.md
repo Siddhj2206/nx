@@ -11,9 +11,10 @@ from the "bx" draft), then the other ADRs.
 
 ## Gates
 
-- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
-  `cargo test` before every commit, run through `dev/run` (below). CI runs
-  the same, plus shellcheck on `spike/`.
+- `mise run check` before every commit: `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `cargo test` and shellcheck, each through
+  `dev/run` (below). CI runs the same task on x86_64 and aarch64. Without
+  mise, run those commands through `dev/run` by hand.
 - Build in the dev container: `dev/run cargo test`. It is the image's
   Fedora release with `libsolv-devel` and `rpm-devel`; the host has their
   runtimes but no headers or `.so` links, so a host `cargo build` fails to
@@ -29,6 +30,10 @@ from the "bx" draft), then the other ADRs.
 - Add a crate or a dependency when a milestone needs it, not ahead of time.
   A dependency with a system library (libsolv) needs an ADR.
 - Conventional Commits. End every commit with `Assisted-by: <Model> via <Tool>`.
+  The subject is the changelog line (`feat`, `fix`, `perf` only): write it
+  for a user of nx. Never edit `CHANGELOG.md`; `dev/release` writes it.
+- `main` is the next release; patches ship from `release/X.Y`, with fixes
+  landed on `main` first and cherry-picked (`docs/development.md`).
 - Confirm before pushing: show the diff and wait.
 - Never run a spike or an activation on the daily driver; use a bootc VM
   built from the Neptuno image (design doc, *Milestones*).
@@ -86,10 +91,14 @@ nx 1.0 keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   what the root services recorded; `doctor.rs`, `apply.rs` (`nx
   apply`), `migrate.rs` (nx 0.x's profile, read by `nx_nix::profile`) and
   `complete.rs` (completions, man pages) are the 1.0 additions.
-- Releases: a `v*` tag runs `.github/workflows/release.yml`, which builds
-  `dev/dist`'s tarball (the tree an image unpacks at `/`) per architecture
-  in `fedora:45`. `dev/dist` checks `nx --version` against the tag, so bump
-  the workspace version first.
+- Releases: `mise run release X.Y.Z` (`dev/release`) bumps the version,
+  writes `CHANGELOG.md` with git-cliff (`cliff.toml`), runs the gates,
+  commits and tags; it never pushes. The `v*` tag runs
+  `.github/workflows/release.yml`, which builds `dev/dist`'s tarball (the
+  tree an image unpacks at `/`) per architecture in `fedora:45` and
+  publishes the tag's changelog section as the notes. Neptuno's Renovate
+  bumps its `NX_VERSION`. `mise.toml` holds the tasks and the host tools;
+  `renovate.json` the dependency updates.
 - `crates/nx-cli/src/session.rs`: manifest → generation (resolve, download,
   verify, unpack, expose the tool tier, assemble), shared by every command
   that changes the manifest: `Session::open` (change the manifest under the
