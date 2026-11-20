@@ -174,9 +174,12 @@ impl Universe {
 
     /// Repos past their `metadata_expire` or that could not be refreshed.
     pub fn stale(&self) -> impl Iterator<Item = &Loaded> {
-        self.repos
-            .iter()
-            .filter(|l| !matches!(l.synced.freshness, Freshness::Fetched | Freshness::Cached))
+        self.repos.iter().filter(|l| {
+            !matches!(
+                l.synced.freshness,
+                Freshness::Fetched | Freshness::OtherMirror(_) | Freshness::Cached
+            )
+        })
     }
 
     /// A package's long description.

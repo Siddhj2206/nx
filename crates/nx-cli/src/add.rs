@@ -12,7 +12,6 @@ use crate::changes::{self, Change};
 use crate::host::Machine;
 use crate::route::{self, Forced, Found, Nixpkg, Route, Rpm};
 use crate::session::{How, Session};
-use crate::tool;
 use crate::ui::{self, Stream, Ui};
 
 /// What `nx add` was told besides the packages.
@@ -47,12 +46,6 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
             })
         })
         .collect::<Result<_>>()?;
-    if opts.forced == Some(Forced::Tool) && !tool::available() {
-        bail!(
-            "the tool tier needs Nix in the image, and {} is missing",
-            nx_nix::STORE
-        );
-    }
     let refresh = opts.refresh.unwrap_or(Refresh::IfMissing);
     let mut session = Session::open(ui, machine, refresh, opts.dry_run, |m| {
         for a in allow {
@@ -72,6 +65,12 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         }
         Ok(())
     })?;
+    if opts.forced == Some(Forced::Tool) && !session.tool_available() {
+        bail!(
+            "the tool tier needs Nix in the image, and {} is missing",
+            nx_nix::STORE
+        );
+    }
 
     // Where each new spec goes.
     let routing = session.manifest().routing.clone();

@@ -20,41 +20,46 @@ pub enum Fallback {
     /// A tool-tier package was built from its derivation: no binary cache
     /// had it.
     LocalBuild,
-    /// A package came from a mirror other than the one its metadata did.
+    /// Metadata came from a mirror after the first, or a package from a
+    /// mirror other than the one its metadata did.
     OtherMirror,
+    /// Every mirror of a repo failed, so its cached metadata was used.
+    CachedMetadata,
     /// `systemd-sysext refresh` failed or merged nothing.
     MergeFailed,
 }
 
 impl Fallback {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Koji,
         Self::PartialResolve,
         Self::LocalBuild,
         Self::OtherMirror,
+        Self::CachedMetadata,
         Self::MergeFailed,
     ];
 
-    /// The entry's `MESSAGE_ID`. Fixed: changing one loses its history.
-    pub const fn message_id(self) -> &'static str {
+    /// The `NX_FALLBACK` field and the entry's `MESSAGE_ID`. The ids are
+    /// fixed: changing one loses its history.
+    const fn fields(self) -> (&'static str, &'static str) {
         match self {
-            Self::Koji => "44f21298d15a4e8a92ad200912912dd7",
-            Self::PartialResolve => "13b86f26dcdf40a68ab4002ee34da519",
-            Self::LocalBuild => "52cf727a75204b31aea91b293bded854",
-            Self::OtherMirror => "397e4099b3774e0c8aa3144b7392f21a",
-            Self::MergeFailed => "e7aa490fdaaf491a9c62c78cd738a59b",
+            Self::Koji => ("koji", "44f21298d15a4e8a92ad200912912dd7"),
+            Self::PartialResolve => ("partial-resolve", "13b86f26dcdf40a68ab4002ee34da519"),
+            Self::LocalBuild => ("local-build", "52cf727a75204b31aea91b293bded854"),
+            Self::OtherMirror => ("other-mirror", "397e4099b3774e0c8aa3144b7392f21a"),
+            Self::CachedMetadata => ("cached-metadata", "67553b5c473a4661952755ca9d659412"),
+            Self::MergeFailed => ("merge-failed", "e7aa490fdaaf491a9c62c78cd738a59b"),
         }
+    }
+
+    /// The entry's `MESSAGE_ID`.
+    pub const fn message_id(self) -> &'static str {
+        self.fields().1
     }
 
     /// The `NX_FALLBACK` field, for reading without the ids.
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::Koji => "koji",
-            Self::PartialResolve => "partial-resolve",
-            Self::LocalBuild => "local-build",
-            Self::OtherMirror => "other-mirror",
-            Self::MergeFailed => "merge-failed",
-        }
+        self.fields().0
     }
 }
 

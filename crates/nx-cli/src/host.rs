@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use nx_core::{
-    Deployment, DeploymentSource, Deployments, Generation, Manifest, OsRelease, RepoEntry, State,
+    Deployment, DeploymentSource, Deployments, Fallback, Generation, Journal, Manifest, OsRelease,
+    RepoEntry, State,
 };
 use nx_rpm::repo::{Added, Repo};
 use nx_rpm::{Freshness, Options, Refresh, Universe, Ureq, Vars};
@@ -231,7 +232,15 @@ pub fn load(
     refresh: Refresh,
     manifest: &Manifest,
 ) -> Result<Universe> {
-    load_from(ui, machine, refresh, manifest, &Ureq::new(), cache_dir()?)
+    load_from(
+        ui,
+        machine,
+        refresh,
+        manifest,
+        &Ureq::new(),
+        &Journal::system("nx"),
+        cache_dir()?,
+    )
 }
 
 /// [`load`] through `http`, with metadata cached in `cache`.
@@ -241,6 +250,7 @@ pub fn load_from(
     refresh: Refresh,
     manifest: &Manifest,
     http: &dyn nx_rpm::Http,
+    journal: &Journal,
     cache: PathBuf,
 ) -> Result<Universe> {
     let mut opts = machine.options(refresh, cache);
@@ -257,13 +267,30 @@ pub fn load_from(
             skipped.repo, skipped.error
         ));
     }
+    for loaded in &universe.repos {
+        if let Freshness::OtherMirror(error) = &loaded.synced.freshness {
+            journal.fallback(
+                Fallback::OtherMirror,
+                &format!(
+                    "{} metadata from {}: {error}",
+                    loaded.repo.id, loaded.synced.base
+                ),
+            );
+        }
+    }
     let mut expired = Vec::new();
     for loaded in universe.stale() {
         match &loaded.synced.freshness {
-            Freshness::Unreachable(error) => ui.warn(format_args!(
-                "using cached metadata for {}: {error}",
-                loaded.repo.id
-            )),
+            Freshness::Unreachable(error) => {
+                ui.warn(format_args!(
+                    "using cached metadata for {}: {error}",
+                    loaded.repo.id
+                ));
+                journal.fallback(
+                    Fallback::CachedMetadata,
+                    &format!("cached metadata for {}: {error}", loaded.repo.id),
+                );
+            }
             _ => expired.push(loaded.repo.id.as_str()),
         }
     }

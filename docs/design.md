@@ -488,7 +488,8 @@ Each fallback writes one journal entry with its own `MESSAGE_ID` (`nx_core::jour
 | `koji` | `44f21298d15a4e8a92ad200912912dd7` | An image relative's exact build is downloaded from Koji: no repo has it |
 | `partial-resolve` | `13b86f26dcdf40a68ab4002ee34da519` | `nx sync`: the manifest didn't resolve whole, so packages were left out |
 | `local-build` | `52cf727a75204b31aea91b293bded854` | A tool is built from its derivation: no binary cache has it |
-| `other-mirror` | `397e4099b3774e0c8aa3144b7392f21a` | A package came from a mirror other than its metadata's |
+| `other-mirror` | `397e4099b3774e0c8aa3144b7392f21a` | A repo's metadata came from a mirror after the first, or a package from a mirror other than its metadata's |
+| `cached-metadata` | `67553b5c473a4661952755ca9d659412` | Every mirror of a repo failed, so its cached metadata was used |
 | `merge-failed` | `e7aa490fdaaf491a9c62c78cd738a59b` | nxd's `systemd-sysext refresh` failed or merged nothing, and the previous generation was put back |
 
 ### Open questions for updates

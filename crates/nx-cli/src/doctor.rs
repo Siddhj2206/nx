@@ -214,7 +214,9 @@ fn tools(i: &Inputs, lock: &Lock, out: &mut Vec<Finding>) {
             "systemctl enable --now nix-daemon.service",
         ));
     }
-    if crate::tool::incomplete(&nx_nix::System, tool) {
+    // The store under this check's root, as the daemon socket above.
+    let has = |p: &str| i.root.join(p.trim_start_matches('/')).exists();
+    if crate::tool::incomplete(&has, tool) {
         out.push(warn(
             "some tools' Nix paths are gone from the store",
             "nx upgrade --tool fetches them again",

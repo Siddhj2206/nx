@@ -141,6 +141,21 @@ pub struct LockedPackage {
 }
 
 impl Lock {
+    /// Every package of both tiers by name (host name, tool attribute),
+    /// with its version (host NEVRA, tool version).
+    pub fn versions(&self) -> BTreeMap<&str, &str> {
+        let host = self
+            .host
+            .iter()
+            .map(|p| (p.name.as_str(), p.nevra.as_str()));
+        let tools = self
+            .tool
+            .iter()
+            .flat_map(|t| &t.packages)
+            .map(|p| (p.attr.as_str(), p.version.as_str()));
+        host.chain(tools).collect()
+    }
+
     pub fn new(image: Option<String>, release: &str, arch: &str) -> Self {
         Self {
             version: FORMAT,
@@ -253,6 +268,10 @@ mod tests {
         );
         assert_eq!(lock.host[0].evr(), "2.4-1.fc45");
         assert_eq!(lock.repo("fedora").map(|r| r.primary.as_str()), Some("cd"));
+        assert_eq!(
+            lock.versions().into_iter().collect::<Vec<_>>(),
+            [("jq", "1.8.2"), ("pkgconf", "pkgconf-2.4-1.fc45.x86_64")]
+        );
         Ok(())
     }
 }

@@ -32,6 +32,9 @@ pub struct Synced {
 pub enum Freshness {
     /// Downloaded by this call.
     Fetched,
+    /// Downloaded by this call from a later mirror: the earlier ones
+    /// failed, and the error says why the last of them did.
+    OtherMirror(String),
     /// From the cache, within the repo's `metadata_expire`.
     Cached,
     /// From the cache, past the repo's `metadata_expire`.
@@ -122,7 +125,12 @@ fn fetch(repo: &Repo, http: &dyn Http, dir: &Path, cached: Option<&Synced>) -> R
     let mut last_err = None;
     for base in &bases {
         match fetch_from(base, &accepted, http, dir, cached) {
-            Ok(synced) => return Ok(synced),
+            Ok(mut synced) => {
+                if let Some(e) = last_err {
+                    synced.freshness = Freshness::OtherMirror(format!("{e}"));
+                }
+                return Ok(synced);
+            }
             Err(e) => last_err = Some(e),
         }
     }
@@ -349,7 +357,11 @@ mod tests {
         let cache = temp("mirror");
         let (repo, http) = fake_repo(true);
         let first = sync(&repo, &http, &cache, Refresh::IfStale, &mut || {})?;
-        assert_eq!(first.freshness, Freshness::Fetched);
+        assert!(
+            matches!(&first.freshness, Freshness::OtherMirror(e) if e.contains("https://bad/")),
+            "{:?}",
+            first.freshness
+        );
         assert_eq!(first.base, "https://good/");
         assert_eq!(std::fs::read(&first.primary).ok().as_deref(), Some(PRIMARY));
 
@@ -413,7 +425,8 @@ mod tests {
         let cache = temp("missing");
         let (mut repo, http) = fake_repo(true);
         let first = sync(&repo, &http, &cache, Refresh::IfMissing, &mut || {})?;
-        assert_eq!(first.freshness, Freshness::Fetched);
+        // The fixture's first mirror is out of date.
+        assert!(matches!(first.freshness, Freshness::OtherMirror(_)));
 
         // Expired, yet IfMissing still answers from the cache.
         repo.metadata_expire = Some(std::time::Duration::ZERO);

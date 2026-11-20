@@ -214,7 +214,15 @@ impl<'m> Session<'m> {
             ));
         }
         let cache = host::cache_dir_for(state)?;
-        let universe = host::load_from(ui, machine, refresh, &manifest, &*env.http, cache)?;
+        let universe = host::load_from(
+            ui,
+            machine,
+            refresh,
+            &manifest,
+            &*env.http,
+            &env.journal,
+            cache,
+        )?;
         let keys = Keys::new(machine, state, current.as_ref(), &manifest);
         let tool = current.as_ref().and_then(|g| g.lock.tool.clone());
         let routes = current
@@ -288,24 +296,18 @@ impl<'m> Session<'m> {
     /// The tool tier at the pinned release (the channel's current one when
     /// nothing is pinned yet), opened once.
     pub fn tier(&mut self, ui: &mut Ui) -> Result<&mut Tier> {
-        let tier = match self.tier.take() {
-            Some(t) => t,
-            None => Tier::open(
-                ui,
-                &*self.env.http,
-                self.nix_cache()?,
-                self.tool.as_ref(),
-                false,
-            )?,
-        };
-        Ok(self.tier.insert(tier))
+        match &mut self.tier {
+            Some(t) => Ok(t),
+            slot => Ok(slot.insert(open_tier(ui, &self.env, self.tool.as_ref(), false)?)),
+        }
     }
 
     /// The pinned release's package list, loaded once.
     pub fn catalog(&mut self, ui: &mut Ui) -> Result<&nx_nix::Catalog> {
-        self.tier(ui)?;
-        let (Some(tier), http) = (self.tier.as_mut(), &*self.env.http) else {
-            bail!("the nixpkgs release didn't open");
+        let http = &*self.env.http;
+        let tier = match &mut self.tier {
+            Some(t) => t,
+            slot => slot.insert(open_tier(ui, &self.env, self.tool.as_ref(), false)?),
         };
         tier.catalog(ui, http)
     }
@@ -313,11 +315,6 @@ impl<'m> Session<'m> {
     /// Whether the image has Nix, so the tool tier can be used.
     pub fn tool_available(&self) -> bool {
         self.env.nix.available()
-    }
-
-    /// Where the tool tier's catalogs are kept.
-    fn nix_cache(&self) -> Result<PathBuf> {
-        Ok(host::cache_dir_for(&self.env.state)?.join("nix"))
     }
 
     /// Resolves both tiers for the session's manifest, as `how` says, and
@@ -360,19 +357,20 @@ impl<'m> Session<'m> {
             );
         }
         let system = tool::system(self.universe.arch());
-        let manifest = self.manifest.clone();
-        let dry_run = self.dry_run;
         self.tier(ui)?;
-        let (Some(tier), nix) = (self.tier.as_ref(), &*self.env.nix) else {
+        let Some(tier) = &self.tier else {
             bail!("the nixpkgs release didn't open");
         };
-        let locked = tier.resolve(ui, nix, &manifest, previous.as_ref(), &system)?;
-        let plan = tier.plan(&*self.env.http, nix, &locked)?;
-        if !dry_run {
-            tier.realise(ui, nix, &self.env.journal, &locked, &plan, &system)?;
-        }
+        let locked = tier.resolve(
+            ui,
+            &*self.env.nix,
+            &self.manifest,
+            previous.as_ref(),
+            &system,
+        )?;
+        let download = realise(ui, &self.env, self.dry_run, tier, &locked, &system)?;
         self.tool = Some(locked);
-        Ok(plan.sum.download)
+        Ok(download)
     }
 
     /// The tool tier at the channel's current release: every package
@@ -383,28 +381,21 @@ impl<'m> Session<'m> {
         if !self.env.nix.available() || self.manifest.tool.packages.is_empty() {
             return Ok((None, self.resolve_tools(ui)?));
         }
-        let tier = Tier::open(
-            ui,
-            &*self.env.http,
-            self.nix_cache()?,
-            self.tool.as_ref(),
-            true,
-        )?;
+        let tier = open_tier(ui, &self.env, self.tool.as_ref(), true)?;
         let same_pin =
             self.tool.as_ref().map(|t| t.rev.as_str()) == Some(tier.release.rev.as_str());
         let lost = self
             .tool
             .as_ref()
-            .is_some_and(|t| tool::incomplete(&*self.env.nix, t));
+            .is_some_and(|t| tool::incomplete(&|p| self.env.nix.has(p), t));
         if same_pin && !lost {
             return Ok((None, self.resolve_tools(ui)?));
         }
         let system = tool::system(self.universe.arch());
-        let manifest = self.manifest.clone();
         let (locked, held) = tier.resolve_holding(
             ui,
             &*self.env.nix,
-            &manifest,
+            &self.manifest,
             None,
             self.tool.as_ref(),
             &system,
@@ -417,19 +408,7 @@ impl<'m> Session<'m> {
                 if held.len() == 1 { "it" } else { "them" }
             ));
         }
-        let mut download = 0;
-        if !self.dry_run {
-            let plan = tier.plan(&*self.env.http, &*self.env.nix, &locked)?;
-            download = plan.sum.download;
-            tier.realise(
-                ui,
-                &*self.env.nix,
-                &self.env.journal,
-                &locked,
-                &plan,
-                &system,
-            )?;
-        }
+        let download = realise(ui, &self.env, self.dry_run, &tier, &locked, &system)?;
         let version = tier.release.version();
         let moved = if same_pin {
             format!("{version}, realised again")
@@ -662,7 +641,7 @@ impl<'m> Session<'m> {
         };
         // Collected since it was realised: fetch it again. If that fails,
         // the host tier still gets its generation, without those commands.
-        if crate::tool::incomplete(&*self.env.nix, &tool)
+        if crate::tool::incomplete(&|p| self.env.nix.has(p), &tool)
             && let Err(e) = crate::tool::restore(ui, &*self.env.nix, &tool)
         {
             ui.warn(format_args!(
@@ -723,15 +702,14 @@ impl<'m> Session<'m> {
         }
         // The sync below takes the lock itself, once per image.
         self.guard = None;
-        if let Err(e) = crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing)
-        {
-            if e.downcast_ref::<crate::sync::Unbuilt>().is_some() {
-                ui.warn(format_args!("{e}\nnx sync retries"));
-            } else {
-                ui.warn(format_args!(
-                    "the staged and rollback images were not updated: {e:#}\nnx sync retries"
-                ));
+        match crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing) {
+            Ok(d) if !d.unbuilt.is_empty() => {
+                ui.warn(format_args!("{}\nnx sync retries", d.unbuilt.join("\n")));
             }
+            Ok(_) => {}
+            Err(e) => ui.warn(format_args!(
+                "the staged and rollback images were not updated: {e:#}\nnx sync retries"
+            )),
         }
         Ok(built)
     }
@@ -984,12 +962,7 @@ fn image_only(
 /// before (`previous`) didn't have them at this version. A build that
 /// keeps one as it was says nothing again.
 fn newly_allowed<'b>(built: &'b Built, previous: Option<&Generation>) -> Vec<&'b str> {
-    let nevra = |lock: &Lock, name: &str| {
-        lock.host
-            .iter()
-            .find(|p| p.name == name)
-            .map(|p| p.nevra.clone())
-    };
+    let nevra = |lock: &Lock, name: &str| lock.package(name).map(|p| p.nevra.clone());
     built
         .allowed
         .iter()
@@ -999,6 +972,30 @@ fn newly_allowed<'b>(built: &'b Built, previous: Option<&Generation>) -> Vec<&'b
         })
         .map(String::as_str)
         .collect()
+}
+
+/// The tool tier at `tool`'s release, or the channel's current one when
+/// nothing is pinned or `latest` moves the pin.
+fn open_tier(ui: &mut Ui, env: &Env, tool: Option<&LockedTool>, latest: bool) -> Result<Tier> {
+    let cache = host::cache_dir_for(&env.state)?.join("nix");
+    Tier::open(ui, &*env.http, cache, tool, latest)
+}
+
+/// Plans `locked` and, unless a dry run, realises it. Returns what
+/// realising downloads.
+fn realise(
+    ui: &mut Ui,
+    env: &Env,
+    dry_run: bool,
+    tier: &Tier,
+    locked: &LockedTool,
+    system: &str,
+) -> Result<u64> {
+    let plan = tier.plan(&*env.http, &*env.nix, locked)?;
+    if !dry_run {
+        tier.realise(ui, &*env.nix, &env.journal, locked, &plan, system)?;
+    }
+    Ok(plan.sum.download)
 }
 
 /// The image hint (design, *Image-level packages*): why, and the line for
@@ -1053,24 +1050,20 @@ fn refusal_error(e: nx_core::Error, all: &[Planned]) -> anyhow::Error {
             )
         })
         .collect();
-    let mut add: Vec<&str> = Vec::new();
-    for r in &refusals {
-        let requested = all
-            .iter()
-            .find(|p| p.package.name == r.name)
-            .map(|p| p.requested.as_slice())
-            .unwrap_or_default();
-        let names = if requested.is_empty() {
-            std::slice::from_ref(&r.name)
-        } else {
-            requested
-        };
-        for n in names {
-            if !add.contains(&n.as_str()) {
-                add.push(n);
-            }
-        }
-    }
+    // What the user asked for that pulled each refused package in.
+    let mut add: Vec<&str> = refusals
+        .iter()
+        .flat_map(|r| {
+            all.iter()
+                .find(|p| p.package.name == r.name)
+                .map(|p| p.requested.as_slice())
+                .filter(|asked| !asked.is_empty())
+                .unwrap_or(std::slice::from_ref(&r.name))
+        })
+        .map(String::as_str)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    add.retain(|n| seen.insert(*n));
     msg.push_str(&format!("  nx add {} {}", add.join(" "), flags.join(" ")));
     anyhow::anyhow!(msg)
 }

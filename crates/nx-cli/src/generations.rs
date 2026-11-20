@@ -24,19 +24,53 @@ struct Row {
     changed: Vec<String>,
     /// Built from this generation, which is gone or another image's:
     /// nothing of its own image to diff against, so no diff.
-    from: Option<u32>,
+    built_from: Option<u32>,
     current: bool,
+}
+
+/// Which image a group's generations were built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Image {
+    Booted,
+    Staged,
+    Rollback,
+    /// An older generation's, deployed no more.
+    Gone,
+}
+
+impl Image {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Booted => "Booted image",
+            Self::Staged => "Staged image",
+            Self::Rollback => "Rollback image",
+            Self::Gone => "Image no longer deployed",
+        }
+    }
 }
 
 /// The generations built for one image, oldest first.
 #[derive(Debug, PartialEq, Eq)]
 struct Group {
-    /// `Booted image`, `Staged image`…; `None` off a bootc system, where
-    /// there is one group and no heading.
-    title: Option<String>,
+    /// The image's digest, as the generations' locks name it.
+    digest: Option<String>,
+    /// Which image; `None` off a bootc system, where there is one group
+    /// and no heading.
+    image: Option<Image>,
     /// The image's version and short digest.
     detail: String,
     rows: Vec<Row>,
+}
+
+impl Group {
+    fn new(image: Option<Image>, version: Option<&str>, digest: Option<&str>) -> Self {
+        Self {
+            digest: digest.map(str::to_owned),
+            image,
+            detail: image_detail(version, digest),
+            rows: Vec::new(),
+        }
+    }
 }
 
 pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, state: &State) -> Result<()> {
@@ -73,48 +107,40 @@ fn groups(ui: &mut Ui, state: &State, deployments: Option<&Deployments>) -> Resu
 
     // Images in the order they are shown: booted, staged, rollback, then
     // any other an older generation was built for.
-    let mut order: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
     if let Some(d) = deployments {
-        for (title, dep) in [
-            ("Booted image", d.booted()),
-            ("Staged image", d.staged()),
-            ("Rollback image", d.rollback()),
+        for (image, dep) in [
+            (Image::Booted, d.booted()),
+            (Image::Staged, d.staged()),
+            (Image::Rollback, d.rollback()),
         ] {
             let Some(dep) = dep else { continue };
-            if order.iter().any(|(digest, ..)| *digest == dep.image_digest) {
-                continue;
+            if !groups.iter().any(|g| g.digest == dep.image_digest) {
+                groups.push(Group::new(
+                    Some(image),
+                    dep.version.as_deref(),
+                    dep.image_digest.as_deref(),
+                ));
             }
-            let detail = image_detail(dep.version.as_deref(), dep.image_digest.as_deref());
-            order.push((dep.image_digest.clone(), Some(title.into()), detail));
         }
     }
     for (g, _) in &all {
-        if !order.iter().any(|(digest, ..)| *digest == g.lock.image) {
-            let title = (deployments.is_some() || g.lock.image.is_some())
-                .then(|| "Image no longer deployed".to_owned());
-            let detail = image_detail(None, g.lock.image.as_deref());
-            order.push((g.lock.image.clone(), title, detail));
+        if !groups.iter().any(|group| group.digest == g.lock.image) {
+            let image = (deployments.is_some() || g.lock.image.is_some()).then_some(Image::Gone);
+            groups.push(Group::new(image, None, g.lock.image.as_deref()));
         }
     }
-
-    let mut groups = Vec::new();
-    for (digest, title, detail) in order {
-        let rows: Vec<Row> = all
+    for group in &mut groups {
+        group.rows = all
             .iter()
-            .filter(|(g, _)| g.lock.image == digest)
+            .filter(|(g, _)| g.lock.image == group.digest)
             .map(|(g, made)| {
-                let base = base(g.number, &g.lock, &locks);
-                row(g, *made, base, current == Some(g.number))
+                let base = diff_base(g.number, &g.lock, &locks);
+                to_row(g, *made, base, current == Some(g.number))
             })
             .collect();
-        if !rows.is_empty() {
-            groups.push(Group {
-                title,
-                detail,
-                rows,
-            });
-        }
     }
+    groups.retain(|g| !g.rows.is_empty());
     Ok(groups)
 }
 
@@ -122,7 +148,7 @@ fn groups(ui: &mut Ui, state: &State, deployments: Option<&Deployments>) -> Resu
 /// the same image, else the newest earlier generation for it. A sync for
 /// another image names the booted image's generation as its parent, and a
 /// diff across images would show the images' differences, not the change.
-fn base<'l>(number: u32, lock: &Lock, locks: &BTreeMap<u32, &'l Lock>) -> Option<&'l Lock> {
+fn diff_base<'l>(number: u32, lock: &Lock, locks: &BTreeMap<u32, &'l Lock>) -> Option<&'l Lock> {
     if let Some(parent) = lock.parent.and_then(|p| locks.get(&p))
         && parent.image == lock.image
     {
@@ -135,31 +161,19 @@ fn base<'l>(number: u32, lock: &Lock, locks: &BTreeMap<u32, &'l Lock>) -> Option
         .find(|l| l.image == lock.image)
 }
 
-/// Every package of both tiers by name, with its version.
-fn versions(lock: &Lock) -> BTreeMap<&str, &str> {
-    let host = lock
-        .host
-        .iter()
-        .map(|p| (p.name.as_str(), p.nevra.as_str()));
-    let tools = lock
-        .tool
-        .iter()
-        .flat_map(|t| &t.packages)
-        .map(|p| (p.attr.as_str(), p.version.as_str()));
-    host.chain(tools).collect()
-}
-
-fn row(g: &Generation, made: Option<u64>, base: Option<&Lock>, current: bool) -> Row {
-    let from = g.lock.parent.filter(|_| base.is_none());
-    let now = if from.is_some() {
+/// `g` as a row: its sizes and what changed since `base`.
+fn to_row(g: &Generation, made: Option<u64>, base: Option<&Lock>, current: bool) -> Row {
+    let built_from = g.lock.parent.filter(|_| base.is_none());
+    let now = if built_from.is_some() {
         BTreeMap::new()
     } else {
-        versions(&g.lock)
+        g.lock.versions()
     };
-    let before = base.map(versions).unwrap_or_default();
-    let names = |f: &dyn Fn(&&str) -> bool, from: &BTreeMap<&str, &str>| -> Vec<String> {
-        from.keys()
-            .filter(|n| f(n))
+    let before = base.map(Lock::versions).unwrap_or_default();
+    // The names of `of` that `keep` keeps.
+    let names = |keep: &dyn Fn(&&str) -> bool, of: &BTreeMap<&str, &str>| -> Vec<String> {
+        of.keys()
+            .filter(|n| keep(n))
             .map(|n| (*n).to_owned())
             .collect()
     };
@@ -174,7 +188,7 @@ fn row(g: &Generation, made: Option<u64>, base: Option<&Lock>, current: bool) ->
             &|n| before.get(n).is_some_and(|v| Some(v) != now.get(n)),
             &now,
         ),
-        from,
+        built_from,
         current,
     }
 }
@@ -210,14 +224,14 @@ fn render(out: &mut Stream, groups: &[Group]) {
         .unwrap_or(0)
         + 2;
     for (i, group) in groups.iter().enumerate() {
-        let indent = match &group.title {
-            Some(title) => {
+        let indent = match group.image {
+            Some(image) => {
                 if i > 0 {
                     out.blank();
                 }
                 out.line(format_args!(
                     "{} {}",
-                    style.bold(title),
+                    style.bold(image.title()),
                     style.dim(&group.detail)
                 ));
                 "  "
@@ -233,7 +247,7 @@ fn render(out: &mut Stream, groups: &[Group]) {
                 .collect();
             change.extend(r.changed.iter().map(|n| style.cyan(&format!("↑{n}"))));
             change.extend(r.removed.iter().map(|n| style.red(&format!("-{n}"))));
-            let change = if let Some(n) = r.from {
+            let change = if let Some(n) = r.built_from {
                 style.dim(&format!("from generation {n}"))
             } else if change.is_empty() {
                 style.dim("no change")

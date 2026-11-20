@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use nx_core::{Generation, State, select};
+use nx_nix::Nix;
 
 use crate::host::{self, Machine};
 use crate::tool;
@@ -19,31 +20,31 @@ use crate::ui::{self, Stream, Ui};
 /// store is collected too: old tool tiers (the weekly upgrade leaves one
 /// each time) would otherwise stay until someone runs `nx gc`. Returns how
 /// many generations were removed.
-pub fn collect(ui: &mut Ui, machine: &Machine, nix: bool) -> Result<usize> {
+pub fn collect(ui: &mut Ui, machine: &Machine, nix: Option<&dyn Nix>) -> Result<usize> {
     let (dropped, packages, keep) = remove(machine, false)?;
     if !dropped.is_empty() || packages > 0 {
         render(&mut ui.out, &dropped, packages, false);
     }
-    if nix && tool::available() {
+    if let Some(nix) = nix.filter(|n| n.available()) {
         // The host tier is done; a Nix failure is only a warning here.
-        if let Err(e) = collect_nix(ui, &nx_nix::System, &host::state(), &keep) {
+        if let Err(e) = collect_nix(ui, nix, &host::state(), &keep) {
             ui.warn(format_args!("the Nix store was not collected: {e:#}"));
         }
     }
     Ok(dropped.len())
 }
 
-pub fn run(ui: &mut Ui, machine: &Machine, dry_run: bool) -> Result<()> {
+pub fn run(ui: &mut Ui, machine: &Machine, nix: &dyn Nix, dry_run: bool) -> Result<()> {
     let (dropped, packages, keep) = remove(machine, dry_run)?;
     render(&mut ui.out, &dropped, packages, dry_run);
-    if !dry_run && tool::available() {
-        collect_nix(ui, &nx_nix::System, &host::state(), &keep)?;
+    if !dry_run && nix.available() {
+        collect_nix(ui, nix, &host::state(), &keep)?;
     }
     Ok(())
 }
 
 /// Roots what kept generations hold, then lets Nix delete the rest.
-fn collect_nix(ui: &mut Ui, nix: &dyn nx_nix::Nix, state: &State, keep: &[u32]) -> Result<()> {
+fn collect_nix(ui: &mut Ui, nix: &dyn Nix, state: &State, keep: &[u32]) -> Result<()> {
     for n in keep {
         let Ok(g) = Generation::read(state, *n) else {
             continue;

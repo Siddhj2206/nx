@@ -9,17 +9,18 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use nx_core::select;
 use nx_core::{Deployment, Fallback, Generation};
+use nx_nix::Nix;
 use nx_rpm::Refresh;
 
 use crate::host::{self, Machine};
 use crate::session::{Session, Unresolvable};
 use crate::ui::Ui;
 
-/// `nx sync [--refresh]`.
-pub fn run(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<()> {
+/// `nx sync [--refresh]`. The daily refresh also collects `nix`'s store.
+pub fn run(ui: &mut Ui, machine: &Machine, nix: &dyn Nix, refresh: Refresh) -> Result<()> {
     if refresh != Refresh::IfMissing {
         // The refresh timer: fill the cache first, so what follows (and the
         // next `nx add`) answers from it.
@@ -30,11 +31,23 @@ pub fn run(ui: &mut Ui, machine: &Machine, refresh: Refresh) -> Result<()> {
             .unwrap_or_default();
         host::load(ui, machine, refresh, &manifest)?;
     }
-    let built = deployed(ui, machine, &host::state(), refresh)?;
+    let Deployed { built, unbuilt } = deployed(ui, machine, &host::state(), refresh)?;
+    if !unbuilt.is_empty() {
+        bail!(
+            "{} no host tier yet\n{}",
+            if unbuilt.len() == 1 {
+                "a deployed image has"
+            } else {
+                "some deployed images have"
+            },
+            unbuilt.join("\n")
+        );
+    }
     // Generations nothing deployed needs any more (an image that is gone,
     // older staged ones). Only after every image has its own: a failure
     // above returned already. The daily refresh collects the Nix store too.
-    let removed = crate::gc::collect(ui, machine, refresh != Refresh::IfMissing)?;
+    let nix = (refresh != Refresh::IfMissing).then_some(nix);
+    let removed = crate::gc::collect(ui, machine, nix)?;
     if built == 0 && removed == 0 {
         ui.done("every deployed image has a host tier that matches the manifest");
     }
@@ -84,32 +97,29 @@ fn wanted(machine: &Machine) -> Vec<(Role, Deployment)> {
     out
 }
 
-/// Deployed images left without a host tier, one line each: which image,
-/// and why. Reported once, by whoever called [`deployed`].
-#[derive(Debug)]
-pub struct Unbuilt(pub Vec<String>);
-
-impl std::fmt::Display for Unbuilt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0.join("\n"))
-    }
+/// What [`deployed`] did.
+#[derive(Debug, Default)]
+pub struct Deployed {
+    /// Generations built.
+    pub built: usize,
+    /// Images still without a host tier, one line each: which image, and
+    /// why. The caller reports them, once.
+    pub unbuilt: Vec<String>,
 }
 
-impl std::error::Error for Unbuilt {}
-
 /// Builds a generation for each deployed image that lacks one for the
-/// current manifest; returns how many it built. Every image is tried; the
-/// failures are returned together ([`Unbuilt`]) once the rest are done.
+/// current manifest. Every image is tried: one that fails is in
+/// [`Deployed::unbuilt`], not an error.
 pub fn deployed(
     ui: &mut Ui,
     machine: &Machine,
     state: &nx_core::State,
     refresh: Refresh,
-) -> Result<usize> {
+) -> Result<Deployed> {
     let current = match Generation::current(state) {
         Ok(Some(g)) => g,
         // Nothing added yet: nothing to carry across images.
-        Ok(None) => return Ok(0),
+        Ok(None) => return Ok(Deployed::default()),
         Err(e) => return Err(anyhow::Error::new(e).context("reading the current generation")),
     };
     let mut built = 0;
@@ -136,11 +146,7 @@ pub fn deployed(
     // Only this run's failures stand: an image that now has a host tier, or
     // is no longer deployed, drops out.
     select::record_failures(state, &failures);
-    if unbuilt.is_empty() {
-        Ok(built)
-    } else {
-        Err(Unbuilt(unbuilt).into())
-    }
+    Ok(Deployed { built, unbuilt })
 }
 
 /// Whether the newest generation for `digest` was built from the
@@ -271,16 +277,16 @@ fn resolve_what_fits(
     if skipped.is_empty() || kept.is_empty() {
         return Err(whole);
     }
-    let resolved = session
-        .resolve(ui, &kept)
-        .context("the rest of the manifest doesn't resolve either")?;
     session.journal().fallback(
         Fallback::PartialResolve,
         &format!(
-            "the manifest didn't resolve as a whole; left out {}",
+            "the manifest didn't resolve as a whole; leaving out {}",
             skipped.join(", ")
         ),
     );
+    let resolved = session
+        .resolve(ui, &kept)
+        .context("the rest of the manifest doesn't resolve either")?;
     Ok((resolved, skipped))
 }
 

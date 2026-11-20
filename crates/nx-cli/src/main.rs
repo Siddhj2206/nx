@@ -357,19 +357,31 @@ fn main() -> ExitCode {
         },
         Command::Search { terms, metadata } => metadata.load(&mut ui).map(|(u, g)| {
             let pinned = g.and_then(|g| g.lock.tool);
-            let catalog = tool::catalog_to_read(&mut ui, pinned.as_ref());
+            let catalog = tool::catalog_to_read(
+                &mut ui,
+                &nx_rpm::Ureq::new(),
+                &nx_nix::System,
+                pinned.as_ref(),
+            );
             search::run(&mut ui, &u, catalog.as_ref(), &terms);
         }),
         Command::Info { package, metadata } => metadata.load(&mut ui).and_then(|(u, g)| {
             let pinned = g.as_ref().and_then(|g| g.lock.tool.clone());
             let manifest = g.map(|g| g.manifest).unwrap_or_default();
-            let catalog = tool::catalog_to_read(&mut ui, pinned.as_ref());
+            let catalog = tool::catalog_to_read(
+                &mut ui,
+                &nx_rpm::Ureq::new(),
+                &nx_nix::System,
+                pinned.as_ref(),
+            );
             info::run(&mut ui, &u, catalog.as_ref(), &manifest, &package)
         }),
         Command::Sync { metadata } => {
-            machine().and_then(|m| sync::run(&mut ui, &m, metadata.refresh()))
+            machine().and_then(|m| sync::run(&mut ui, &m, &nx_nix::System, metadata.refresh()))
         }
-        Command::Gc { dry_run } => machine().and_then(|m| gc::run(&mut ui, &m, dry_run)),
+        Command::Gc { dry_run } => {
+            machine().and_then(|m| gc::run(&mut ui, &m, &nx_nix::System, dry_run))
+        }
         Command::Select => boot::run(&mut ui),
         Command::Notify => notify::seen_file().and_then(|seen| {
             notify::run(&mut ui, &host::state(), &RpmOstree, &notify::Busctl, &seen)

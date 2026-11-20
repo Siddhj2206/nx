@@ -20,10 +20,6 @@ use crate::host;
 use crate::ui::{self, Ui};
 
 /// Whether the image has Nix: without `/nix/store` the tool tier is off.
-pub fn available() -> bool {
-    nx_nix::System.available()
-}
-
 /// Nix's name for the platform: `x86_64-linux`.
 pub fn system(arch: &str) -> String {
     format!("{arch}-linux")
@@ -221,19 +217,26 @@ impl Tier {
                 "building {}: no binary cache has it",
                 plan.build.join(", ")
             ));
+        }
+        let realised = nx_nix::nix::realise(nix, &plan.installables, &mut |note| {
+            draw(ui, note);
+        });
+        if !plan.build.is_empty() {
             journal.fallback(
                 Fallback::LocalBuild,
                 &format!(
-                    "building {} from its derivation at nixpkgs {}: no binary cache has it",
+                    "{} {} from its derivation at nixpkgs {}: no binary cache has it",
+                    if realised.is_ok() {
+                        "built"
+                    } else {
+                        "failed to build"
+                    },
                     plan.build.join(", "),
                     tool.rev
                 ),
             );
         }
-        nx_nix::nix::realise(nix, &plan.installables, &mut |note| {
-            draw(ui, note);
-        })
-        .with_context(|| realise_failed(&plan.build))
+        realised.with_context(|| realise_failed(&plan.build))
     }
 }
 
@@ -317,15 +320,19 @@ fn realise_failed(built: &[String]) -> String {
 /// The catalog for a command that only reads (search, info): at the pinned
 /// release, or the channel's current one. Missing it isn't fatal: those
 /// commands still answer from the repos, with a warning.
-pub fn catalog_to_read(ui: &mut Ui, pinned_to: Option<&LockedTool>) -> Option<Catalog> {
-    if !available() {
+pub fn catalog_to_read(
+    ui: &mut Ui,
+    http: &dyn Http,
+    nix: &dyn Nix,
+    pinned_to: Option<&LockedTool>,
+) -> Option<Catalog> {
+    if !nix.available() {
         return None;
     }
-    let http = nx_rpm::Ureq::new();
     let loaded = host::cache_dir()
-        .and_then(|cache| Tier::open(ui, &http, cache.join("nix"), pinned_to, false))
+        .and_then(|cache| Tier::open(ui, http, cache.join("nix"), pinned_to, false))
         .and_then(|mut t| {
-            t.catalog(ui, &http)?;
+            t.catalog(ui, http)?;
             Ok(t.catalog.take())
         });
     match loaded {
@@ -684,12 +691,12 @@ pub fn add_roots(nix: &dyn Nix, g: &Generation) -> Result<()> {
 }
 
 /// Whether some output of `tool` isn't in the store (collected since it
-/// was realised).
-pub fn incomplete(nix: &dyn Nix, tool: &LockedTool) -> bool {
+/// was realised); `has` says whether the store has a path.
+pub fn incomplete(has: &dyn Fn(&str) -> bool, tool: &LockedTool) -> bool {
     tool.packages
         .iter()
         .flat_map(ToolPackage::paths)
-        .any(|p| !nix.has(p))
+        .any(|p| !has(p))
 }
 
 /// Realises again the outputs of `tool` the store lost: from their

@@ -13,7 +13,6 @@ use nx_rpm::Refresh;
 
 use crate::host::{self, Machine};
 use crate::session::{self, How, Session};
-use crate::tool;
 use crate::ui::Ui;
 
 pub fn run(
@@ -25,15 +24,6 @@ pub fn run(
 ) -> Result<()> {
     let started = Instant::now();
     let wanted = file.map(read).transpose()?;
-    if wanted
-        .as_ref()
-        .is_some_and(|w| !w.tool.packages.is_empty() && !tool::available())
-    {
-        bail!(
-            "the manifest has nixpkgs tools, and the image has no Nix ({} is missing)",
-            nx_nix::STORE
-        );
-    }
     // Keys are fetched (and shown) before the lock, as `nx repo add` does,
     // and pinned under it.
     let current = host::readable(ui, &host::state())?;
@@ -47,6 +37,12 @@ pub fn run(
         }
         Ok(())
     })?;
+    if wanted.as_ref().is_some_and(|w| !w.tool.packages.is_empty()) && !session.tool_available() {
+        bail!(
+            "the manifest has nixpkgs tools, and the image has no Nix ({} is missing)",
+            nx_nix::STORE
+        );
+    }
     if let Some(u) = unpinned.filter(|_| !dry_run) {
         u.pin(&mut session)?;
     }
