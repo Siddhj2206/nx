@@ -1,0 +1,54 @@
+# nx's tools and tasks: `mise run check` is the gate CI runs. Cargo runs in
+# the dev container through dev/run; under CI, which is already that
+# Fedora, dev/run runs the command directly.
+
+[tools]
+"aqua:orhun/git-cliff" = "2.14.2"
+
+[vars]
+shell_scripts = "spike/*.sh crates/nx-solv/generate.sh crates/nx-librpm/generate.sh dev/run dev/vm-install dev/dist dev/release tests/vm/*.sh"
+
+[tasks.check]
+description = "Every gate: fmt, clippy, tests, shellcheck"
+run = [
+  "dev/run cargo fmt --check",
+  "dev/run cargo clippy --all-targets --locked -- -D warnings",
+  "dev/run cargo test --locked",
+  "dev/run shellcheck {{vars.shell_scripts}}",
+]
+
+[tasks.fmt]
+description = "Format the workspace"
+run = "dev/run cargo fmt"
+
+[tasks.lint]
+description = "Clippy, warnings denied"
+run = "dev/run cargo clippy --all-targets --locked -- -D warnings"
+
+[tasks.test]
+description = "cargo test; arguments go to cargo (mise run test -- -p nx-rpm)"
+run = "dev/run cargo test --locked"
+
+[tasks.shellcheck]
+description = "Shellcheck the scripts"
+run = "dev/run shellcheck {{vars.shell_scripts}}"
+
+[tasks.dist]
+description = "Build the release tarball for the workspace version into dist/"
+run = 'dev/run dev/dist "v$(sed -n "s/^version = \"\(.*\)\"/\1/p" Cargo.toml)" dist'
+
+[tasks.changelog]
+description = "Show what the next release's changelog section would say"
+run = "git-cliff --unreleased"
+
+[tasks.release]
+description = "Cut a release: mise run release 1.1.0 (bump, changelog, gates, commit, tag)"
+run = "dev/release"
+
+[tasks.dev-image]
+description = "Rebuild the dev container after dev/Containerfile changes"
+run = "podman build --pull=newer -t localhost/nx-dev:45 dev"
+
+[tasks.vm-install]
+description = "Build nx and install it into the Neptuno test VM"
+run = "dev/vm-install"

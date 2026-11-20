@@ -57,3 +57,8 @@ this checkout mounted:
 dev/run cargo build --release   # in the container's /target/release/nx
 dev/run cargo test
 ```
+
+With [mise](https://mise.jdx.dev), `mise run check` runs every gate CI
+does and `mise tasks` lists the rest. Branches, the changelog and releases
+are in [docs/development.md](docs/development.md); what changed in each
+release is in [CHANGELOG.md](CHANGELOG.md).

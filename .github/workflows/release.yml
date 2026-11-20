@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+# As ci.yml, so the build restores main's cache.
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 jobs:
   build:
     strategy:
@@ -19,11 +24,16 @@ jobs:
     steps:
       - run: >-
           dnf -y install --setopt=install_weak_deps=False
-          rust cargo clippy rustfmt gcc libsolv-devel rpm-devel gzip tar git-core
+          rust cargo clippy rustfmt gcc libsolv-devel rpm-devel ShellCheck
+          git-core gzip tar zstd
       - uses: actions/checkout@v5
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - run: mise trust && mise run check
       - run: dev/dist "${GITHUB_REF_NAME}" dist
       - run: mv dist/SHA256SUMS "dist/SHA256SUMS.$(uname -m)"
       - uses: actions/upload-artifact@v4
@@ -43,9 +53,15 @@ jobs:
           path: dist
           merge-multiple: true
       - run: cat dist/SHA256SUMS.* | sort -k2 > dist/SHA256SUMS && rm dist/SHA256SUMS.*
+      # The notes are the tag's section of CHANGELOG.md (dev/release wrote it).
+      - name: Notes
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '/^## /{p = index($0, "[" v "]") > 0; next} p' \
+            CHANGELOG.md > notes.md
+          grep -q . notes.md || { echo "CHANGELOG.md has no ${GITHUB_REF_NAME#v} section"; exit 1; }
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes \
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --notes-file notes.md \
             dist/*.tar.gz dist/SHA256SUMS

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Cuts a release on main (a minor or major) or on release/X.Y (a patch):
+# bumps the workspace version, writes CHANGELOG.md with git-cliff (mise
+# install), runs the gates in the dev container, commits
+# `chore(release): X.Y.Z` and tags vX.Y.Z. It pushes nothing: it prints the
+# push, which starts .github/workflows/release.yml.
+#   dev/release 1.1.0
+set -euo pipefail
+die() { echo "  ✗ $*" >&2; exit 1; }
+
+version=${1:-}
+version=${version#v}
+[[ $version =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || die "usage: dev/release <X.Y.Z>"
+series=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}
+tag=v$version
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo"
+branch=$(git symbolic-ref --short HEAD)
+case $branch in
+main) ;;
+release/"$series") ;;
+release/*) die "$branch releases ${branch#release/}.Z, not $version" ;;
+*) die "release from main or release/$series, not $branch" ;;
+esac
+[[ -z $(git status --porcelain) ]] || die "the tree has uncommitted changes"
+! git rev-parse -q --verify "refs/tags/$tag" >/dev/null || die "$tag exists"
+command -v git-cliff >/dev/null || die "no git-cliff: run mise install (or mise run release)"
+
+echo "  › nx $version from $branch"
+# A failed release leaves the tree as it found it.
+trap 'git checkout -q -- Cargo.toml Cargo.lock CHANGELOG.md' EXIT
+
+# Squeeze the blank lines git-cliff leaves between sections, and the trailing one.
+git-cliff --tag "$tag" 2>/dev/null | cat -s | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' >CHANGELOG.md
+grep -q "^## \[$version\]" CHANGELOG.md ||
+	die "no feat, fix or perf commit since the last tag: nothing for a $version section"
+
+sed -i "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml
+grep -qx "version = \"$version\"" Cargo.toml || die "Cargo.toml has no workspace version to bump"
+# The members' new version into Cargo.lock; nothing else moves.
+dev/run cargo update --workspace --offline --quiet
+
+dev/run cargo fmt --check
+dev/run cargo clippy --all-targets --locked -- -D warnings
+dev/run cargo test --locked
+
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit -q -m "chore(release): $version"
+trap - EXIT
+git tag -a "$tag" -m "nx $version"
+echo "  ✓ committed and tagged $tag"
+git --no-pager show --stat --format='%h %s' HEAD
+echo
+echo "  › check the diff (git show), then push:"
+echo "      git push --atomic origin $branch $tag"
