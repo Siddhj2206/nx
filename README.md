@@ -52,7 +52,7 @@ nx generations       every generation and what it changed
 nx rollback [N]      make an earlier generation current again
 nx apply [file]      make the system match a manifest
 nx repo              third-party RPM repos (COPR, .repo files)
-nx shell | status | doctor | sync | gc
+nx status | doctor | sync | gc
 ```
 
 `nx help` lists them all, and `nx <command> --help` explains one.
@@ -84,7 +84,7 @@ nx links the image's libsolv and librpm, so a release is one tarball per
 Fedora release and architecture, `nx-v<version>-fc<release>-<arch>.tar.gz`,
 with `SHA256SUMS`. It holds the tree an image unpacks at `/`. In a
 Containerfile, check it, unpack it, and enable its units (the preset does
-that): `nxd.socket`, `nx-select`, `nx-settle`, `nx-sync`,
+that): `nxd.socket`, `nx-select`, `nx-sync`,
 `nx-refresh.timer`, `nx-upgrade.timer`, and the user units
 `nx-notify.path` and `.service`. The tool tier needs Nix and its daemon in
 the image.

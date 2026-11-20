@@ -44,7 +44,6 @@ image or rebooting. It covers the everyday half of package management:
 | `rollback [N]` | Makes the previous generation (or `N`) current again |
 | `apply [file]` | Makes the system match a manifest: a new machine copies `manifest.toml` and runs it |
 | `repo add\|list\|remove` | Third-party RPM repos: `copr:owner/project`, a `.repo` file's URL, or a base URL with `--key`. Keys are pinned by content |
-| `shell [cmd]` | A shell, or one command, with the host tier on its paths |
 | `status` | The images nx resolves against (booted, staged, rollback), each one's generation, and the tool tier's release |
 | `doctor` | Checks that what nx set up is what the system runs: nxd, the merge, `PATH` order, leaked Nix variables, background failures. Exits 1 on a failure |
 | `sync` | Builds a generation for every deployed image; the staged-image hook, boot and the daily timer run it |

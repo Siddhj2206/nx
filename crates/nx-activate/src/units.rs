@@ -62,12 +62,6 @@ pub(crate) fn plan(old: &Activation, new: &Activation) -> Transition {
     t
 }
 
-/// Every package of `old` leaves: what a switch to the prefix backend,
-/// which unmerges everything, does to the units.
-pub(crate) fn plan_unmerge(old: &Activation) -> Transition {
-    plan(old, &Activation::default())
-}
-
 fn sh(runner: &dyn Runner, program: &str, args: &[&str]) -> std::io::Result<Output> {
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     runner.run(program, &args)

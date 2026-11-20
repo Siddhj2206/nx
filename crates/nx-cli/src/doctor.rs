@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Result, bail};
-use nx_core::{Backend, Deployments, Lock, State, select};
+use nx_core::{Deployments, Lock, State, select};
 
 use crate::problems::Problem;
 use crate::ui::{self, Ui};
@@ -177,35 +177,28 @@ fn generation(i: &Inputs, n: u32, lock: &Lock, out: &mut Vec<Finding>) {
     if lock.host.is_empty() {
         return;
     }
-    match i.state.backend().ok().flatten() {
-        Some(Backend::Sysext) => {
-            if i.root.join(nx_core::generation::EXTENSION_RELEASE).exists() {
-                out.push(ok("the host tier is merged over /usr"));
-            } else {
-                out.push(fail(
-                    "the host tier isn't merged over /usr",
-                    "journalctl -b -u nx-settle -u systemd-sysext says why; nx sync merges it again",
-                ));
-            }
-            // Root's copy, through the link: what is merged.
-            let tree = i.root.join("var/lib/extensions/nx/usr");
-            if let Some(label) = (i.label)(&tree).filter(|l| l.contains(":var_lib_t:")) {
-                out.push(fail(
-                    format!(
-                        "the extension is labelled {label}, so confined programs can't read it"
-                    ),
-                    "nx rollback to it again relabels it (nxd runs setfiles)",
-                ));
-            }
-        }
-        Some(Backend::Prefix) => out.push(warn(
-            "the host tier uses the prefix backend: sysext couldn't merge it",
-            "builds need nx shell; the next change tries sysext again",
-        )),
-        None => out.push(warn(
+    // The link nxd makes on activation names root's copy: what is merged.
+    let link = i.root.join("var/lib/extensions/nx");
+    if std::fs::symlink_metadata(&link).is_err() {
+        out.push(warn(
             format!("generation {n} was never made live"),
             "nx sync",
-        )),
+        ));
+        return;
+    }
+    if i.root.join(nx_core::generation::EXTENSION_RELEASE).exists() {
+        out.push(ok("the host tier is merged over /usr"));
+    } else {
+        out.push(fail(
+            "the host tier isn't merged over /usr",
+            "journalctl -b -u systemd-sysext says why; nx sync merges it again",
+        ));
+    }
+    if let Some(label) = (i.label)(&link.join("usr")).filter(|l| l.contains(":var_lib_t:")) {
+        out.push(fail(
+            format!("the extension is labelled {label}, so confined programs can't read it"),
+            "nx rollback to it again relabels it (nxd runs setfiles)",
+        ));
     }
 }
 

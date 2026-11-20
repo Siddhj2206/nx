@@ -45,7 +45,7 @@ pub fn run(ui: &mut Ui, machine: &Machine, target: Option<u32>, dry_run: bool) -
         )));
         return Ok(());
     }
-    crate::live::activate(ui, &state, number, generation.manifest.host.backend)?;
+    crate::live::activate(ui, &state, number)?;
     ui.done(format_args!(
         "generation {number} is current · was {} · {}",
         current.number,

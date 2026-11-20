@@ -647,12 +647,9 @@ impl<'m> Session<'m> {
     /// the change is live either way.
     pub fn install(&mut self, ui: &mut Ui, all: &[Planned]) -> Result<Built> {
         let built = self.build(ui, all)?;
-        self.env.live.activate(
-            ui,
-            &self.env.state,
-            built.generation.number,
-            self.manifest.host.backend,
-        )?;
+        self.env
+            .live
+            .activate(ui, &self.env.state, built.generation.number)?;
         for name in &built.allowed {
             ui.warn(format_args!(
                 "{name}: scriptlets nx can't translate are skipped, as you allowed"

@@ -26,7 +26,7 @@ nx is a fast, brew-like package manager for a Fedora bootc daily driver. Package
 - Hosting a package repository or build farm.
 - Desktop GUI apps (use Flatpak).
 - Managing the bootc image in any way. Kernel, driver and SELinux-level packages get a hint; the user puts them in their own image.
-- Reproducible per-project build environments in the Nix-flake sense. `nx shell` gives a convenient env, not a hermetic build.
+- Reproducible per-project build environments in the Nix-flake sense.
 
 ## Core principles
 
@@ -67,16 +67,11 @@ The host tier holds Fedora RPMs for the exact booted release, overlaid onto `/us
 - Never run `%pre`/`%post` scriptlets. See *Scriptlet translation*.
 - Record each package's scriptlets and files outside `/usr`, read from its signed header, beside it in the store (`.nx-meta.json`); what a generation holds is its `lock.toml`.
 
-**Activation backends.** nx probes at startup and picks one; the user can force either.
+**Activation.** One aggregate directory extension, linked at `/var/lib/extensions/nx`, with `usr/lib/extension-release.d/extension-release.nx` declaring `ID` and `VERSION_ID` (or `SYSEXT_LEVEL`), merged with `systemd-sysext refresh`: files appear at standard paths in `/usr`. nxd labels root's copy, links it, refreshes, and then `status --json` must list `nx` under `/usr`. If the merge fails (overlay depth, an unsupported kernel) nxd puts the previous generation and link back and the activation is an error that carries what `systemd-sysext` said; `nx doctor` says whether nx's extension is merged.
 
-| Backend | How it works | When used |
-| --- | --- | --- |
-| `sysext` (preferred) | One aggregate directory extension at `/var/lib/extensions/nx/`, with `usr/lib/extension-release.d/extension-release.nx` declaring `ID` and `VERSION_ID` (or `SYSEXT_LEVEL`). Activated with `systemd-sysext refresh`. Files appear at standard paths in `/usr`. | A test merge succeeds on this image |
-| `prefix` (fallback) | The current generation's `usr` (`/var/lib/nx/current/sysext/usr`, no copy; a rollback moves it) is the prefix. `nx shell` and the shell hook export `PATH`, `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, `LD_LIBRARY_PATH` (only inside `nx shell`), `XDG_DATA_DIRS`. Services go under `/etc/systemd/system` via drop-ins pointing into the prefix. | sysext merge fails (overlay depth, SELinux, unsupported) |
+nx 1.0 also had a *prefix* backend: when the merge failed, nxd left the generation's `usr` unmerged and `nx shell` exported it as a prefix (`PATH`, `PKG_CONFIG_PATH`, `CPATH`, …), with `nx-settle.service` falling back at boot. Neptuno always merged, so 1.1 dropped it (ADR-0011) with `[host] backend`, `/var/lib/nx/backend`, `nx shell` and `nx select --after-merge`.
 
-**Probing (M3).** Every unforced activation tries sysext first: label, link, `systemd-sysext refresh`, then `status --json` must list `nx` under `/usr`. If the merge fails (overlay depth, an unsupported kernel) nxd puts the previous generation back, removes the link, unmerges and uses the prefix backend, and the CLI says why. The next activation tries sysext again, so a system that can merge later goes back by itself. `[host] backend = "sysext" | "prefix"` in the manifest forces one, and a forced sysext that fails is an error. The backend in use is in `/var/lib/nx/backend` for `nx shell`. At boot, `nx-settle.service` does the same check after `systemd-sysext` ran (see *Image upgrade lifecycle*).
-
-**Rules for the sysext backend**
+**Rules for the extension**
 
 - Exactly one nx extension, never one per package, to spend only one overlayfs stacking level.
 - Never enable bootc transient root (`transient = true` in `prepare-root.conf`); it costs another overlay level.
@@ -249,7 +244,7 @@ nx never executes RPM scriptlets. It pattern-matches each one against known idio
 | `mkdir` / `chown` / `chmod` under `/var` or `/run` | A `tmpfiles.d` file, then `systemd-tmpfiles --create` |
 | `systemctl preset` / `%systemd_post` macros | Apply the package's presets; enable/start only if the preset says so |
 | `%systemd_preun` / `%systemd_postun` | Stop and disable on remove, before the refresh |
-| `ldconfig` | Nothing (paths are standard on sysext); run it in the prefix backend |
+| `ldconfig` | Nothing (paths are standard in the merged `/usr`) |
 | Cache triggers (`glib-compile-schemas`, `update-desktop-database`, `gtk-update-icon-cache`, `fc-cache`) | Run after refresh as post-activation hooks |
 | `update-alternatives`, edits to existing `/etc` files, `semodule`, `dracut`, `depmod` | Refuse with an image hint |
 
@@ -268,7 +263,6 @@ nx never executes RPM scriptlets. It pattern-matches each one against known idio
 - *`/etc` and `/var` content.* Files outside `/usr` go to `usr/share/factory/{etc,var}`, with a generated `usr/lib/tmpfiles.d/nx-<package>.conf` (`C` for files, `d` for directories, `L` for symlinks, ghosts skipped), so nothing in `/etc` is ever overwritten and what a user edited stays. Anything else (`/opt`, …) is reported and left out. `/bin`, `/sbin`, `/lib` and `/lib64` are moved under `/usr` first.
 - *Activation.* Each generation carries `activation.toml`: per package its nevra, intents, and sysusers and tmpfiles files. nxd diffs the old merged generation against the new one in the single `Activate` request: a new package gets `systemd-sysusers`, `systemd-tmpfiles --create`, `systemctl preset` and a start of units that are then enabled; a removed one gets stop and disable (instances of `foo@.service` included, since `disable` takes no globs) before the refresh; a package whose version changed gets `try-restart`. `preset --now` is not valid in systemd 262, hence preset, `is-enabled`, `start`. nxd only acts on units the extension actually ships, whatever the client says. The CLI prints each step with `⚙`.
 - *Known limits.* User-scope template units (`foo@.service` under `usr/lib/systemd/user`) are disabled by name, not per instance. A merge that fails after the stop leaves removed packages' units stopped until the next activation. nxd looks wheel members up with `id` and `getent` under `RestrictAddressFamilies=AF_UNIX`, which suits SSSD (a unix socket) but not an NSS module that opens its own network connection. The sysusers and tmpfiles files nxd applies are package content: a wheel user already has the right to activate anything, so they are checked by name, not by content.
-- *Prefix backend.* Nothing is set up: the CLI warns. Units a package ships under `/usr` are not seen by systemd there.
 
 ## Store, generations, lockfile
 
@@ -357,7 +351,7 @@ Every new image digest invalidates the host tier, not only a Fedora major bump: 
 
 **As built (M5)**
 
-- *Who does what.* `nx select` (hidden; `nx-select.service`, `Before=systemd-sysext.service`) runs at boot as root and reads only local state. `nx select --after-merge` (`nx-settle.service`, `After=systemd-sysext.service`) checks the merge happened: if a generation is linked and nx's extension isn't listed over `/usr`, it removes the link and records the prefix backend (`nx_activate::settle_at_boot`). The next activation tries sysext again. `nx sync` (`nx-sync.service`, wanted by `multi-user.target` and by bootc's `bootc-status-updated.target`) gives every deployed image a generation. `nx-refresh.timer` runs `nx sync --refresh` daily, which fills the shared metadata cache first. `nx gc` removes what nothing needs. `nx rollback` and `nx status` know about other images.
+- *Who does what.* `nx select` (hidden; `nx-select.service`, `Before=systemd-sysext.service`) runs at boot as root and reads only local state. `nx sync` (`nx-sync.service`, wanted by `multi-user.target` and by bootc's `bootc-status-updated.target`) gives every deployed image a generation. `nx-refresh.timer` runs `nx sync --refresh` daily, which fills the shared metadata cache first. `nx gc` removes what nothing needs. `nx rollback` and `nx status` know about other images.
 - *Selecting at boot.* The booted deployment comes from the kernel's `ostree=` argument (a symlink to the deployment) and its image digest from the commit's `ostree.manifest-digest`, read with `ostree show`: rpm-ostree's daemon isn't up that early. `current` goes to the newest generation whose `lock.toml` names that digest. With none, the candidate is the generation that was current, and `compat::check` decides (below). If it fits, it is merged and `nx sync` resolves for the new image once the machine is up. If not, an empty generation (same manifest, no packages) for the booted digest becomes current, so nothing is merged and boot is clean. That generation is marked `pending = true` in its lockfile, so `nx sync` treats it as no host tier and resolves for the image. If `nx select` itself fails (the digest can't be read, the lock can't be taken) it removes `current` and merges nothing: a generation for another image is never merged unchecked.
 - *The compatibility check (invariant 2).* Same `VERSION_ID` and architecture; no file of the extension hides one of the image's (`check_extension` against the booted deployment's tree, not `/`); and solving the generation's manifest against this image's rpmdb, from the metadata already cached (`Refresh::Never`, no network), with its locked builds preferred, yields no package the generation doesn't have. Image relatives must be the image's exact build, so a `-devel` whose library the image moved past fails here. A repo with no cached metadata, or a relative only Koji has, fails closed. The same check lets `nx rollback N` cross image digests; it names the reason when it refuses.
 - *Re-resolving before the reboot.* `Machine::targeting(deployment)` points the resolver at a deployment's own tree under `/sysroot/ostree/deploy/<osname>/deploy/<checksum>.<serial>`: its repo files, os-release, rpmdb and keys, and its digest. `nx sync` builds a generation for the staged and the rollback image that way (`Session::build`: everything `nx add` does except making it live). Only the booted image's generation is ever activated, and only if `current` hasn't changed since the sync started (a concurrent `nx add` wins). A generation counts as up to date when the newest one for that digest has the current generation's manifest. If one package of the manifest can't be resolved for an image (a COPR with no build for the new release), that image gets a generation without it (*Partial re-resolve*, below). If nothing can be built for an image (the failure isn't one package's), it gets none, the others still do, and the failure is a warning and a non-zero exit; `nx status` shows the reason.
@@ -483,7 +477,7 @@ On Neptuno the units are declared in `build/packages/*.toml` like every other un
 | Disk fills up | Failed download or unpack | Space check before downloading (size from metadata); GC suggestion | Clear error with `nx gc` hint |
 | Two `nx` commands at once | Racing writes | One global lock in `/var/lib/nx`; read commands don't take it | Second command waits |
 | `bootc upgrade` runs while `nx add` is running | Staged digest changes mid-resolve | Re-check the staged digest before finishing; if it changed, re-resolve for it too (invariant 6) | Slightly longer `add` |
-| Overlay stacking depth exceeded on a new kernel | Sysext won't merge | `nx-settle` (`nx select --after-merge`) detects that nothing merged and records the prefix backend until the next activation, which tries sysext again; a placeholder generation or a manifest that forces sysext is left alone | Journal warning (notification and `nx doctor` detail later) |
+| Overlay stacking depth exceeded on a new kernel | Sysext won't merge | The next activation fails with `systemd-sysext`'s reason and puts the previous generation back; at boot nothing merges | `nx doctor` fails "the host tier isn't merged over /usr" and points to the journal |
 
 ### Open questions for updates
 
@@ -498,14 +492,14 @@ The `nx` CLI runs unprivileged. A small root daemon, `nxd`, does only the steps 
 **nxd**
 
 - Socket-activated systemd service on a Unix socket, one process per connection (`nxd.socket` with `Accept=yes` starts `nxd@.service` with the connection on stdin), so a request is handled in a fresh process that exits when it answers. A lock serializes concurrent requests. The unit uses no mount-namespace options (`ProtectSystem=`, `PrivateTmp=`): the merge would be invisible outside it.
-- Exposes a narrow, typed API, one JSON line each way (`nx-proto`): `Activate { generation, backend? }` (M3, and M4 too: sysusers, tmpfiles and units are derived by nxd from the generation's own `activation.toml`, so no request names a unit or a path). The client names a generation by number and never sends a path.
+- Exposes a narrow, typed API, one JSON line each way (`nx-proto`): `Activate { generation }` (M3, and M4 too: sysusers, tmpfiles and units are derived by nxd from the generation's own `activation.toml`, so no request names a unit or a path). The client names a generation by number and never sends a path.
 - Never downloads, resolves or parses packages itself. The unprivileged CLI does that work and writes into store directories owned by a dedicated `nx` system user; nxd validates that a generation is complete and correctly owned before activating it.
 - Authorization via polkit: the active local session user in `wheel` may call it without a password. Everyone else needs admin auth.
 
 **Decisions for M3 (best practice, checked in the VM 2026-11-19)**
 
 - *Extension link.* `/var/lib/extensions/nx -> /var/lib/nx/current/sysext`, created by `tmpfiles.d`. `man systemd-sysext` names `/var/lib/extensions` the primary place to install extensions and `/run` and `/etc` suitable only for symlinks to them; only `/var/lib/extensions` is merged at boot without extra setup, and the link name `nx` is what matches `extension-release.nx`. On Neptuno the link merged, kept `usr_t` labels, and was merged again after a reboot. `setfiles -r` wants the resolved directory (`realpath`), not a path through `current`. *Since the 1.0 audit* the link names root's copy instead: see *Root's copy*, below.
-- *Root's copy (1.0 audit).* The CLI unpacks as its user and a generation hardlinks the store, so the files of `generations/<N>/sysext` belong to whoever built them, and before this the merged `/usr` was those very inodes: anything running as that user (not only a person at an active session, which is all polkit checks) could rewrite a binary that root's services run, with no prompt. nxd now copies the generation's tree into `/var/lib/nx-merged/<N>.<pid>` (root's, 0755, outside the wheel-writable state directory), reflinked (`FICLONE`; btrfs on Neptuno, so it costs no space), and merges the copy: files are root's, modes lose group and other write, directories lose setgid, ACLs aren't copied. The checks run as the copy is made (each file opened `O_NOFOLLOW` and checked on its descriptor; invariant 1 and the release on the copy), so what was checked is what merges. Only the merged copy is kept; a failed merge puts the link back and drops the new one. Chowning the store in place was not an option: `fs.protected_hardlinks` would then stop the next build from hardlinking it. At boot `nx select` stages the generation it picks the same way (`nx_activate::stage_at_boot`, labelled, no refresh: `systemd-sysext.service` merges it next), and when it can't tell which fits it removes the copies so the link names nothing. Cost: an activation went from 80–150 ms to about 240 ms on the VM, and a boot whose generation changed takes about 2 s in `nx select` (the copy and `setfiles`). Not covered: root's `nx sync`/`nx upgrade` still read caches and lockfiles wheel can write (a libsolv or librpm bug would be needed), and `nx shell`'s prefix stays the builder's tree, which only that user's shell uses.
+- *Root's copy (1.0 audit).* The CLI unpacks as its user and a generation hardlinks the store, so the files of `generations/<N>/sysext` belong to whoever built them, and before this the merged `/usr` was those very inodes: anything running as that user (not only a person at an active session, which is all polkit checks) could rewrite a binary that root's services run, with no prompt. nxd now copies the generation's tree into `/var/lib/nx-merged/<N>.<pid>` (root's, 0755, outside the wheel-writable state directory), reflinked (`FICLONE`; btrfs on Neptuno, so it costs no space), and merges the copy: files are root's, modes lose group and other write, directories lose setgid, ACLs aren't copied. The checks run as the copy is made (each file opened `O_NOFOLLOW` and checked on its descriptor; invariant 1 and the release on the copy), so what was checked is what merges. Only the merged copy is kept; a failed merge puts the link back and drops the new one. Chowning the store in place was not an option: `fs.protected_hardlinks` would then stop the next build from hardlinking it. At boot `nx select` stages the generation it picks the same way (`nx_activate::stage_at_boot`, labelled, no refresh: `systemd-sysext.service` merges it next), and when it can't tell which fits it removes the copies so the link names nothing. Cost: an activation went from 80–150 ms to about 240 ms on the VM, and a boot whose generation changed takes about 2 s in `nx select` (the copy and `setfiles`). Not covered: root's `nx sync`/`nx upgrade` still read caches and lockfiles wheel can write (a libsolv or librpm bug would be needed).
 - *The `nx` user.* A system user from `sysusers.d` (`u!`, no login shell, home `/var/lib/nx`) owns the state directory. The background services (`nx-sync`, `nx-refresh`, `nx-upgrade`) run as root in 1.0, which is why root-built generations wheel can't delete go to `.trash-*` for root's next gc; running them as `nx` waits for an `nx`-user builder (*Why not unpack as `nx`*), since alone it would only move that problem. `tmpfiles.d` creates `/var/lib/nx` setgid with a default ACL for group `wheel`, so interactive wheel users, who may call nxd without a password, write generations as themselves without being members of a group nx has to manage. nxd accepts a generation whose files are owned by root, the owner of the state directory (`nx`) or the calling uid (`SO_PEERCRED`). It refuses setuid and setgid files, file capabilities, device nodes, FIFOs and sockets, and files writable by everyone, and an extension-release that doesn't match the running system. It never follows a symlink: a link in a package is just a link in the merged `/usr`. It does not use `DynamicUser=`: state under `/var/lib/nx` must outlive the service and be owned by a stable uid.
 - *No wider trust.* A wheel user can already activate without a password, so a tree they own widens nothing for them. A user outside wheel is refused by polkit before nxd opens the tree, so what they own never reaches `/usr`. What reaches `/usr` is root's copy (*Root's copy*, above): owning the generation gives no write access to what is merged.
 
@@ -568,10 +562,9 @@ The verbs mirror brew. Every mutating command prints the tier and source it chos
 | `nx list` (`ls`) | Installed packages by tier |
 | `nx why <name\|path>` | Owner of a binary or file, its routing reason, and the generation that added it |
 | `nx repo add\|list\|remove` | Manage COPR and third-party RPM repos. `add` takes `copr:owner/project`, a `.repo` file's URL, or a base URL with `--key`; `--priority` sets the dnf priority; `--new-key` replaces a pinned key after a rotation |
-| `nx shell [-- cmd]` | Env for building (prefix backend exports; sysext needs none) |
 | `nx apply` | Make the system match `manifest.toml` |
 | `nx generations` / `nx rollback [N]` | List / switch generations |
-| `nx status` | Image digest, backend, pending re-resolves, failures, outstanding image hints |
+| `nx status` | Image digest, generations, pending re-resolves, failures, outstanding image hints |
 | `nx doctor` | Health checks (below) |
 | `nx sync [--refresh]` | Give every deployed image (booted, staged, rollback) a generation that matches the manifest; the staged-image hook, boot and the daily timer run it |
 | `nx gc` | Remove generations nothing deployed needs, and the store content only they used |
@@ -597,7 +590,7 @@ nx/
   crates/
     nx-cli/        # nx: clap, output, every command; the Session pipeline
     nxd/           # root daemon: authorization, one request per process
-    nx-activate/   # what nxd runs: validate and copy, label, sysext/prefix, units
+    nx-activate/   # what nxd runs: validate and copy, label, merge, units
     nx-core/       # state, store, generations, manifest, lockfile, deployments
     nx-rpm/        # repos, metadata, the libsolv universe, downloads, keys, Koji
     nx-solv/       # safe libsolv (bindgen)
@@ -619,11 +612,11 @@ nx/
 
 ## Risks and open questions
 
-The biggest risk is the sysext backend on bootc. That is why the prefix backend is first-class and chosen automatically, not an afterthought.
+The biggest risk was the sysext merge on bootc. M0 through 1.0 showed it works on Neptuno, so 1.1 dropped the prefix fallback (ADR-0011).
 
 | Risk | Evidence | Mitigation |
 | --- | --- | --- |
-| sysext/confext support on bootc is distro-dependent | The [bootc filesystem docs](https://bootc.dev/bootc/bootc-filesystem.7.html) say support depends mostly on the distribution, and a bootc PR documented them as unsupported ([Fedora Discussion](https://discussion.fedoraproject.org/t/unsupported-systemd-confext-and-sysext-on-bootc/202199)) | Probe at startup; fall back to prefix backend |
+| sysext/confext support on bootc is distro-dependent | The [bootc filesystem docs](https://bootc.dev/bootc/bootc-filesystem.7.html) say support depends mostly on the distribution, and a bootc PR documented them as unsupported ([Fedora Discussion](https://discussion.fedoraproject.org/t/unsupported-systemd-confext-and-sysext-on-bootc/202199)) | M0 measured it on the image; a failed merge is an error, and `nx doctor` checks the merge |
 | overlayfs stacking depth exhausted | Same bootc docs; a Jan 2026 Silverblue sysext failure hit "maximum fs stacking depth exceeded", traced to a kernel regression ([thread](https://discussion.fedoraproject.org/t/systemd-sysext-service-is-unable-to-start/179403)) | One aggregate extension; no transient root; doctor reports headroom |
 | SELinux labels on extension content | bootc docs mention SELinux labeling issues; fedora-sysexts runs `restorecon` on extension dirs | `setfiles -r` against the extension root after assembly (M0: `restorecon` gives `var_lib_t`); doctor verifies |
 | Host tier drifts from the image | Any image update can change library versions | Re-resolve on every digest change; boot-time generation selection |
@@ -638,7 +631,6 @@ The biggest risk is the sysext backend on bootc. That is why the prefix backend 
 - [x] Confirm the systemd version on the image handles `refresh` and daemon-reload correctly: systemd 262 refreshes in place and reloads the service manager itself (`--no-reload` turns that off), so nx needs neither a restart of `systemd-sysext.service` nor its own `daemon-reload`.
 - [x] Best way to read a staged deployment's rpmdb before reboot (M5): `bootc switch` and `bootc upgrade` write the staged deployment's whole tree to `/sysroot/ostree/deploy/<osname>/deploy/<checksum>.<serial>` at once, rpmdb included, readable unprivileged; no podman pull is needed. bootc's `bootc-status-updated.target` fires `nx-sync.service` as soon as it is staged: on the VM the host tier for the staged image was built in 2 s, before any reboot.
 - [ ] Whether to use `ID`+`VERSION_ID` or `SYSEXT_LEVEL` in extension-release, given re-resolution happens per digest anyway.
-- [ ] Prefix backend: how to run services whose units hardcode `/usr` paths (drop-in rewrite vs. refuse). M4 sets up no services there and warns.
 - [ ] After an upgrade, list processes still holding replaced files (`needs-restarting`); M4 does `try-restart` only.
 
 **Open questions for the tool tier**

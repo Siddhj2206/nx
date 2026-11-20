@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use nx_core::{Backend, State};
+use nx_core::State;
 use nx_proto::{Request, Response};
 
 use crate::host;
@@ -22,32 +22,20 @@ fn socket() -> PathBuf {
 /// Makes a built generation live. [`Nxd`] asks the daemon; tests move
 /// `current` and nothing more.
 pub trait Live {
-    fn activate(
-        &self,
-        ui: &mut Ui,
-        state: &State,
-        number: u32,
-        forced: Option<Backend>,
-    ) -> Result<()>;
+    fn activate(&self, ui: &mut Ui, state: &State, number: u32) -> Result<()>;
 }
 
 /// The real thing: [`activate`].
 pub struct Nxd;
 
 impl Live for Nxd {
-    fn activate(
-        &self,
-        ui: &mut Ui,
-        state: &State,
-        number: u32,
-        forced: Option<Backend>,
-    ) -> Result<()> {
-        activate(ui, state, number, forced)
+    fn activate(&self, ui: &mut Ui, state: &State, number: u32) -> Result<()> {
+        activate(ui, state, number)
     }
 }
 
 /// Makes generation `number` current and live, telling the user how.
-pub fn activate(ui: &mut Ui, state: &State, number: u32, forced: Option<Backend>) -> Result<()> {
+pub fn activate(ui: &mut Ui, state: &State, number: u32) -> Result<()> {
     if host::state_overridden() {
         state.set_current(number)?;
         ui.warn(format_args!(
@@ -56,10 +44,7 @@ pub fn activate(ui: &mut Ui, state: &State, number: u32, forced: Option<Backend>
         return Ok(());
     }
     let started = Instant::now();
-    let request = Request::Activate {
-        generation: number,
-        backend: forced,
-    };
+    let request = Request::Activate { generation: number };
     let response = nx_proto::call(&socket(), &request).map_err(|e| match e {
         nx_proto::Error::Unavailable { .. } => anyhow::Error::new(e).context(
             "generation is built but not live; nxd is not running (systemctl enable --now nxd.socket)",
@@ -67,20 +52,9 @@ pub fn activate(ui: &mut Ui, state: &State, number: u32, forced: Option<Backend>
         e => anyhow::Error::new(e).context("asking nxd to activate the generation"),
     })?;
     let live = match response {
-        Response::Activated {
-            backend,
-            fallback,
-            events,
-            warnings,
-        } => {
-            if let Some(why) = fallback {
-                ui.warn(format_args!(
-                    "sysext could not merge ({why}); using the prefix backend, `nx shell` exports it"
-                ));
-            }
+        Response::Activated { events, warnings } => {
             ui.step(format_args!(
-                "generation {number} is live · {} · {} ms",
-                backend.name(),
+                "generation {number} is live · {} ms",
                 started.elapsed().as_millis()
             ));
             for event in events {

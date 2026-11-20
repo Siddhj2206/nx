@@ -26,33 +26,6 @@ pub struct State {
     root: PathBuf,
 }
 
-/// How the host tier reaches the running system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    /// One directory extension merged over `/usr` by `systemd-sysext`.
-    Sysext,
-    /// The generation's `usr` as a prefix, reached through `nx shell`.
-    Prefix,
-}
-
-impl Backend {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Sysext => "sysext",
-            Self::Prefix => "prefix",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "sysext" => Some(Self::Sysext),
-            "prefix" => Some(Self::Prefix),
-            _ => None,
-        }
-    }
-}
-
 /// Held while a command changes state; a second one waits.
 #[derive(Debug)]
 pub struct Lock {
@@ -182,47 +155,6 @@ impl State {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(Error::Write { path: link, source }),
         }
-    }
-
-    /// The activation backend nxd last used; `None` before the first
-    /// activation.
-    pub fn backend(&self) -> Result<Option<Backend>> {
-        let path = self.backend_file();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Backend::parse(text.trim()).map(Some).ok_or_else(|| {
-                Error::Invalid(format!("{} says {:?}", path.display(), text.trim()))
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(Error::Read { path, source }),
-        }
-    }
-
-    /// Records the backend in use, for `nx shell`. Written beside its name
-    /// with `create_new` (which never follows a symlink: nxd runs this as
-    /// root in a directory others can write) and flushed before the rename.
-    pub fn set_backend(&self, backend: Backend) -> Result<()> {
-        use std::io::Write;
-        let path = self.backend_file();
-        let tmp = path.with_file_name(".backend.part");
-        let write = |source| Error::Write {
-            path: tmp.clone(),
-            source,
-        };
-        let _ = std::fs::remove_file(&tmp);
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(write)?;
-        file.write_all(format!("{}\n", backend.name()).as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(write)?;
-        rename(&tmp, &path)?;
-        sync_dir(&self.root)
-    }
-
-    fn backend_file(&self) -> PathBuf {
-        self.root.join("backend")
     }
 
     /// Generation numbers on disk, oldest first.
@@ -598,7 +530,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn current_and_backend_are_recorded() -> Result<()> {
+    fn current_is_recorded() -> Result<()> {
         let tmp = TempDir::new("current");
         let state = State::new(&tmp.0);
         let _lock = state.lock()?;
@@ -608,9 +540,6 @@ pub(crate) mod tests {
         state.set_current(1)?;
         state.set_current(2)?;
         assert_eq!(state.current_number()?, Some(2));
-        assert_eq!(state.backend()?, None);
-        state.set_backend(Backend::Prefix)?;
-        assert_eq!(state.backend()?, Some(Backend::Prefix));
         Ok(())
     }
 

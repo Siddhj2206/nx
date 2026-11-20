@@ -8,11 +8,6 @@
 //! doesn't, an empty generation is made current, so the host tier is
 //! simply not merged and the system boots cleanly; `nx sync` resolves
 //! for the new image once the machine is up.
-//!
-//! `nx select --after-merge` runs once `systemd-sysext` has: if the
-//! extension didn't merge (overlay depth, an unsupported kernel), the
-//! prefix backend is recorded and the link removed, so `nx shell` exports
-//! the generation's `usr` instead. The next activation tries sysext again.
 
 use std::path::{Path, PathBuf};
 
@@ -56,30 +51,6 @@ fn stage(machine: &Machine, state: &nx_core::State) -> Result<()> {
         uid == owner || wheel.is_member(uid)
     })
     .context("staging the extension for the merge")
-}
-
-/// `nx select --after-merge`, once `systemd-sysext` has run: if the
-/// extension didn't merge, the prefix backend takes over for this boot.
-pub fn settle(ui: &mut Ui) -> Result<()> {
-    let state = host::state();
-    let _guard = state.lock().with_context(|| {
-        format!(
-            "settling the backend needs write access to {}",
-            state.root().display()
-        )
-    })?;
-    let layout = nx_activate::Layout::system(state);
-    match nx_activate::settle_at_boot(&layout, &nx_activate::System)? {
-        nx_activate::Settled::NothingToMerge => {}
-        nx_activate::Settled::Merged => ui.done("the host tier is merged"),
-        nx_activate::Settled::FellBack(why) => ui.warn(format_args!(
-            "the host tier didn't merge at boot ({why}); using the prefix backend until the next change"
-        )),
-        nx_activate::Settled::ForcedAndUnmerged(why) => ui.warn(format_args!(
-            "the host tier didn't merge at boot ({why}), and the manifest forces the sysext backend"
-        )),
-    }
-    Ok(())
 }
 
 fn select(ui: &mut Ui) -> Result<()> {

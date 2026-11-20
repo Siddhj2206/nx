@@ -26,7 +26,6 @@ const PLACEMENT: &[(&str, &str)] = &[
     ("repo", "Maintenance"),
     ("sync", "Maintenance"),
     ("gc", "Maintenance"),
-    ("shell", "System"),
     ("status", "System"),
     ("doctor", "System"),
 ];
@@ -212,7 +211,7 @@ mod tests {
         main(&mut ui.out);
         let text = out.text();
         assert!(text.contains("  Usage: nx <command> [args]\n"));
-        assert!(text.contains("\n  System\n    shell"));
+        assert!(text.contains("\n  System\n    status"));
         assert!(text.contains("the image nx resolves against"));
     }
 

@@ -1,8 +1,8 @@
 # nx's state directory. setgid keeps new files in group nx; the default ACL
 # lets wheel users (who may activate generations without a password, see the
 # polkit rule) write state too. nxd, not tmpfiles, creates
-# /var/lib/extensions/nx: the link must be absent while the prefix backend is
-# in use. Installed as /usr/lib/tmpfiles.d/nx.conf.
+# /var/lib/extensions/nx: the link is absent until a generation is made
+# live. Installed as /usr/lib/tmpfiles.d/nx.conf.
 #Type Path                     Mode  User Group Age Argument
 d      /var/lib/nx             2775  nx   nx    -
 d      /var/lib/nx/generations 2775  nx   nx    -

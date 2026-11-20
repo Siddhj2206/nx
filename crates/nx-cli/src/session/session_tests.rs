@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Result;
-use nx_core::{Backend, DeploymentSource, Deployments, State};
+use nx_core::{DeploymentSource, Deployments, State};
 use nx_rpm::Refresh;
 
 use super::{Env, How, Session};
@@ -77,7 +77,7 @@ impl nx_nix::Nix for NoNix {
 struct MoveCurrent;
 
 impl crate::live::Live for MoveCurrent {
-    fn activate(&self, _: &mut Ui, state: &State, n: u32, _: Option<Backend>) -> Result<()> {
+    fn activate(&self, _: &mut Ui, state: &State, n: u32) -> Result<()> {
         Ok(state.set_current(n)?)
     }
 }

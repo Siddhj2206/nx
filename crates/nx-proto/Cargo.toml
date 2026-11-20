@@ -11,7 +11,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-nx-core = { version = "1.0.1", path = "../nx-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

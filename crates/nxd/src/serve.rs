@@ -58,10 +58,7 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
     let request = nx_proto::read_request(stream)?;
     eprintln!("nxd: uid {} pid {}: {request:?}", peer.uid, peer.pid);
     match request {
-        Request::Activate {
-            generation,
-            backend,
-        } => {
+        Request::Activate { generation } => {
             ctx.authorizer.check(peer, ACTION_ACTIVATE)?;
             let _guard = lock(&ctx.lock)?;
             // Root, the owner of the state directory (nx), the caller and
@@ -79,10 +76,8 @@ fn respond(stream: &UnixStream, ctx: &Context) -> Result<Response> {
                 image: (ctx.image)(),
                 ..ctx.layout.clone()
             };
-            let done = nx_activate::activate(&layout, &*ctx.runner, generation, backend, &allowed)?;
+            let done = nx_activate::activate(&layout, &*ctx.runner, generation, &allowed)?;
             Ok(Response::Activated {
-                backend: done.backend,
-                fallback: done.fallback,
                 events: done.services.events,
                 warnings: done.services.warnings,
             })
@@ -138,7 +133,7 @@ mod tests {
 
     use nx_activate::{Layout, Output, Runner};
     use nx_core::generation::EXTENSION_RELEASE;
-    use nx_core::{Backend, Lock, Manifest, State};
+    use nx_core::{Lock, Manifest, State};
 
     use super::*;
     use crate::Authorizer;
@@ -247,13 +242,7 @@ mod tests {
     /// `current` exists afterwards (read while the fixture is still there).
     fn activate(tag: &str, allow: bool) -> std::io::Result<(nx_proto::Result<Response>, bool)> {
         let out = exchange(tag, allow, |socket| {
-            let response = nx_proto::call(
-                socket,
-                &Request::Activate {
-                    generation: 1,
-                    backend: None,
-                },
-            );
+            let response = nx_proto::call(socket, &Request::Activate { generation: 1 });
             let current = socket
                 .parent()
                 .is_some_and(|d| d.join("state/current").exists());
@@ -266,14 +255,7 @@ mod tests {
     fn an_authorized_activation_goes_through() -> std::io::Result<()> {
         let (response, current) = activate("allow", true)?;
         assert!(
-            matches!(
-                response,
-                Ok(Response::Activated {
-                    backend: Backend::Sysext,
-                    fallback: None,
-                    ..
-                })
-            ),
+            matches!(response, Ok(Response::Activated { .. })),
             "{response:?}"
         );
         assert!(current);
