@@ -46,10 +46,13 @@ pub struct Event {
 
 impl Event {
     /// Reads one line; `None` for one that isn't an `@nix` line. Each field
-    /// is read on its own, so one Nix renamed or retyped is only missing:
-    /// a missing `level` reads as quieter than any nx shows.
+    /// is read on its own, so one Nix renamed or retyped is only missing; a
+    /// message whose `level` is unreadable is classed by its text.
     pub fn parse(line: &str) -> Option<Self> {
-        let json = line.trim().strip_prefix("@nix")?;
+        let json = line
+            .trim()
+            .strip_prefix("@nix")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))?;
         let value: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
         let get = |k: &str| value.get(k);
         let text = |k: &str| {
@@ -60,14 +63,15 @@ impl Event {
         };
         let int = |k: &str| get(k).and_then(serde_json::Value::as_i64);
         let id = |k: &str| get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let msg = text("msg");
         Some(Self {
+            level: int("level").unwrap_or_else(|| level_of(&msg)),
+            msg,
             action: text("action"),
             id: id("id"),
             parent: id("parent"),
             kind: int("type").unwrap_or(-1),
-            level: int("level").unwrap_or(i64::MAX),
             text: text("text"),
-            msg: text("msg"),
             fields: get("fields")
                 .and_then(|v| v.as_array())
                 .cloned()
@@ -224,6 +228,20 @@ impl Tracker {
     /// Names the path a retried URL was for.
     pub fn retried(&self, url: &str) -> Option<&str> {
         self.urls.get(url).map(|p| store_name(p))
+    }
+}
+
+/// A message's level from its text, for one whose `level` field is
+/// unreadable: Nix starts errors with `error:` and warnings with `warning:`;
+/// anything else is talk, which nx doesn't show.
+fn level_of(msg: &str) -> i64 {
+    let text = strip_ansi(msg);
+    if text.starts_with("error:") {
+        LVL_ERROR
+    } else if text.starts_with("warning:") {
+        LVL_WARN
+    } else {
+        LVL_TALK
     }
 }
 
@@ -426,7 +444,7 @@ not json"#;
 @nix {"action":"stop","id":3}
 @nix {"action":"start","id":"4","level":3,"parent":0,"type":108,"fields":["/nix/store/5m5ri3ilhw2ihz9p6icdkzs5vbjm3a6b-jq-1.8.2","https://cache.nixos.org"]}
 @nix {"action":"msg","msg":"something new"}
-@nix {"action":"msg","level":"error","msg":"also new"}
+@nix {"action":"msg","level":"loud","msg":"also new"}
 @nix ["a","list"]
 @nix {"truncated":
 @nix
@@ -440,6 +458,24 @@ not json"#;
         assert_eq!(error_text(&lines), "nix failed without saying why");
         lines.push("error: plain words".into());
         assert_eq!(error_text(&lines), "plain words");
+    }
+
+    #[test]
+    fn a_message_without_a_readable_level_is_classed_by_its_text() {
+        let log = r#"@nix {"action":"msg","level":"error","msg":"\u001b[31;1merror:\u001b[0m attribute 'nope' missing"}
+@nix {"action":"msg","msg":"warning: Git tree is dirty"}
+@nix {"action":"msg","msg":"error (ignored): busy"}
+@nixos-rebuild is not an event"#;
+        assert_eq!(
+            notes(log),
+            [
+                Note::Error("attribute 'nope' missing".into()),
+                Note::Warning("Git tree is dirty".into()),
+                Note::Raw("@nixos-rebuild is not an event".into()),
+            ]
+        );
+        let lines: Vec<String> = log.lines().map(str::to_owned).collect();
+        assert_eq!(error_text(&lines[..3]), "attribute 'nope' missing");
     }
 
     #[test]
