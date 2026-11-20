@@ -1,8 +1,10 @@
 //! What nx's background jobs couldn't do, read once for every command
 //! that reports it: `nx doctor` lists it, `nx notify` sends it to the
 //! session. The root services leave the records: `sync-failures.json`
-//! (an image with no host tier), a generation's `skipped` (packages left
-//! out for an image), `upgrade-failure.json` (the weekly tool upgrade).
+//! (an image with no host tier), `rebuild-failures.json` (an image that
+//! keeps a generation nx meant to rebuild), a generation's `skipped`
+//! (packages left out for an image), `upgrade-failure.json` (the weekly
+//! tool upgrade).
 
 use nx_core::{Deployments, State, select};
 
@@ -12,6 +14,13 @@ pub enum Problem {
     /// An image has no host tier: what the last `nx sync` couldn't resolve.
     NoHostTier {
         /// "the booted image", "the staged update"…
+        image: String,
+        digest: String,
+        why: String,
+    },
+    /// An image keeps a generation `nx sync` meant to rebuild (an nx older
+    /// than the floor built it): the rebuild failed.
+    NotRebuilt {
         image: String,
         digest: String,
         why: String,
@@ -35,6 +44,13 @@ pub fn problems(state: &State, deployments: Option<&Deployments>) -> Vec<Problem
             image: role(deployments, digest),
             digest: digest.clone(),
             why: why.clone(),
+        });
+    }
+    for (digest, why) in select::rebuild_failures(state) {
+        out.push(Problem::NotRebuilt {
+            image: role(deployments, &digest),
+            digest,
+            why,
         });
     }
     let newest: Vec<(String, Option<u32>)> = match deployments {
@@ -111,12 +127,16 @@ mod tests {
             d.and_then(|d| d.image_digest.clone()).unwrap_or_default()
         };
         let (booted, rollback) = (digest(deployments.booted()), digest(deployments.rollback()));
-        let mut lock = nx_core::Lock::new(Some(booted), "45", "x86_64");
+        let mut lock = nx_core::Lock::new(Some(booted.clone()), "45", "x86_64");
         lock.skipped = vec!["copr-thing".into()];
         std::fs::write(state.generation_dir(1).join("lock.toml"), lock.to_toml()?)?;
         select::record_failures(
             &state,
             &BTreeMap::from([(rollback.clone(), "no gcc".into())]),
+        );
+        select::record_rebuild_failures(
+            &state,
+            &BTreeMap::from([(booted.clone(), "keeps generation 1: no network".into())]),
         );
         select::record_upgrade_failure(&state, Some("no network"));
         let found = problems(&state, Some(&deployments));
@@ -128,6 +148,11 @@ mod tests {
                     image: "the rollback image".into(),
                     digest: rollback,
                     why: "no gcc".into()
+                },
+                Problem::NotRebuilt {
+                    image: "the booted image".into(),
+                    digest: booted,
+                    why: "keeps generation 1: no network".into()
                 },
                 Problem::LeftOut {
                     image: "the booted image".into(),

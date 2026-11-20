@@ -237,24 +237,17 @@ struct Metadata {
 }
 
 impl Metadata {
-    /// Reads (search, info, sync) answer from the cache; only a repo with
-    /// nothing cached, or `--refresh`, waits on the network.
-    fn refresh(&self) -> nx_rpm::Refresh {
+    /// `--refresh` checks every repo; otherwise `mode`. Reads (search,
+    /// info, sync) pass `IfMissing`: they answer from the cache and wait on
+    /// the network only for a repo with nothing cached. Changes (add,
+    /// remove, upgrade, apply) pass `IfStale`: a repo past its
+    /// `metadata_expire` costs one `repomd.xml` fetch, and `primary` only
+    /// when it changed; offline, the cache answers, with a warning.
+    fn refresh(&self, mode: nx_rpm::Refresh) -> nx_rpm::Refresh {
         if self.refresh {
             nx_rpm::Refresh::Always
         } else {
-            nx_rpm::Refresh::IfMissing
-        }
-    }
-
-    /// A change (add, remove, upgrade, apply) also refreshes a repo past its
-    /// `metadata_expire`: one `repomd.xml` fetch, and `primary` only when it
-    /// changed. Offline, the cache answers, with a warning.
-    fn refresh_for_change(&self) -> nx_rpm::Refresh {
-        if self.refresh {
-            nx_rpm::Refresh::Always
-        } else {
-            nx_rpm::Refresh::IfStale
+            mode
         }
     }
 
@@ -267,7 +260,12 @@ impl Metadata {
             .as_ref()
             .map(|g| g.manifest.clone())
             .unwrap_or_default();
-        let universe = host::load(ui, &machine, self.refresh(), &manifest)?;
+        let universe = host::load(
+            ui,
+            &machine,
+            self.refresh(nx_rpm::Refresh::IfMissing),
+            &manifest,
+        )?;
         Ok((universe, current))
     }
 }
@@ -301,7 +299,7 @@ fn main() -> ExitCode {
             let opts = add::Options {
                 dry_run,
                 allow_scriptlets,
-                refresh: Some(metadata.refresh_for_change()),
+                refresh: Some(metadata.refresh(nx_rpm::Refresh::IfStale)),
                 forced: match (host, tool) {
                     (true, _) => Some(route::Forced::Host),
                     (_, true) => Some(route::Forced::Tool),
@@ -325,7 +323,7 @@ fn main() -> ExitCode {
                     &m,
                     (host, tool),
                     dry_run,
-                    metadata.refresh_for_change(),
+                    metadata.refresh(nx_rpm::Refresh::IfStale),
                 )
             });
             if timer {
@@ -344,7 +342,7 @@ fn main() -> ExitCode {
                 &m,
                 &packages,
                 dry_run,
-                metadata.refresh_for_change(),
+                metadata.refresh(nx_rpm::Refresh::IfStale),
             )
         }),
         Command::List => list::run(&mut ui),
@@ -363,7 +361,7 @@ fn main() -> ExitCode {
                 &m,
                 file.as_deref(),
                 dry_run,
-                metadata.refresh_for_change(),
+                metadata.refresh(nx_rpm::Refresh::IfStale),
             )
         }),
         Command::Why { what } => machine().and_then(|m| why::run(&mut ui, &m, &what)),
@@ -411,8 +409,22 @@ fn main() -> ExitCode {
             );
             info::run(&mut ui, &u, catalog.as_ref(), &manifest, &package)
         }),
-        Command::Sync { metadata, rebuild } => machine()
-            .and_then(|m| sync::run(&mut ui, &m, &nx_nix::System, metadata.refresh(), rebuild)),
+        Command::Sync { metadata, rebuild } => {
+            let rebuild = if rebuild {
+                sync::Rebuild::All
+            } else {
+                sync::Rebuild::Outdated
+            };
+            machine().and_then(|m| {
+                sync::run(
+                    &mut ui,
+                    &m,
+                    &nx_nix::System,
+                    metadata.refresh(nx_rpm::Refresh::IfMissing),
+                    rebuild,
+                )
+            })
+        }
         Command::Gc { dry_run } => {
             machine().and_then(|m| gc::run(&mut ui, &m, &nx_nix::System, dry_run))
         }

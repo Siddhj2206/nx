@@ -62,7 +62,19 @@ pub fn record_failures(state: &State, failures: &BTreeMap<String, String>) {
     write_record(state, SYNC_FAILURES, failures);
 }
 
+/// Why a deployed image keeps a generation `nx sync` meant to rebuild (an
+/// nx older than [`REBUILD_BEFORE`] built it), by digest.
+pub fn rebuild_failures(state: &State) -> BTreeMap<String, String> {
+    read_record(state, REBUILD_FAILURES)
+}
+
+/// Replaces the rebuild failure record, as [`record_failures`] does.
+pub fn record_rebuild_failures(state: &State, failures: &BTreeMap<String, String>) {
+    write_record(state, REBUILD_FAILURES, failures);
+}
+
 const SYNC_FAILURES: &str = "sync-failures";
+const REBUILD_FAILURES: &str = "rebuild-failures";
 const UPGRADE_FAILURE: &str = "upgrade-failure";
 
 /// Why the last `nx upgrade` the weekly timer ran failed, if it did.

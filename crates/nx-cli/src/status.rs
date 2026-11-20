@@ -65,7 +65,10 @@ pub fn run(
         };
         s.row(key, &value);
     }
-    s.row("Host tier", &host_tier(state, root, st));
+    s.row(
+        "Host tier",
+        &(host_tier(state, root, st) + &not_rebuilt(state, booted, st)),
+    );
     s.row("Tool tier", &tool_tier(state, root, st));
     s.blank();
     Ok(())
@@ -85,8 +88,9 @@ fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<
     }
     Some(match nx_core::select::newest_for(state, digest) {
         Ok(Some(n)) => {
-            let left_out = left_out(state, n, st);
-            st.dim(&format!("host tier: generation {n}")) + &left_out
+            st.dim(&format!("host tier: generation {n}"))
+                + &left_out(state, n, st)
+                + &not_rebuilt(state, d, st)
         }
         Ok(None) => st.yellow("no host tier yet (nx sync)"),
         Err(e) => st.yellow(&format!("host tier unreadable: {e}")),
@@ -107,6 +111,16 @@ fn host_tier(state: &State, root: &Path, st: crate::ui::Style) -> String {
         Ok(None) => st.dim("nothing added yet"),
         Err(e) => st.yellow(&format!("unreadable: {e}")),
     }
+}
+
+/// `  not rebuilt, keeps generation N: …` when `nx sync` couldn't rebuild the generation an
+/// older nx built for this image.
+fn not_rebuilt(state: &State, d: &Deployment, st: crate::ui::Style) -> String {
+    d.image_digest
+        .as_deref()
+        .and_then(|digest| nx_core::select::rebuild_failures(state).remove(digest))
+        .map(|why| format!("  {}", st.yellow(&format!("not rebuilt, {why}"))))
+        .unwrap_or_default()
 }
 
 /// The current generation's nixpkgs release and how many tools it has.

@@ -129,12 +129,19 @@ pub fn checks(i: &Inputs) -> Vec<Finding> {
                 ),
                 "nx sync --refresh tries again",
             ),
+            Problem::NotRebuilt { image, digest, why } => warn(
+                format!(
+                    "{image} ({}) wasn't rebuilt and {why}",
+                    ui::short_digest(&digest)
+                ),
+                "nx sync tries again",
+            ),
             Problem::LeftOut { image, packages } => warn(
                 format!(
                     "{image} leaves out {}: they don't resolve for it",
                     packages.join(", ")
                 ),
-                "the daily nx sync --refresh tries again",
+                "the next nx sync --refresh tries again",
             ),
             Problem::UpgradeFailed(why) => warn(
                 format!("the weekly tool upgrade failed: {why}"),

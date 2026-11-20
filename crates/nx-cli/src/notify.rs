@@ -109,10 +109,14 @@ pub fn notes(state: &State, deployments: Option<&Deployments>) -> Vec<Note> {
                 summary: format!("nx couldn't set up packages for {image}"),
                 body: format!("{why}. nx status has the details."),
             },
+            Problem::NotRebuilt { image, why, .. } => Note {
+                summary: format!("nx couldn't rebuild packages for {image}"),
+                body: format!("It {why}. nx status has the details."),
+            },
             Problem::LeftOut { image, packages } => Note {
                 summary: format!("nx left packages out for {image}"),
                 body: format!(
-                    "{} didn't resolve for it; nx tries again daily.",
+                    "{} didn't resolve for it; nx tries again every 6 hours.",
                     packages.join(", ")
                 ),
             },

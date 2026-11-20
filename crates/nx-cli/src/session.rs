@@ -702,11 +702,25 @@ impl<'m> Session<'m> {
         }
         // The sync below takes the lock itself, once per image.
         self.guard = None;
-        match crate::sync::deployed(ui, self.machine, &self.env.state, Refresh::IfMissing, false) {
-            Ok(d) if !d.unbuilt.is_empty() => {
-                ui.warn(format_args!("{}\nnx sync retries", d.unbuilt.join("\n")));
+        let rebuild = crate::sync::Rebuild::Outdated;
+        match crate::sync::deployed(
+            ui,
+            self.machine,
+            &self.env.state,
+            Refresh::IfMissing,
+            rebuild,
+        ) {
+            Ok(d) => {
+                let failed: Vec<&str> = d
+                    .unbuilt
+                    .iter()
+                    .chain(&d.not_rebuilt)
+                    .map(String::as_str)
+                    .collect();
+                if !failed.is_empty() {
+                    ui.warn(format_args!("{}\nnx sync retries", failed.join("\n")));
+                }
             }
-            Ok(_) => {}
             Err(e) => ui.warn(format_args!(
                 "the staged and rollback images were not updated: {e:#}\nnx sync retries"
             )),
