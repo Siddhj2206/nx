@@ -3,7 +3,9 @@
 #   ~/.local/share/nx-vm/vm ssh 'bash -s -- <phase>' < tests/vm/m6.sh
 #   phase add     nx add ripgrep: a tool with no Nix profile and no Nix env on
 #                 PATH, rooted in the generation, on PATH through profile.d
-#   phase unfree  an unfree tool is refused, then installs once allowed
+#   phase unfree  an unfree tool is refused, pointing to a vendor repo or
+#                 Flatpak
+#   phase build   neovim, a wrapper no cache has, builds from its derivation
 #   phase gc      removing it and nx gc lets nix store gc delete it; ripgrep
 #                 stays
 set -euo pipefail
@@ -41,38 +43,42 @@ add)
 	;;
 unfree)
 	if as tester "nx add ngrok" 2>/tmp/m6-refused.txt; then
-		fail "an unfree tool installed without being allowed"
+		fail "an unfree tool installed"
 	fi
-	grep -q 'allow-unfree' /tmp/m6-refused.txt || fail "the refusal doesn't say how to allow it: $(cat /tmp/m6-refused.txt)"
-	as tester "nx add --allow-unfree ngrok" 2>&1 | tee /tmp/m6-unfree.txt
-	grep -q '+ ngrok' /tmp/m6-unfree.txt || fail "ngrok was not added"
-	bare ngrok version || fail "ngrok does not run"
-	grep -q '"ngrok"' /var/lib/nx/current/manifest.toml || fail "the allowance is not in the manifest"
+	grep -q 'Flatpak' /tmp/m6-refused.txt || fail "the refusal doesn't say where to get it: $(cat /tmp/m6-refused.txt)"
+	grep -q 'ngrok' /var/lib/nx/current/manifest.toml && fail "the refused package is in the manifest"
 	echo "unfree: ok"
 	;;
+build)
+	as tester "nx list" | grep -q '^  neovim ' && as tester "nx remove neovim" >/dev/null
+	as tester "nx add neovim" 2>&1 | tee /tmp/m6-build.txt
+	grep -q 'building' /tmp/m6-build.txt || fail "neovim was not built from its derivation"
+	grep -q '+ neovim' /tmp/m6-build.txt || fail "neovim was not added"
+	bare nvim --version | head -1 || fail "nvim does not run"
+	echo "build: ok"
+	;;
 gc)
-	ngrok=""
-	for shim in /var/lib/nx/generations/*/shims/ngrok; do
-		[[ -e $shim ]] && ngrok=$(<"$shim") && break
+	nvim=""
+	for shim in /var/lib/nx/generations/*/shims/nvim; do
+		[[ -e $shim ]] && nvim=$(<"$shim") && break
 	done
-	ngrok=${ngrok%/bin/ngrok}
-	[[ -n $ngrok ]] || fail "no generation has ngrok; run the unfree phase first"
-	if as tester "nx list" | grep -q '^  ngrok '; then
-		as tester "nx remove ngrok"
+	nvim=${nvim%/bin/nvim}
+	[[ -n $nvim ]] || fail "no generation has neovim; run the build phase first"
+	if as tester "nx list" | grep -q '^  neovim '; then
+		as tester "nx remove neovim"
 	fi
-	grep -q 'ngrok' /var/lib/nx/current/manifest.toml && fail "the allowance stayed in the manifest"
 	# A wheel user's gc: generations nx-sync.service built as root can't be
 	# removed by tester, so gc sets them aside for root's next gc.
 	as tester "nx gc" 2>&1 | tee /tmp/m6-gc.txt
 	for g in /var/lib/nx/generations/[0-9]*; do
 		[[ -e $g/lock.toml ]] || fail "$g is left without its lockfile"
 	done
-	if [[ -e $ngrok ]]; then
-		grep -lq "$ngrok" /var/lib/nx/generations/[0-9]*/lock.toml ||
-			fail "$ngrok survived nix store gc with no generation using it"
-		echo "$ngrok is still used by a kept generation (gc.keep, 5 by default)"
+	if [[ -e $nvim ]]; then
+		grep -lq "$nvim" /var/lib/nx/generations/[0-9]*/lock.toml ||
+			fail "$nvim survived nix store gc with no generation using it"
+		echo "$nvim is still used by a kept generation (gc.keep, 5 by default)"
 	else
-		echo "$ngrok is gone"
+		echo "$nvim is gone"
 	fi
 	nx gc >/dev/null
 	if compgen -G '/var/lib/nx/generations/.trash-*' >/dev/null ||

@@ -214,7 +214,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             );
             out.row("Repo", &package.repo);
             let reason = if package.requested.contains(&package.name) {
-                you_added(style, route.as_deref(), false)
+                you_added(style, route.as_deref())
             } else {
                 format!("needed by {}", package.requested.join(", "))
             };
@@ -252,7 +252,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             {
                 out.row("Runs", &c.path);
             }
-            out.row("Why", &you_added(style, route.as_deref(), package.unfree));
+            out.row("Why", &you_added(style, route.as_deref()));
             out.row("Generation", &generation_row(style, *current, *added));
         }
         Owner::Image(p) => {
@@ -275,12 +275,10 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
     out.blank();
 }
 
-/// `you added it · <why nx add routed it there>`. The recorded reason
-/// already says whether an unfree package was allowed.
-fn you_added(style: ui::Style, route: Option<&str>, unfree: bool) -> String {
+/// `you added it · <why nx add routed it there>`.
+fn you_added(style: ui::Style, route: Option<&str>) -> String {
     match route {
         Some(r) => format!("you added it {}", style.dim(&format!("· {r}"))),
-        None if unfree => format!("you added it {}", style.dim("· unfree, allowed")),
         None => "you added it".to_owned(),
     }
 }

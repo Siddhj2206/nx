@@ -28,8 +28,7 @@ pub fn run(
             installed: p.installed,
             plugs: universe.plugs_in(p, &toolchains),
         }),
-        nix: nix
-            .map(|p| route::Nixpkg::new(p, manifest.tool.unfree.contains(&p.pname), &toolchains)),
+        nix: nix.map(|p| route::Nixpkg::new(p, &toolchains)),
         similar: Vec::new(),
     };
     let route = route::decide(spec, None, manifest.routing.cli_tools, &found);

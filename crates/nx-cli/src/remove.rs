@@ -42,9 +42,8 @@ pub fn run(
     session::finish(ui, &mut session, &outcome, started)
 }
 
-/// Takes `specs` out of `m`. A tool package's unfree allowance goes with
-/// it, unless a package that stays has the same name; an entry nx can't
-/// match to a package is the user's to remove.
+/// Takes `specs` out of `m`: a tool package by its attribute, name or
+/// command.
 fn drop_from(m: &mut Manifest, tool: &LockedTool, specs: &[String]) -> Result<()> {
     let specs: Vec<String> = specs.iter().map(|s| attr_for(m, tool, s)).collect();
     let (tools, hosts): (Vec<String>, Vec<String>) =
@@ -57,18 +56,6 @@ fn drop_from(m: &mut Manifest, tool: &LockedTool, specs: &[String]) -> Result<()
         );
     }
     m.tool.packages.retain(|a| !tools.contains(a));
-    let stays = |name: &str| {
-        tool.packages
-            .iter()
-            .any(|k| k.name == name && m.tool.packages.contains(&k.attr))
-    };
-    let gone: Vec<String> = tool
-        .packages
-        .iter()
-        .filter(|p| tools.contains(&p.attr) && !stays(&p.name))
-        .map(|p| p.name.clone())
-        .collect();
-    m.tool.unfree.retain(|n| !gone.contains(n));
     Ok(())
 }
 
@@ -121,15 +108,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unfree_allowance_leaves_with_its_last_package() -> Result<()> {
+    fn drops_by_attribute_or_command() -> Result<()> {
         let mut m = Manifest::default();
         m.add_tool(&["terraform".into(), "terraform_1".into(), "ngrok".into()]);
-        m.tool.unfree = vec!["terraform".into(), "ngrok".into(), "vault".into()];
         drop_from(&mut m, &tool(), &["terraform".into(), "ngrok".into()])?;
-        // terraform_1 still needs it; vault isn't nx's to judge.
-        assert_eq!(m.tool.unfree, ["terraform", "vault"]);
+        assert_eq!(m.tool.packages, ["terraform_1"]);
         drop_from(&mut m, &tool(), &["terraform1".into()])?;
-        assert_eq!(m.tool.unfree, ["vault"]);
+        assert!(m.tool.packages.is_empty());
         assert!(drop_from(&mut m, &tool(), &["nope".into()]).is_err());
         Ok(())
     }

@@ -1,8 +1,8 @@
 //! Shell completion and man pages, both from clap's definitions. The shell
 //! asks `nx` itself for completions (`COMPLETE=fish nx`, clap_complete's
 //! dynamic engine), so values are live: what is installed for `remove`,
-//! the pinned release's nixpkgs attributes for `add`, the added repos and
-//! caches for their `remove`. Each reads one small file; none loads the
+//! the pinned release's nixpkgs attributes for `add`, the added repos for
+//! `repo remove`. Each reads one small file; none loads the
 //! repos.
 
 use std::ffi::OsStr;
@@ -45,11 +45,6 @@ pub fn installed() -> Vec<CompletionCandidate> {
 /// `nx repo remove`: the repos nx added.
 pub fn repos() -> Vec<CompletionCandidate> {
     candidates(manifest().repos.into_iter().map(|r| r.name))
-}
-
-/// `nx cache remove`: the caches nx added.
-pub fn caches() -> Vec<CompletionCandidate> {
-    candidates(manifest().caches.into_iter().map(|c| c.url))
 }
 
 /// `nx add`: attributes of the pinned release's catalog that start with

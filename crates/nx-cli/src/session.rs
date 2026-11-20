@@ -195,6 +195,14 @@ impl<'m> Session<'m> {
             .map(|g| g.manifest.clone())
             .unwrap_or_default();
         change(&mut manifest)?;
+        let obsolete = manifest.obsolete();
+        if !obsolete.is_empty() {
+            ui.warn(format_args!(
+                "manifest.toml's {} did nothing since nx 1.1 (no unfree tools, no extra Nix caches); delete {} from it",
+                obsolete.join(" and "),
+                if obsolete.len() == 1 { "it" } else { "them" }
+            ));
+        }
         let cache = host::cache_dir_for(state)?;
         let universe = host::load_from(ui, machine, refresh, &manifest, &*env.http, cache)?;
         let keys = Keys::new(machine, state, current.as_ref(), &manifest);
@@ -319,9 +327,9 @@ impl<'m> Session<'m> {
             bail!("the nixpkgs release didn't open");
         };
         let locked = tier.resolve(ui, nix, &manifest, previous.as_ref(), &system)?;
-        let plan = tier.plan(&locked, &manifest.caches)?;
+        let plan = tier.plan(&locked)?;
         if !dry_run {
-            tier.realise(ui, nix, &locked, &plan, &manifest, &system)?;
+            tier.realise(ui, nix, &locked, &plan, &system)?;
         }
         self.tool = Some(locked);
         Ok(plan.sum.download)
@@ -362,9 +370,9 @@ impl<'m> Session<'m> {
         }
         let mut download = 0;
         if !self.dry_run {
-            let plan = tier.plan(&locked, &manifest.caches)?;
+            let plan = tier.plan(&locked)?;
             download = plan.sum.download;
-            tier.realise(ui, &*self.env.nix, &locked, &plan, &manifest, &system)?;
+            tier.realise(ui, &*self.env.nix, &locked, &plan, &system)?;
         }
         let version = tier.release.version();
         let moved = if same_pin {
@@ -591,7 +599,7 @@ impl<'m> Session<'m> {
         // Collected since it was realised: fetch it again. If that fails,
         // the host tier still gets its generation, without those commands.
         if crate::tool::incomplete(&tool)
-            && let Err(e) = crate::tool::restore(ui, &*self.env.nix, &tool, &manifest.caches)
+            && let Err(e) = crate::tool::restore(ui, &*self.env.nix, &tool)
         {
             ui.warn(format_args!(
                 "tool-tier commands whose Nix paths are gone are left out until nx upgrade --tool: {e:#}"

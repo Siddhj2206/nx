@@ -19,7 +19,7 @@ pub use deployment::{
 };
 pub use generation::{Activation, ActivationPackage, Built, Generation, Readable, Refusal};
 pub use lockfile::{Bin, Lock, LockedPackage, LockedRepo, LockedTool, ToolOutput, ToolPackage};
-pub use manifest::{CacheEntry, CliTools, Https, Manifest, RepoEntry, ScriptletAllow};
+pub use manifest::{CliTools, Https, Manifest, RepoEntry, ScriptletAllow};
 pub use os_release::OsRelease;
 pub use state::{Backend, State, Store};
 

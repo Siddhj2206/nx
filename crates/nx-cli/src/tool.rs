@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nx_core::{Bin, CacheEntry, Generation, LockedTool, Manifest, State, ToolOutput, ToolPackage};
+use nx_core::{Bin, Generation, LockedTool, Manifest, State, ToolOutput, ToolPackage};
 use nx_nix::eval::{self, Evaluated};
 use nx_nix::log::Note;
 use nx_nix::narinfo::{self, Caches, Sum};
@@ -118,7 +118,7 @@ impl Tier {
             .filter(|a| kept(a).is_none())
             .cloned()
             .collect();
-        let evaluated = self.evaluate(ui, nix, &new, &manifest.tool.unfree, system)?;
+        let evaluated = self.evaluate(ui, nix, &new, system)?;
         let (packages, holding) = lock(
             manifest,
             &evaluated,
@@ -140,7 +140,6 @@ impl Tier {
         ui: &mut Ui,
         nix: &dyn Nix,
         attrs: &[String],
-        unfree: &[String],
         system: &str,
     ) -> Result<BTreeMap<String, Evaluated>> {
         if attrs.is_empty() {
@@ -151,13 +150,12 @@ impl Tier {
             attrs.join(", "),
             self.release.version()
         ));
-        eval::evaluate(nix, &self.release.nixexprs(), system, attrs, unfree)
-            .context("evaluating nixpkgs")
+        eval::evaluate(nix, &self.release.nixexprs(), system, attrs).context("evaluating nixpkgs")
     }
 
     /// What realising `tool` takes: the closure of what isn't in the store
-    /// yet, from the binary caches.
-    pub fn plan(&self, tool: &LockedTool, caches: &[CacheEntry]) -> Result<Plan> {
+    /// yet, from cache.nixos.org.
+    pub fn plan(&self, tool: &LockedTool) -> Result<Plan> {
         let roots: Vec<String> = tool
             .packages
             .iter()
@@ -170,10 +168,10 @@ impl Tier {
         }
         let lookup = Caches {
             web: &self.web,
-            urls: substituters(caches),
+            urls: vec![nx_nix::CACHE.to_owned()],
         };
-        let closure = narinfo::closure(&lookup, &roots, &|p| local(p))
-            .context("reading the binary caches")?;
+        let closure =
+            narinfo::closure(&lookup, &roots, &|p| local(p)).context("reading the binary cache")?;
         Ok(plan_from(tool, &closure))
     }
 
@@ -186,7 +184,6 @@ impl Tier {
         nix: &dyn Nix,
         tool: &LockedTool,
         plan: &Plan,
-        manifest: &Manifest,
         system: &str,
     ) -> Result<()> {
         if plan.is_empty() {
@@ -198,7 +195,7 @@ impl Tier {
             .filter(|p| plan.build.contains(&p.attr) && !Path::new(&p.drv).exists())
             .map(|p| p.attr.clone())
             .collect();
-        self.evaluate(ui, nix, &lost, &manifest.tool.unfree, system)?;
+        self.evaluate(ui, nix, &lost, system)?;
         if plan.sum.paths > plan.sum.unbuilt {
             ui.step(format_args!(
                 "fetching {} from the Nix caches · {} ({} unpacked)",
@@ -213,8 +210,7 @@ impl Tier {
                 plan.build.join(", ")
             ));
         }
-        let urls: Vec<String> = manifest.caches.iter().map(|c| c.url.clone()).collect();
-        nx_nix::nix::realise(nix, &plan.installables, &urls, &mut |note| {
+        nx_nix::nix::realise(nix, &plan.installables, &mut |note| {
             draw(ui, note);
         })
         .with_context(|| realise_failed(&plan.build))
@@ -265,7 +261,6 @@ fn lock<'a>(
                     })
                     .collect(),
                 bins: Vec::new(),
-                unfree: manifest.tool.unfree.contains(name),
             }),
             Some(Evaluated::Refused {
                 unfree,
@@ -283,20 +278,19 @@ fn lock<'a>(
     Ok((packages, holding))
 }
 
-/// What a failed realise says. A package no cache has was built here, and
-/// for an unfree one that is the vendor's download repackaged: the vendor
-/// may have an RPM repo or an installer that works without the build.
+/// What a failed realise says: a package no cache has was built here.
 fn realise_failed(built: &[String]) -> String {
     if built.is_empty() {
         return "realising the tool tier".to_owned();
     }
-    let names = built.join(", ");
     format!(
-        "realising the tool tier, which builds {names} here since no binary cache has \
-         {them}; if the vendor publishes an RPM repo, nx repo add <its .repo URL> and then \
-         nx add --host <its package> take it from there; otherwise use the vendor's \
-         installer",
-        them = if built.len() == 1 { "it" } else { "them" }
+        "realising the tool tier, which builds {} here since cache.nixos.org has {}",
+        built.join(", "),
+        if built.len() == 1 {
+            "no build of it"
+        } else {
+            "no build of them"
+        }
     )
 }
 
@@ -323,7 +317,7 @@ pub fn catalog_to_read(ui: &mut Ui, pinned_to: Option<&LockedTool>) -> Option<Ca
 /// What a refused evaluation means for the user.
 fn refused(attr: &str, unfree: bool, broken: bool, insecure: bool) -> String {
     if unfree {
-        format!("{attr} is unfree; if its license is fine with you: nx add --allow-unfree {attr}")
+        crate::route::unfree(attr)
     } else if broken {
         format!("{attr} is marked broken in nixpkgs")
     } else if insecure {
@@ -349,13 +343,6 @@ fn draw(ui: &mut Ui, note: Note) {
         // The failed run's error carries it.
         Note::Built { .. } | Note::Error(_) | Note::Raw(_) => {}
     }
-}
-
-/// cache.nixos.org, then the manifest's extra caches.
-fn substituters(caches: &[CacheEntry]) -> Vec<String> {
-    std::iter::once(nx_nix::CACHE.to_owned())
-        .chain(caches.iter().map(|c| c.url.clone()))
-        .collect()
 }
 
 fn local(path: &str) -> bool {
@@ -679,8 +666,8 @@ pub fn incomplete(tool: &LockedTool) -> bool {
 
 /// Realises again the outputs of `tool` the store lost: from their
 /// derivation when it is still there (Nix substitutes what a cache has and
-/// builds the rest), else by store path from the caches.
-pub fn restore(ui: &mut Ui, nix: &dyn Nix, tool: &LockedTool, caches: &[CacheEntry]) -> Result<()> {
+/// builds the rest), else by store path from the cache.
+pub fn restore(ui: &mut Ui, nix: &dyn Nix, tool: &LockedTool) -> Result<()> {
     let mut installables = Vec::new();
     for p in &tool.packages {
         let lost: Vec<&ToolOutput> = p.outputs.iter().filter(|o| !local(&o.path)).collect();
@@ -697,8 +684,7 @@ pub fn restore(ui: &mut Ui, nix: &dyn Nix, tool: &LockedTool, caches: &[CacheEnt
         return Ok(());
     }
     ui.step("fetching tool-tier paths the Nix store no longer has");
-    let urls: Vec<String> = caches.iter().map(|c| c.url.clone()).collect();
-    nx_nix::nix::realise(nix, &installables, &urls, &mut |note| draw(ui, note))
+    nx_nix::nix::realise(nix, &installables, &mut |note| draw(ui, note))
         .context("realising the tool tier again")
 }
 
@@ -805,13 +791,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_build_points_to_the_vendor() {
+    fn a_failed_build_names_what_was_built() {
         assert_eq!(realise_failed(&[]), "realising the tool tier");
         assert_eq!(
-            realise_failed(&["ngrok".into()]),
-            "realising the tool tier, which builds ngrok here since no binary cache has it; \
-             if the vendor publishes an RPM repo, nx repo add <its .repo URL> and then nx add \
-             --host <its package> take it from there; otherwise use the vendor's installer"
+            realise_failed(&["neovim".into()]),
+            "realising the tool tier, which builds neovim here since cache.nixos.org has no \
+             build of it"
         );
     }
 

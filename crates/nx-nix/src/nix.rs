@@ -61,27 +61,12 @@ impl Nix for System {
     }
 }
 
-/// `--option extra-substituters …` for `caches` beyond cache.nixos.org. The
-/// daemon honours them from an untrusted user only once nxd has listed them
-/// in `trusted-substituters` (design, *Unfree and uncached packages*).
-fn substituters(caches: &[String]) -> Vec<String> {
-    if caches.is_empty() {
-        return Vec::new();
-    }
-    vec![
-        "--option".to_owned(),
-        "extra-substituters".to_owned(),
-        caches.join(" "),
-    ]
-}
-
 /// Realises `installables` (store paths, or `<drv>^<outputs>` for what no
 /// cache has) through the daemon, handing each note of its log to
 /// `on_note`. Links nothing: the generation's roots come after.
 pub fn realise(
     nix: &dyn Nix,
     installables: &[String],
-    caches: &[String],
     on_note: &mut dyn FnMut(log::Note),
 ) -> Result<()> {
     if installables.is_empty() {
@@ -90,7 +75,6 @@ pub fn realise(
     let mut args: Vec<String> = ["build", "--no-link", "--log-format", "internal-json", "-v"]
         .map(String::from)
         .to_vec();
-    args.extend(substituters(caches));
     args.extend(installables.iter().cloned());
     let mut tracker = log::Tracker::new();
     nix.run(&args, &mut |line| {
@@ -181,16 +165,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn realises_with_the_extra_caches_and_reports_fetches() -> Result<()> {
+    fn realises_and_reports_fetches() -> Result<()> {
         let nix = Fake::logging(include_str!("../../../testdata/nix-build-storepath.jsonl"));
         let mut notes = Vec::new();
         let path = "/nix/store/kzg6alm5cpb735v0xxchyihhbfbg7ffh-hyperfine-2.0.0".to_owned();
-        realise(
-            &nix,
-            std::slice::from_ref(&path),
-            &["https://nix-community.cachix.org".to_owned()],
-            &mut |n| notes.push(n),
-        )?;
+        realise(&nix, std::slice::from_ref(&path), &mut |n| notes.push(n))?;
         assert_eq!(
             notes,
             [log::Note::Fetched {
@@ -200,12 +179,6 @@ pub(crate) mod tests {
         );
         let args = &nix.calls()[0];
         assert_eq!(args[0], "build");
-        assert!(args.windows(3).any(|w| w
-            == [
-                "--option",
-                "extra-substituters",
-                "https://nix-community.cachix.org"
-            ]));
         assert_eq!(args.last(), Some(&path));
         add_roots(
             &nix,

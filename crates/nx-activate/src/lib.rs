@@ -67,8 +67,8 @@ pub struct Layout {
     pub file_contexts: Option<PathBuf>,
     /// The booted image's own tree, which an extension must not shadow.
     pub image: Image,
-    /// Nix's configuration directory (`/etc/nix`), where the generation's
-    /// extra caches are listed; `None` when Nix isn't installed.
+    /// Nix's configuration directory (`/etc/nix`), where nx 1.0 listed
+    /// extra caches ([`nixconf`]); `None` when Nix isn't installed.
     pub nix_conf: Option<PathBuf>,
 }
 
@@ -190,7 +190,7 @@ pub fn activate(
     let merged = merged_now(layout);
     let mut services = Services::default();
     if let Some(dir) = &layout.nix_conf {
-        nixconf::apply(dir, runner, &valid.caches, &mut services);
+        nixconf::clean(dir, runner, &mut services);
     }
     if forced == Some(Backend::Prefix) {
         unmerge_units(runner, &layout.root, merged.as_ref(), &mut services);
