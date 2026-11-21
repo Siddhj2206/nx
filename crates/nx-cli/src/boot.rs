@@ -117,9 +117,7 @@ fn select(ui: &mut Ui) -> Result<()> {
             let image_root = machine.image_root()?;
             let shim = crate::tool::shim(&state);
             if let Err(e) = &shim {
-                ui.warn(format_args!(
-                    "the tool tier is left out until nx sync: {e:#}"
-                ));
+                ui.warn_error("the tool tier is left out until nx sync", e);
                 lock.tool = None;
             }
             let built = generation::build(

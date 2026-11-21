@@ -33,16 +33,18 @@ pub fn check(machine: &Machine, generation: &Generation) -> Result<(), String> {
             lock.arch, machine.arch
         ));
     }
-    let image_root = machine.image_root().map_err(|e| format!("{e:#}"))?;
+    let image_root = machine
+        .image_root()
+        .map_err(|e| crate::ui::Problem::from_error(&e).one_line())?;
     nx_core::generation::check_extension(&generation.sysext(), &image_root)
         .map_err(|e| e.to_string())?;
     if lock.host.is_empty() {
         return Ok(());
     }
-    let cache = host::cache_dir().map_err(|e| format!("{e:#}"))?;
+    let cache = host::cache_dir().map_err(|e| crate::ui::Problem::from_error(&e).one_line())?;
     let mut opts = machine.options(Refresh::Never, cache);
-    opts.extra =
-        host::added_repos(&generation.manifest, &opts.vars).map_err(|e| format!("{e:#}"))?;
+    opts.extra = host::added_repos(&generation.manifest, &opts.vars)
+        .map_err(|e| crate::ui::Problem::from_error(&e).one_line())?;
     let mut universe =
         Universe::load(&opts, &Ureq::new(), &mut |_| {}).map_err(|e| e.to_string())?;
     if let Some(skipped) = universe.skipped.first() {

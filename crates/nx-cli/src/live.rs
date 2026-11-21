@@ -46,14 +46,17 @@ pub fn activate(ui: &mut Ui, state: &State, number: u32) -> Result<()> {
     let started = Instant::now();
     let request = Request::Activate { generation: number };
     let response = nx_proto::call(&socket(), &request).map_err(|e| match e {
-        nx_proto::Error::Unavailable { .. } => anyhow::Error::new(e).context(
-            "generation is built but not live; nxd is not running (systemctl enable --now nxd.socket)",
-        ),
+        nx_proto::Error::Unavailable { .. } => {
+            crate::ui::Problem::new("the change is built but not live: nxd is not running")
+                .reason(e.to_string())
+                .fix("Start it", "sudo systemctl enable --now nxd.socket")
+                .into()
+        }
         e => anyhow::Error::new(e).context("asking nxd to activate the generation"),
     })?;
     let live = match response {
         Response::Activated { events, warnings } => {
-            ui.step(format_args!(
+            ui.detail(format_args!(
                 "generation {number} is live · {} ms",
                 started.elapsed().as_millis()
             ));

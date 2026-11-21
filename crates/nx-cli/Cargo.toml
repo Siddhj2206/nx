@@ -25,6 +25,8 @@ nx-http = { version = "1.0.1", path = "../nx-http" }
 nx-nix = { version = "1.0.1", path = "../nx-nix" }
 nx-proto = { version = "1.0.1", path = "../nx-proto" }
 nx-rpm = { version = "1.0.1", path = "../nx-rpm" }
+nx-scriptlet = { version = "1.0.1", path = "../nx-scriptlet" }
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 clap_mangen = "0.3.3"
 jiff = "1.0.1"
+unicode-width = "0.2.3"

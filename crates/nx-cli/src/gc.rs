@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use nx_core::{Generation, State, select};
 use nx_nix::Nix;
 
-use crate::host::{self, Machine};
+use crate::host::{self, Machine, Role};
 use crate::tool;
 use crate::ui::{self, Stream, Ui};
 
@@ -21,19 +21,19 @@ use crate::ui::{self, Stream, Ui};
 /// tool tiers (the weekly upgrade leaves one each time) would otherwise stay
 /// until someone runs `nx gc`. Returns how many generations were removed.
 pub fn collect(ui: &mut Ui, machine: &Machine, nix: Option<&dyn Nix>) -> Result<usize> {
-    let (dropped, packages, keep) = remove(machine, false)?;
-    if !dropped.is_empty() || packages > 0 {
-        render(&mut ui.out, &dropped, packages, false);
+    let (removal, keep) = remove(machine, false)?;
+    if removal.generations() > 0 || removal.packages > 0 {
+        render(&mut ui.out, &removal, false);
     }
     let state = host::state();
     if let Some(nix) = nix.filter(|n| n.available() && nix_gc_due(&state)) {
         // The host tier is done; a Nix failure is only a warning here.
         match collect_nix(ui, nix, &state, &keep) {
             Ok(()) => record_nix_gc(&state),
-            Err(e) => ui.warn(format_args!("the Nix store was not collected: {e:#}")),
+            Err(e) => ui.warn_error("the Nix store was not collected", &e),
         }
     }
-    Ok(dropped.len())
+    Ok(removal.generations())
 }
 
 /// How often the refresh timer (every 6 h) also collects the Nix store.
@@ -59,8 +59,8 @@ fn record_nix_gc(state: &State) {
 }
 
 pub fn run(ui: &mut Ui, machine: &Machine, nix: &dyn Nix, dry_run: bool) -> Result<()> {
-    let (dropped, packages, keep) = remove(machine, dry_run)?;
-    render(&mut ui.out, &dropped, packages, dry_run);
+    let (removal, keep) = remove(machine, dry_run)?;
+    render(&mut ui.out, &removal, dry_run);
     if !dry_run && nix.available() {
         let state = host::state();
         collect_nix(ui, nix, &state, &keep)?;
@@ -84,7 +84,7 @@ fn collect_nix(ui: &mut Ui, nix: &dyn Nix, state: &State, keep: &[u32]) -> Resul
                     "generation {n}'s Nix paths have no GC roots, so nix store gc would delete them"
                 )
             })?;
-            ui.step(format_args!("rooted generation {n}'s Nix paths"));
+            ui.detail(format_args!("rooted generation {n}'s Nix paths"));
         }
     }
     let freed = nx_nix::nix::collect_garbage(nix).context("running nix store gc")?;
@@ -101,9 +101,25 @@ fn collect_nix(ui: &mut Ui, nix: &dyn Nix, state: &State, keep: &[u32]) -> Resul
     Ok(())
 }
 
+/// What a gc removes (or would): generations by the image they were built
+/// for, store entries, and the space that frees.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Removal {
+    /// "this image", "the rollback image"… and how many of its.
+    by_image: Vec<(String, usize)>,
+    packages: usize,
+    freed: u64,
+}
+
+impl Removal {
+    fn generations(&self) -> usize {
+        self.by_image.iter().map(|(_, n)| n).sum()
+    }
+}
+
 /// What `nx gc` drops: generations and unused store entries. Removes them
 /// unless `dry_run`. Also returns the generations kept.
-fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>)> {
+fn remove(machine: &Machine, dry_run: bool) -> Result<(Removal, Vec<u32>)> {
     let state = host::state();
     // Off a bootc system nothing is deployed; on one, `Machine::read` has
     // already refused to go on without the deployments.
@@ -116,12 +132,11 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
     let guard = if dry_run {
         None
     } else {
-        Some(state.lock().with_context(|| {
-            format!(
-                "removing generations needs an administrator (a member of wheel): no write access to {}",
-                state.root().display()
-            )
-        })?)
+        Some(
+            state
+                .lock()
+                .map_err(|e| host::not_allowed(&state, "removing generations", e))?,
+        )
     };
     // The current manifest says how many to keep.
     let keep = state
@@ -135,6 +150,26 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
         );
     let plan = select::gc_plan(&state, &deployed, keep)?;
     let store = select::unreferenced(&state, &plan.keep)?;
+    let mut by_image: Vec<(String, usize)> = Vec::new();
+    for n in &plan.drop {
+        let image = select::read_lock(&state, *n).ok().and_then(|l| l.image);
+        let role = role(machine, image.as_deref());
+        match by_image.iter_mut().find(|(r, _)| *r == role) {
+            Some((_, count)) => *count += 1,
+            None => by_image.push((role, 1)),
+        }
+    }
+    let paths: Vec<std::path::PathBuf> = plan
+        .drop
+        .iter()
+        .map(|n| state.generation_dir(*n))
+        .chain(store.iter().map(|sha| state.store().path(sha)))
+        .collect();
+    let removal = Removal {
+        by_image,
+        packages: store.len(),
+        freed: freed(&paths),
+    };
     if let Some(guard) = &guard {
         for n in &plan.drop {
             select::remove_generation(&state, guard, *n)?;
@@ -165,31 +200,99 @@ fn remove(machine: &Machine, dry_run: bool) -> Result<(Vec<u32>, usize, Vec<u32>
         // left: no build runs while this holds the lock.
         state.purge_leftovers(guard);
     }
-    Ok((plan.drop, store.len(), plan.keep))
+    Ok((removal, plan.keep))
 }
 
-fn render(out: &mut Stream, dropped: &[u32], packages: usize, dry_run: bool) {
+/// Which deployment `image` (a digest) is, in words: the booted one is
+/// "this image", as `nx generations` heads it.
+fn role(machine: &Machine, image: Option<&str>) -> String {
+    let Some(d) = machine.deployments() else {
+        return "this machine".to_owned();
+    };
+    match image.and_then(|i| Role::of(d, i)) {
+        Some(Role::Booted) => "this image".to_owned(),
+        Some(role) => role.image(),
+        None => "images no longer deployed".to_owned(),
+    }
+}
+
+/// The disk space removing `paths` frees: a file counts once all its
+/// hard links are among them.
+fn freed(paths: &[std::path::PathBuf]) -> u64 {
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+    // (device, inode) → (links seen, links it has, bytes on disk).
+    let mut files: HashMap<(u64, u64), (u64, u64, u64)> = HashMap::new();
+    let mut stack: Vec<std::path::PathBuf> = paths.to_vec();
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&path)
+        {
+            stack.extend(entries.flatten().map(|e| e.path()));
+        }
+        let entry =
+            files
+                .entry((meta.dev(), meta.ino()))
+                .or_insert((0, meta.nlink(), meta.blocks() * 512));
+        entry.0 += 1;
+    }
+    files
+        .values()
+        .filter(|(seen, links, _)| seen >= links)
+        .map(|(_, _, bytes)| bytes)
+        .sum()
+}
+
+/// One line per kind (rule 2), then what it frees.
+fn render(out: &mut Stream, r: &Removal, dry_run: bool) {
     let style = out.style;
-    for n in dropped {
+    let sym = style.red(ui::SYM_REMOVED);
+    if let [(only, n)] = r.by_image.as_slice() {
         out.line(format_args!(
-            "{} generation {n}",
-            style.red(ui::SYM_REMOVED)
+            "{sym} {} {}",
+            ui::plural(*n, "generation"),
+            style.dim(&format!("for {only}"))
+        ));
+    } else if !r.by_image.is_empty() {
+        let each: Vec<String> = r
+            .by_image
+            .iter()
+            .map(|(image, n)| format!("{n} for {image}"))
+            .collect();
+        out.line(format_args!(
+            "{sym} {}: {}",
+            ui::plural(r.generations(), "generation"),
+            style.dim(&each.join(", "))
         ));
     }
-    let what = format!(
-        "{}, {} unused in the store",
-        ui::plural(dropped.len(), "generation"),
-        ui::plural(packages, "package")
-    );
+    if r.packages > 0 {
+        out.line(format_args!(
+            "{sym} {} {}",
+            ui::plural(r.packages, "package"),
+            style.dim("nothing uses any more")
+        ));
+    }
     if dry_run {
+        let what = if r.generations() == 0 && r.packages == 0 {
+            "nothing to remove".to_owned()
+        } else {
+            format!("{} to free", ui::size(r.freed))
+        };
         out.line(style.dim(&format!("{what} · dry run, nothing changed")));
-    } else if dropped.is_empty() && packages == 0 {
+    } else if r.generations() == 0 && r.packages == 0 {
         out.line(format_args!(
             "{} nothing to remove",
             style.green(ui::SYM_DONE)
         ));
     } else {
-        out.line(format_args!("{} removed {what}", style.green(ui::SYM_DONE)));
+        out.line(format_args!(
+            "{} {} freed",
+            style.green(ui::SYM_DONE),
+            ui::size(r.freed)
+        ));
     }
 }
 
@@ -213,6 +316,62 @@ mod tests {
                 String::new()
             })
         }
+    }
+
+    fn text(r: &Removal, dry_run: bool) -> String {
+        let buf = SharedBuf::default();
+        let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
+        render(&mut ui.out, r, dry_run);
+        buf.text()
+    }
+
+    #[test]
+    fn says_one_line_per_kind() {
+        let r = Removal {
+            by_image: vec![("this image".into(), 29), ("the rollback image".into(), 29)],
+            packages: 120,
+            freed: 3 << 30,
+        };
+        assert_eq!(
+            text(&r, true),
+            "  - 58 generations: 29 for this image, 29 for the rollback image\n\
+             \x20 - 120 packages nothing uses any more\n\
+             \x20 3.0 GiB to free · dry run, nothing changed\n"
+        );
+        let r = Removal {
+            by_image: vec![("this image".into(), 2)],
+            packages: 0,
+            freed: 4 << 20,
+        };
+        assert_eq!(
+            text(&r, false),
+            "  - 2 generations for this image\n  ✓ 4.0 MiB freed\n"
+        );
+        assert_eq!(text(&Removal::default(), false), "  ✓ nothing to remove\n");
+        assert_eq!(
+            text(&Removal::default(), true),
+            "  nothing to remove · dry run, nothing changed\n"
+        );
+    }
+
+    #[test]
+    fn counts_a_hard_linked_file_once_all_its_links_go() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("nx-gc-freed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["a", "b", "kept"] {
+            std::fs::create_dir_all(dir.join(d))?;
+        }
+        std::fs::write(dir.join("a/one"), vec![1u8; 64 << 10])?;
+        std::fs::hard_link(dir.join("a/one"), dir.join("b/one"))?;
+        std::fs::write(dir.join("a/two"), vec![2u8; 64 << 10])?;
+        std::fs::hard_link(dir.join("a/two"), dir.join("kept/two"))?;
+        let both = freed(&[dir.join("a"), dir.join("b")]);
+        let only_a = freed(&[dir.join("a")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        // "one" is freed only with both of its links; "two" never is.
+        assert!(both >= 64 << 10, "{both}");
+        assert!(only_a < 64 << 10, "{only_a}");
+        Ok(())
     }
 
     #[test]

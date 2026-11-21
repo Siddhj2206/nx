@@ -54,6 +54,9 @@ const EXIT_MISUSE: u8 = 2;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// show every step, whole lists and generation numbers
+    #[arg(short, long, global = true)]
+    verbose: bool,
 }
 
 /// One variant per command. The doc comment is the line in `nx help`; the
@@ -122,7 +125,11 @@ enum Command {
     #[command(visible_alias = "ls")]
     List,
     /// every generation, what each changed, and the current one
-    Generations,
+    Generations {
+        /// every image's generations, not only the booted one's
+        #[arg(long)]
+        all: bool,
+    },
     /// make an earlier generation current again
     Rollback {
         /// the generation to go to (default: the one before the current)
@@ -281,6 +288,7 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(err) => return parse_error(&mut ui, &err),
     };
+    ui.set_verbose(cli.verbose);
     let Some(command) = cli.command else {
         help::main(&mut ui.out);
         return ExitCode::SUCCESS;
@@ -327,7 +335,10 @@ fn main() -> ExitCode {
                 )
             });
             if timer {
-                let failure = result.as_ref().err().map(|e| format!("{e:#}"));
+                let failure = result
+                    .as_ref()
+                    .err()
+                    .map(|e| ui::Problem::from_error(e).one_line());
                 nx_core::select::record_upgrade_failure(&host::state(), failure.as_deref());
             }
             result
@@ -346,7 +357,7 @@ fn main() -> ExitCode {
             )
         }),
         Command::List => list::run(&mut ui),
-        Command::Generations => generations::run(&mut ui, &RpmOstree, &host::state()),
+        Command::Generations { all } => generations::run(&mut ui, &RpmOstree, &host::state(), all),
         Command::Rollback {
             generation,
             dry_run,
@@ -389,6 +400,18 @@ fn main() -> ExitCode {
             }
         },
         Command::Search { terms, metadata } => metadata.load(&mut ui).map(|(u, g)| {
+            let added = search::Added {
+                host: g
+                    .iter()
+                    .flat_map(|g| &g.lock.host)
+                    .map(|p| p.name.clone())
+                    .collect(),
+                tools: g
+                    .iter()
+                    .flat_map(|g| g.lock.tool.iter().flat_map(|t| &t.packages))
+                    .map(|p| p.attr.clone())
+                    .collect(),
+            };
             let pinned = g.and_then(|g| g.lock.tool);
             let catalog = tool::catalog_to_read(
                 &mut ui,
@@ -396,18 +419,25 @@ fn main() -> ExitCode {
                 &nx_nix::System,
                 pinned.as_ref(),
             );
-            search::run(&mut ui, &u, catalog.as_ref(), &terms);
+            search::run(&mut ui, &u, catalog.as_ref(), &added, &terms);
         }),
         Command::Info { package, metadata } => metadata.load(&mut ui).and_then(|(u, g)| {
             let pinned = g.as_ref().and_then(|g| g.lock.tool.clone());
-            let manifest = g.map(|g| g.manifest).unwrap_or_default();
             let catalog = tool::catalog_to_read(
                 &mut ui,
                 &nx_rpm::Ureq::new(),
                 &nx_nix::System,
                 pinned.as_ref(),
             );
-            info::run(&mut ui, &u, catalog.as_ref(), &manifest, &package)
+            info::run(
+                &mut ui,
+                &u,
+                catalog.as_ref(),
+                g.as_ref(),
+                &host::state(),
+                &nx_nix::System,
+                &package,
+            )
         }),
         Command::Sync { metadata, rebuild } => {
             let rebuild = if rebuild {
@@ -461,7 +491,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            ui.error(format_args!("{err:#}"));
+            ui.problem(&ui::Problem::from_error(&err));
             ExitCode::from(EXIT_FAILED)
         }
     }
@@ -494,13 +524,7 @@ fn parse_error(ui: &mut Ui, err: &clap::Error) -> ExitCode {
             ExitCode::from(EXIT_MISUSE)
         }
         _ => {
-            let (message, tips) = help::reword(&err.render().to_string());
-            let mut text = format!("{message} {}", ui.err.style.dim("(see nx help)"));
-            for tip in tips {
-                text.push('\n');
-                text.push_str(&ui.err.style.dim(&tip));
-            }
-            ui.error(text);
+            ui.problem(&help::reword(&err.render().to_string()));
             ExitCode::from(EXIT_MISUSE)
         }
     }

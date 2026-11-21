@@ -10,63 +10,157 @@ use crate::ui::{self, Stream, Ui};
 
 /// How many matches of each source to show before asking for a narrower
 /// term.
-const LIMIT: usize = 25;
+const LIMIT: usize = 20;
 
-pub fn run(ui: &mut Ui, universe: &Universe, catalog: Option<&Catalog>, terms: &[String]) {
-    let matches = universe.search(&terms.join(" "));
-    let nix = catalog.map(|c| c.search(terms)).unwrap_or_default();
-    render(&mut ui.out, &matches, &nix, ui::width());
+/// What the current generation has: host package names and tool
+/// attributes, each marked only in its own source.
+#[derive(Debug, Default)]
+pub struct Added {
+    pub host: std::collections::HashSet<String>,
+    pub tools: std::collections::HashSet<String>,
 }
 
-/// Lists `matches`, then `nix`, for a terminal `width` columns wide.
-fn render(out: &mut Stream, matches: &[Package], nix: &[&Nixpkg], width: usize) {
+pub fn run(
+    ui: &mut Ui,
+    universe: &Universe,
+    catalog: Option<&Catalog>,
+    added: &Added,
+    terms: &[String],
+) {
+    let matches = universe.search(&terms.join(" "));
+    let nix = catalog.map(|c| c.search(terms)).unwrap_or_default();
+    let hits = merge(&terms.join(" "), &matches, &nix, added);
+    render(&mut ui.out, &hits, ui::width());
+}
+
+/// One result, from either source.
+#[derive(Debug, PartialEq, Eq)]
+struct Hit {
+    name: String,
+    version: String,
+    /// The repo, or `nixpkgs`.
+    source: String,
+    summary: String,
+    mark: Mark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    None,
+    InImage,
+    Added,
+}
+
+/// Both sources in one order: the exact name, then names that start with
+/// the query, then names that contain it, then the rest (a summary
+/// match). Each source keeps its own order within a rank, the repos first.
+fn merge(query: &str, rpms: &[Package], nix: &[&Nixpkg], added: &Added) -> Vec<Hit> {
+    let q = query.to_lowercase();
+    let rank = |name: &str| {
+        let name = name.to_lowercase();
+        if name == q {
+            0
+        } else if name.starts_with(&q) {
+            1
+        } else if name.contains(&q) {
+            2
+        } else {
+            3
+        }
+    };
+    let mut hits: Vec<(u8, Hit)> = rpms
+        .iter()
+        .map(|p| {
+            let mark = if p.installed {
+                Mark::InImage
+            } else if added.host.contains(&p.name) {
+                Mark::Added
+            } else {
+                Mark::None
+            };
+            (
+                rank(&p.name),
+                Hit {
+                    name: p.name.clone(),
+                    version: p.evr.clone(),
+                    source: p.repo.clone(),
+                    summary: p.summary.clone(),
+                    mark,
+                },
+            )
+        })
+        .chain(nix.iter().map(|p| {
+            (
+                rank(&p.attr),
+                Hit {
+                    name: p.attr.clone(),
+                    version: p.version.clone(),
+                    source: if p.unfree {
+                        "nixpkgs · unfree"
+                    } else {
+                        "nixpkgs"
+                    }
+                    .to_owned(),
+                    summary: p.description.clone(),
+                    mark: if added.tools.contains(&p.attr) {
+                        Mark::Added
+                    } else {
+                        Mark::None
+                    },
+                },
+            )
+        }))
+        .collect();
+    hits.sort_by_key(|(r, _)| *r);
+    hits.into_iter().map(|(_, h)| h).collect()
+}
+
+fn render(out: &mut Stream, hits: &[Hit], width: usize) {
     let style = out.style;
-    if matches.is_empty() && nix.is_empty() {
+    if hits.is_empty() {
         out.line("No packages match.");
         return;
     }
-    // Two columns of indent on top of the stream's own two, and two to
-    // spare.
-    let summary = |out: &mut Stream, text: &str| {
-        if !text.is_empty() {
-            out.line(format_args!(
-                "  {}",
-                ui::truncate(text, width.saturating_sub(6))
-            ));
-        }
-    };
-    for p in matches.iter().take(LIMIT) {
-        let mark = if p.installed {
-            ui::in_image(style)
-        } else {
-            style.dim(&p.repo)
+    let shown = &hits[..hits.len().min(LIMIT)];
+    let w = |f: fn(&Hit) -> usize| shown.iter().map(f).max().unwrap_or(0);
+    let name_w = w(|h| h.name.chars().count());
+    // A long version (a date-stamped snapshot) is cut, not the summary.
+    let version_w = w(|h| h.version.chars().count()).min(16);
+    let source_w = w(|h| match h.mark {
+        Mark::None => h.source.chars().count(),
+        Mark::InImage => "✓ in the image".chars().count(),
+        Mark::Added => "✓ added".chars().count(),
+    });
+    // The stream's indent, three gaps, and the columns before the summary.
+    let used = 2 + name_w + version_w + source_w + 6;
+    for h in shown {
+        let source = match h.mark {
+            Mark::None => style.dim(&h.source),
+            Mark::InImage => ui::in_image(style),
+            Mark::Added => style.green(&format!("{} added", ui::SYM_DONE)),
         };
-        out.line(format_args!(
-            "{} {}  {mark}",
-            style.bold(&p.name),
-            style.dim(&p.evr)
-        ));
-        summary(out, &p.summary);
-    }
-    for p in nix.iter().take(LIMIT) {
-        let mut mark = style.dim("nixpkgs");
-        if p.unfree {
-            mark.push_str(&style.yellow(" · unfree"));
+        let mut line = format!(
+            "{}  {}  {}",
+            ui::pad(&style.bold(&h.name), name_w),
+            ui::pad(&style.dim(&ui::truncate(&h.version, version_w)), version_w),
+            ui::pad(&source, source_w),
+        );
+        let room = width.saturating_sub(used);
+        if !h.summary.is_empty() && room > 10 {
+            line.push_str("  ");
+            line.push_str(&style.dim(&ui::truncate(&h.summary, room)));
         }
-        out.line(format_args!(
-            "{} {}  {mark}",
-            style.bold(&p.attr),
-            style.dim(&p.version)
-        ));
-        summary(out, &p.description);
+        out.line(line.trim_end());
     }
     out.blank();
-    let total = matches.len() + nix.len();
-    let shown = matches.len().min(LIMIT) + nix.len().min(LIMIT);
-    let mut foot = if shown < total {
-        format!("{shown} of {total} matches; add a word to narrow it")
+    let mut foot = if shown.len() < hits.len() {
+        format!(
+            "{} of {} matches; add a word to narrow it",
+            shown.len(),
+            hits.len()
+        )
     } else {
-        ui::plural(total, "match")
+        ui::plural(hits.len(), "match")
     };
     foot.push_str(" · install with nx add <name>");
     out.line(style.dim(&foot));
@@ -77,10 +171,10 @@ mod tests {
     use super::*;
     use crate::ui::SharedBuf;
 
-    fn text(matches: &[Package], width: usize) -> String {
+    fn text(hits: &[Hit], width: usize) -> String {
         let buf = SharedBuf::default();
         let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
-        render(&mut ui.out, matches, &[], width);
+        render(&mut ui.out, hits, width);
         buf.text()
     }
 
@@ -97,69 +191,68 @@ mod tests {
     }
 
     #[test]
-    fn lists_marks_and_counts() {
-        let matches = [
-            package("wayland", "@image", true, "Wayland libraries"),
+    fn ranks_names_across_both_sources_and_marks_what_is_installed() {
+        let rpms = [
             package(
                 "wayland-devel",
                 "updates",
                 false,
                 "Development files for Wayland",
             ),
+            package("wayland", "@image", true, "Wayland libraries"),
+            package(
+                "libdecor",
+                "fedora",
+                false,
+                "Decorations for wayland clients",
+            ),
         ];
-        assert_eq!(
-            text(&matches, 30),
-            "  wayland 1.24.0-1.fc45  ✓ in the image\n\
-             \x20   Wayland libraries\n\
-             \x20 wayland-devel 1.24.0-1.fc45  updates\n\
-             \x20   Development files for W…\n\
-             \n\
-             \x20 2 matches · install with nx add <name>\n"
-        );
-    }
-
-    #[test]
-    fn nixpkgs_follows_fedora() {
-        let rg = Nixpkg {
-            attr: "ripgrep".into(),
-            version: "15.2.0".into(),
-            description: "Fast grep".into(),
+        let wl = Nixpkg {
+            attr: "wayland".into(),
+            version: "1.24.0".into(),
+            description: "Core Wayland window system code".into(),
             ..Nixpkg::default()
         };
-        let ngrok = Nixpkg {
-            attr: "ngrok".into(),
-            version: "3.30.0".into(),
-            unfree: true,
-            ..Nixpkg::default()
+        let added = Added {
+            host: ["wayland-devel".to_owned()].into(),
+            ..Added::default()
         };
-        let buf = SharedBuf::default();
-        let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
-        render(
-            &mut ui.out,
-            &[package("ripgrep", "fedora", false, "")],
-            &[&rg, &ngrok],
-            100,
+        let hits = merge("wayland", &rpms, &[&wl], &added);
+        let names: Vec<(&str, &str)> = hits
+            .iter()
+            .map(|h| (h.name.as_str(), h.source.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("wayland", "@image"),
+                ("wayland", "nixpkgs"),
+                ("wayland-devel", "updates"),
+                ("libdecor", "fedora"),
+            ]
         );
         assert_eq!(
-            buf.text(),
-            "  ripgrep 1.24.0-1.fc45  fedora\n\
-             \x20 ripgrep 15.2.0  nixpkgs\n\
-             \x20   Fast grep\n\
-             \x20 ngrok 3.30.0  nixpkgs · unfree\n\
+            text(&hits, 80),
+            "  wayland        1.24.0-1.fc45  ✓ in the image  Wayland libraries\n\
+             \x20 wayland        1.24.0         nixpkgs         Core Wayland window system code\n\
+             \x20 wayland-devel  1.24.0-1.fc45  ✓ added         Development files for Wayland\n\
+             \x20 libdecor       1.24.0-1.fc45  fedora          Decorations for wayland clients\n\
              \n\
-             \x20 3 matches · install with nx add <name>\n"
+             \x20 4 matches · install with nx add <name>\n"
         );
+        // The summary is cut to the terminal.
+        assert!(text(&hits, 70).contains("  Core Wayland window s…\n"));
     }
 
     #[test]
     fn caps_long_lists() {
-        let matches: Vec<_> = (0..LIMIT + 1)
+        let rpms: Vec<_> = (0..LIMIT + 1)
             .map(|i| package(&format!("p{i}"), "fedora", false, ""))
             .collect();
-        let out = text(&matches, 100);
-        assert!(!out.contains("p25 "), "{out}");
+        let out = text(&merge("p", &rpms, &[], &Added::default()), 100);
+        assert!(!out.contains("p20 "), "{out}");
         assert!(out.ends_with(
-            "  25 of 26 matches; add a word to narrow it · install with nx add <name>\n"
+            "  20 of 21 matches; add a word to narrow it · install with nx add <name>\n"
         ));
     }
 

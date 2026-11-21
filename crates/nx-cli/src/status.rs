@@ -22,7 +22,7 @@ pub fn run(
     let release = OsRelease::read(root).context("reading the booted os-release")?;
 
     let s = &mut ui.out;
-    let st = s.style;
+    let (st, verbose) = (s.style, s.verbose);
     s.blank();
     let image = booted.image().unwrap_or("not a container image");
     let version = booted.version.as_deref().unwrap_or("");
@@ -57,7 +57,7 @@ pub fn run(
                 if d.pinned {
                     value.push_str(&format!("  {}", st.dim("pinned")));
                 }
-                if let Some(note) = host_tier_for(state, d, st) {
+                if let Some(note) = host_tier_for(state, d, st, verbose) {
                     value.push_str(&format!("  {note}"));
                 }
                 value
@@ -67,47 +67,61 @@ pub fn run(
     }
     s.row(
         "Host tier",
-        &(host_tier(state, root, st) + &not_rebuilt(state, booted, st)),
+        &(host_tier(state, root, st, verbose) + &not_rebuilt(state, booted, st)),
     );
     s.row("Tool tier", &tool_tier(state, root, st));
     s.blank();
     Ok(())
 }
 
-/// Whether an image that isn't booted has its host tier ready. Nothing is
-/// said until nx has built a generation at all.
-fn host_tier_for(state: &State, d: &Deployment, st: crate::ui::Style) -> Option<String> {
+/// Whether an image that isn't booted has its host tier ready (`-v` says
+/// which generation). Nothing is said until nx has built a generation at
+/// all.
+fn host_tier_for(
+    state: &State,
+    d: &Deployment,
+    st: crate::ui::Style,
+    verbose: bool,
+) -> Option<String> {
     let digest = d.image_digest.as_deref()?;
     if state.generations().ok()?.is_empty() {
         return None;
     }
     // What the last sync said about this image wins over an empty
     // placeholder from boot.
+    // The record holds the failure's headline; `nx sync` tries again and
+    // shows the whole problem.
     if let Some(why) = nx_core::select::failures(state).get(digest) {
-        return Some(st.yellow(&format!("no host tier yet: {why}")));
+        return Some(
+            st.yellow(&format!("no host tier yet: {why}")) + &st.dim(" · nx sync says why"),
+        );
     }
     Some(match nx_core::select::newest_for(state, digest) {
         Ok(Some(n)) => {
-            st.dim(&format!("host tier: generation {n}"))
-                + &left_out(state, n, st)
-                + &not_rebuilt(state, d, st)
+            let ready = if verbose {
+                format!("host tier: generation {n}")
+            } else {
+                "host tier ready".to_owned()
+            };
+            st.dim(&ready) + &left_out(state, n, st) + &not_rebuilt(state, d, st)
         }
         Ok(None) => st.yellow("no host tier yet (nx sync)"),
         Err(e) => st.yellow(&format!("host tier unreadable: {e}")),
     })
 }
 
-/// The current generation, and whether nxd made it live (the link to
-/// root's copy is there).
-fn host_tier(state: &State, root: &Path, st: crate::ui::Style) -> String {
+/// Whether nxd made the current generation live (the link to root's copy
+/// is there); `-v` says which generation.
+fn host_tier(state: &State, root: &Path, st: crate::ui::Style, verbose: bool) -> String {
     let live = std::fs::symlink_metadata(root.join("var/lib/extensions/nx")).is_ok();
     match state.current_number() {
-        Ok(Some(n)) if live => format!("generation {n}{}", left_out(state, n, st)),
-        Ok(Some(n)) => format!(
-            "generation {n} {}{}",
-            st.dim("· not made live"),
-            left_out(state, n, st)
-        ),
+        Ok(Some(n)) => {
+            let mut out = if live { "live" } else { "built, not made live" }.to_owned();
+            if verbose {
+                out.push_str(&st.dim(&format!(" · generation {n}")));
+            }
+            out + &left_out(state, n, st)
+        }
         Ok(None) => st.dim("nothing added yet"),
         Err(e) => st.yellow(&format!("unreadable: {e}")),
     }
@@ -195,10 +209,22 @@ mod tests {
     }
 
     fn render(tag: &str, rollback_release: &str) -> Result<String> {
+        render_with(tag, rollback_release, false, |_, _| Ok(()))
+    }
+
+    /// [`render`], after `setup` fills the state and root.
+    fn render_with(
+        tag: &str,
+        rollback_release: &str,
+        verbose: bool,
+        setup: impl FnOnce(&State, &Path) -> Result<()>,
+    ) -> Result<String> {
         let root = fake_root(tag, rollback_release)?;
         let out = SharedBuf::default();
         let mut ui = Ui::plain(out.clone(), SharedBuf::default());
+        ui.set_verbose(verbose);
         let state = State::new(root.join("var-lib-nx"));
+        setup(&state, &root)?;
         let result = run(
             &mut ui,
             &Deployments::from_json(STATUS)?,
@@ -224,6 +250,45 @@ mod tests {
   Tool tier   nothing added yet
 
 "
+        );
+        Ok(())
+    }
+
+    /// A live generation 3, and a failed sync for the rollback image.
+    fn built(state: &State, root: &Path) -> Result<()> {
+        std::fs::create_dir_all(state.generation_dir(3))?;
+        state.set_current(3)?;
+        std::fs::create_dir_all(root.join("var/lib/extensions"))?;
+        std::os::unix::fs::symlink("/var/lib/nx/current", root.join("var/lib/extensions/nx"))?;
+        let deployments = Deployments::from_json(STATUS)?;
+        let rollback = deployments
+            .rollback()
+            .and_then(|d| d.image_digest.clone())
+            .context("the fixture has a rollback image")?;
+        let failed = [(rollback, "can't resolve foo".to_owned())].into();
+        nx_core::select::record_failures(state, &failed);
+        Ok(())
+    }
+
+    #[test]
+    fn says_live_and_points_at_sync_for_a_failure() -> Result<()> {
+        assert_eq!(
+            render_with("built", "45", false, built)?,
+            "
+  ghcr.io/siddhj2206/neptuno:latest 45.20261118
+  Neptuno 45 · booted from sha256:92409d3fcf84
+
+  Staged      none
+  Rollback    45.20261117 from sha256:292ee1bfc6d4  no host tier yet: can't resolve foo · nx sync says why
+  Host tier   live
+  Tool tier   nothing added yet
+
+"
+        );
+        // -v names the generation.
+        assert!(
+            render_with("built-v", "45", true, built)?
+                .contains("  Host tier   live · generation 3\n")
         );
         Ok(())
     }

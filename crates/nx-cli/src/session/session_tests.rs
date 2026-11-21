@@ -12,7 +12,7 @@ use nx_rpm::Refresh;
 use nx_http::Canned;
 
 use super::{Env, How, Session};
-use crate::changes::Change;
+use crate::changes::{Change, Kind};
 use crate::host::Machine;
 use crate::ui::{SharedBuf, Ui};
 
@@ -189,10 +189,7 @@ fn a_host_package_is_planned_built_made_live_and_removed() -> Result<()> {
     )?;
     assert_eq!(
         outcome.changes,
-        [Change::Added {
-            name: "libxkbcommon-devel".into(),
-            version: "1.13.1-4.fc45".into()
-        }]
+        [Change::added("libxkbcommon-devel", "1.13.1-4.fc45")]
     );
     assert_eq!(outcome.download(), 76_110);
     let built = s.install(&mut ui, &outcome.all)?;
@@ -229,7 +226,7 @@ fn a_host_package_is_planned_built_made_live_and_removed() -> Result<()> {
     })?;
     let outcome = s.plan(&mut ui, &How::default())?;
     assert!(
-        matches!(&outcome.changes[..], [Change::Removed { name, .. }] if name == "libxkbcommon-devel"),
+        matches!(&outcome.changes[..], [c] if c.kind == Kind::Removed && c.name == "libxkbcommon-devel"),
         "{:?}",
         outcome.changes
     );
@@ -433,13 +430,7 @@ fn a_tool_is_evaluated_planned_realised_and_rooted() -> Result<()> {
             ..How::default()
         },
     )?;
-    assert_eq!(
-        outcome.changes,
-        [Change::Added {
-            name: "hello".into(),
-            version: format!("{VERSION} · nixpkgs"),
-        }]
-    );
+    assert_eq!(outcome.changes, [Change::added("hello", VERSION).tool()]);
     // hello and everything it references: nothing is in this store yet.
     assert_eq!(outcome.tool_download, download);
     assert!(

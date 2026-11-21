@@ -9,15 +9,15 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use nx_core::select;
 use nx_core::{Deployment, Fallback, Generation};
 use nx_nix::Nix;
 use nx_rpm::Refresh;
 
-use crate::host::{self, Machine};
+use crate::host::{self, Machine, Role};
 use crate::session::{Session, Unresolvable};
-use crate::ui::Ui;
+use crate::ui::{Problem, Ui};
 
 /// Which matching generations `nx sync` builds again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,21 +47,20 @@ pub fn run(
             .unwrap_or_default();
         host::load(ui, machine, refresh, &manifest)?;
     }
-    let Deployed {
-        built,
-        unbuilt,
-        not_rebuilt,
-    } = deployed(ui, machine, &host::state(), refresh, rebuild)?;
-    if !unbuilt.is_empty() {
-        bail!(
-            "{} no host tier yet\n{}",
-            if unbuilt.len() == 1 {
-                "a deployed image has"
-            } else {
-                "some deployed images have"
-            },
-            unbuilt.join("\n")
-        );
+    let done = deployed(ui, machine, &host::state(), refresh, rebuild)?;
+    for &(role, number) in &done.built {
+        let mut line = if role == Role::Booted {
+            "the booted image's host tier is live".to_owned()
+        } else {
+            format!("{} has its host tier", role.image())
+        };
+        if ui.verbose() {
+            line.push_str(&format!(" · generation {number}"));
+        }
+        ui.done(line);
+    }
+    if !done.unbuilt.is_empty() {
+        return Err(done.failed().unwrap_or_default().into());
     }
     // Generations nothing deployed needs any more (an image that is gone,
     // older staged ones). Only after every image has its own: a failure
@@ -69,39 +68,13 @@ pub fn run(
     // generation. The refresh timer collects the Nix store too.
     let nix = (refresh != Refresh::IfMissing).then_some(nix);
     let removed = crate::gc::collect(ui, machine, nix)?;
-    if !not_rebuilt.is_empty() {
-        bail!(
-            "{} not rebuilt\n{}",
-            if not_rebuilt.len() == 1 {
-                "a deployed image's generation was"
-            } else {
-                "some deployed images' generations were"
-            },
-            not_rebuilt.join("\n")
-        );
+    if let Some(problem) = done.failed() {
+        return Err(problem.into());
     }
-    if built == 0 && removed == 0 {
+    if done.built.is_empty() && removed == 0 {
         ui.done("every deployed image has a host tier that matches the manifest");
     }
     Ok(())
-}
-
-/// Which deployment an image is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Booted,
-    Staged,
-    Rollback,
-}
-
-impl std::fmt::Display for Role {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Role::Booted => "booted",
-            Role::Staged => "staged",
-            Role::Rollback => "rollback",
-        })
-    }
 }
 
 /// What a deployed image needs: its role and the deployment. Only the
@@ -132,14 +105,47 @@ fn wanted(machine: &Machine) -> Vec<(Role, Deployment)> {
 /// What [`deployed`] did.
 #[derive(Debug, Default)]
 pub struct Deployed {
-    /// Generations built.
-    pub built: usize,
-    /// Images still without a host tier, one line each: which image, and
-    /// why. The caller reports them, once.
-    pub unbuilt: Vec<String>,
+    /// Generations built: for which image, and its number.
+    pub built: Vec<(Role, u32)>,
+    /// Images still without a host tier: which image, and why. The caller
+    /// reports them, once.
+    pub unbuilt: Vec<Problem>,
     /// Images that keep a generation that was to be rebuilt, because the
     /// rebuild failed: which image, which generation, and why.
-    pub not_rebuilt: Vec<String>,
+    pub not_rebuilt: Vec<Problem>,
+}
+
+impl Deployed {
+    /// Every image that failed, as one problem.
+    pub fn failed(&self) -> Option<Problem> {
+        let all: Vec<&Problem> = self.unbuilt.iter().chain(&self.not_rebuilt).collect();
+        match all.as_slice() {
+            [] => None,
+            [one] => Some((*one).clone()),
+            many => Some(
+                Problem::new(format!(
+                    "{} deployed images have no up-to-date host tier",
+                    many.len()
+                ))
+                .reasons(many.iter().map(|p| match p.reasons.first() {
+                    Some(why) => format!("{}: {why}", p.headline),
+                    None => p.headline.clone(),
+                }))
+                .fix("Try again", "nx sync"),
+            ),
+        }
+    }
+}
+
+/// Why building for an image failed, under `headline`.
+fn image_problem(headline: String, e: &anyhow::Error) -> Problem {
+    let why = Problem::from_error(e);
+    let mut p = Problem::new(headline)
+        .reason(why.headline)
+        .reasons(why.reasons)
+        .more(why.more);
+    p.fixes = why.fixes;
+    p.fix("Try again", "nx sync")
 }
 
 /// Builds a generation for each deployed image that lacks one for the
@@ -177,23 +183,30 @@ pub fn deployed(
                 Some(number)
             }
         };
-        let Err(e) = build(ui, machine, role, &d, refresh, replacing) else {
-            out.built += 1;
-            continue;
+        let e = match build(ui, machine, role, &d, refresh, replacing) {
+            Ok(Some(number)) => {
+                out.built.push((role, number));
+                continue;
+            }
+            Ok(None) => continue,
+            Err(e) => e,
         };
         let image = format!("the {role} image ({})", crate::ui::short_digest(digest));
         match replacing {
             // The image still has a host tier, only one to be replaced.
             Some(number) => {
-                out.not_rebuilt
-                    .push(format!("{image} keeps generation {number}: {e:#}"));
+                out.not_rebuilt.push(image_problem(
+                    format!("{image} keeps generation {number}, which nx meant to rebuild"),
+                    &e,
+                ));
                 rebuild_failures.insert(
                     digest.to_owned(),
                     format!("keeps generation {number}: {}", first_line(&e)),
                 );
             }
             None => {
-                out.unbuilt.push(format!("no host tier for {image}: {e:#}"));
+                out.unbuilt
+                    .push(image_problem(format!("no host tier for {image}"), &e));
                 failures.insert(digest.to_owned(), first_line(&e));
             }
         }
@@ -268,7 +281,7 @@ fn build(
     d: &Deployment,
     refresh: Refresh,
     replacing: Option<u32>,
-) -> Result<()> {
+) -> Result<Option<u32>> {
     let digest = d.image_digest.as_deref().unwrap_or_default();
     let version = d.version.as_deref().unwrap_or("unknown version");
     ui.step(format_args!(
@@ -307,7 +320,7 @@ fn build(
                 "still nothing for {}; generation {n} stays",
                 skipped.join(", ")
             ));
-            return Ok(());
+            return Ok(None);
         }
         session.leave_out(skipped);
     }
@@ -324,15 +337,11 @@ fn build(
             ui.warn(format_args!(
                 "generation {number} is built, but the current generation changed meanwhile; not replacing it"
             ));
-            return Ok(());
+            return Ok(None);
         }
         crate::live::activate(ui, &state, number)?;
     }
-    ui.done(format_args!(
-        "generation {number} for the {role} image{}",
-        if booted { ", live" } else { "" }
-    ));
-    Ok(())
+    Ok(Some(number))
 }
 
 /// Resolves the manifest; if it won't resolve as a whole, resolves each
@@ -377,12 +386,9 @@ fn resolve_what_fits(
     Ok((resolved, skipped))
 }
 
+/// What `nx status` and `nx notify` say about a failure: its headline.
 fn first_line(e: &anyhow::Error) -> String {
-    format!("{e:#}")
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_owned()
+    Problem::from_error(e).headline
 }
 
 /// Whether generation `n` is what building now would make: the same

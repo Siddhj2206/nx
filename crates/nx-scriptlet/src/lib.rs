@@ -9,6 +9,7 @@
 //! `|| :` after it) and nothing else, so a script it accepts can't be doing
 //! anything it didn't name. Pure: no file, no process, no network.
 
+mod describe;
 mod files;
 mod shell;
 mod units;
@@ -16,6 +17,7 @@ mod units;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use describe::describe;
 pub use files::{PackageFile, PackageMeta, Tmpfiles, tmpfiles};
 pub use units::valid_unit;
 

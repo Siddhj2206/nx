@@ -14,6 +14,43 @@ use nx_rpm::{Freshness, Options, Refresh, Universe, Ureq, Vars};
 
 use crate::ui::Ui;
 
+/// Which deployment an image is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Booted,
+    Staged,
+    Rollback,
+}
+
+impl Role {
+    /// The deployment whose image is `digest`, booted first.
+    pub fn of(deployments: &Deployments, digest: &str) -> Option<Self> {
+        [
+            (Self::Booted, deployments.booted()),
+            (Self::Staged, deployments.staged()),
+            (Self::Rollback, deployments.rollback()),
+        ]
+        .into_iter()
+        .find(|(_, d)| d.and_then(|d| d.image_digest.as_deref()) == Some(digest))
+        .map(|(role, _)| role)
+    }
+
+    /// `the staged image`.
+    pub fn image(self) -> String {
+        format!("the {self} image")
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Booted => "booted",
+            Self::Staged => "staged",
+            Self::Rollback => "rollback",
+        })
+    }
+}
+
 /// The running system as the host tier reads it, once per command: its
 /// root, the image's os-release, the deployments and the architecture.
 /// Commands read `/`; tests build one from a fixture root.
@@ -182,6 +219,22 @@ pub fn keys_dir(state: &State) -> PathBuf {
     state.root().join("keys")
 }
 
+/// The state lock refused: `doing` ("changing packages") needs an
+/// administrator.
+pub fn not_allowed(state: &State, doing: &str, e: nx_core::Error) -> anyhow::Error {
+    let again: Vec<String> = std::env::args().skip(1).collect();
+    crate::ui::Problem::new(format!(
+        "{doing} needs an administrator (a member of wheel)"
+    ))
+    .reason(format!("no write access to {}", state.root().display()))
+    .reason(e.to_string())
+    .fix(
+        "As an administrator",
+        format!("sudo nx {}", again.join(" ")),
+    )
+    .into()
+}
+
 /// The generation read-only commands show (design invariant 9): the
 /// current one or, when a newer nx wrote it, the newest one this nx reads,
 /// with a warning.
@@ -260,8 +313,7 @@ pub fn load_from(
     opts.extra = added_repos(manifest, &opts.vars)?;
     let err = &mut ui.err;
     let universe = Universe::load(&opts, http, &mut |repo| {
-        let sym = err.style.cyan(crate::ui::SYM_FETCH);
-        err.line(format_args!("{sym} {repo} metadata"));
+        err.fetched(&format!("{repo} metadata"), "");
     })
     .context("loading the host tier's repos")?;
     for skipped in &universe.skipped {

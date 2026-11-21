@@ -68,15 +68,34 @@ Every line is indented two spaces and starts with one symbol for its kind:
 ⚙ built    ✓ done       ! warning  ✗ error
 ```
 
-Results go to stdout; steps, warnings and errors to stderr. A change lists
-what it added, upgraded and removed, then one summary line:
+Results go to stdout; steps, warnings and errors to stderr. On a terminal,
+steps (`›`, `↓`, `⚙ building`) share one status line on stderr that each
+replaces, so only results, warnings and errors stay on screen; piped, in the
+journal or with `-v`, every step prints on its own line.
+
+A change is a table of what it added, upgraded and removed: one row per
+package the manifest names, the dependencies it pulled in counted on its
+row, then one summary line. Dependencies whose own entry didn't change are
+grouped under it ("↑ 12 packages  for wayland-devel"). `-v` lists every
+package and adds generation numbers:
 
 ```
-  + libffi-devel   3.5.2-3.fc45   fedora  29 KiB
-  + wayland-devel  1.26.0-3.fc45  fedora  161 KiB
-
-  2 packages · 190 KiB download, 758 KiB installed · dry run, nothing changed
+  + wayland-devel  1.26.0-3.fc45  with 1 dependency
+  + ripgrep        15.2.0         nixpkgs
+  ✓ 3 packages added · 190 KiB in 2.1s · the staged image too
 ```
+
+A dry run ends `2 packages to add · 190 KiB to download · dry run,
+nothing changed`. Other deployed images get one mention on that line
+unless they fail; a failure is a warning block of its own.
+
+Listings group and count the same way: `nx list` has a *Host* and a
+*Tools* section with one set of columns, `nx gc` one line per kind
+(`- 58 generations: 29 for this image, 29 for the rollback image`) and
+the space it frees, `nx generations` the booted image's generations with
+the others on one line each (`--all` lists them), `nx search` one line
+per result, exact names first across both sources. Times are relative
+("2 h ago", "yesterday"); `-v` gives the date.
 
 Detail views (`info`, `why`) have a bold name, a dim version, then rows
 with dim keys padded to 11:
@@ -84,15 +103,30 @@ with dim keys padded to 11:
 ```
   ripgrep 15.2.0
 
-  Asked       rg
+  Query       rg
   Tier        tool · nixpkgs, sealed beside the image
   Release     nixpkgs-26.11pre1124565.19cfded70b91
   Why         you added it · a standalone tool
   Generation  65 · added in 63
 ```
 
-An error is one line of context joined with `: `. Phase 8 of
-[plan-1.1.md](plan-1.1.md) splits it into a headline, reasons and fixes.
+`nx info` adds *Installed* (version, the generation that added it), a
+tool's size and closure, and a host package's scriptlets that nx doesn't
+run, said in words and then in full.
+
+An error is a block: a headline that says what failed, the reasons one
+per line, and the commands that fix it. Library errors carry data; the CLI
+words them. A long list of reasons is cut, with `-v` for the rest:
+
+```
+  ✗ mold has scriptlets nx can't translate, and nx never runs them
+    %post makes ld.mold the system linker
+    %postun changes which program is the system linker
+
+    Put it in your image   RUN dnf install -y mold
+    Read the scripts       nx info mold
+    Or skip them, if safe  nx add mold --allow-scriptlets mold=3f0c2a9e1b7d4c55
+```
 
 Nix's own messages are reworded or dropped:
 

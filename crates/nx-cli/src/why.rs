@@ -142,6 +142,28 @@ fn in_tool_tier(state: &State, g: &Generation, what: &str) -> Option<Owner> {
     })
 }
 
+/// The version of `name` (a host package, or a tool's attribute) in `g`,
+/// and the generation that added that build, for `nx info`.
+pub fn installed(state: &State, g: &Generation, name: &str) -> Option<(String, u32)> {
+    let read = |n| Generation::read(state, n).ok();
+    if let Some(p) = g.lock.package(name) {
+        let added = added_in(g, &read, &|older| {
+            older.lock.host.iter().any(|o| o.nevra == p.nevra)
+        });
+        return Some((p.evr().to_owned(), added));
+    }
+    let p = g.lock.tool.as_ref()?.package(name)?;
+    let added = added_in(g, &read, &|older| {
+        older
+            .lock
+            .tool
+            .as_ref()
+            .and_then(|t| t.package(&p.attr))
+            .is_some_and(|o| o.outputs == p.outputs)
+    });
+    Some((p.version.clone(), added))
+}
+
 /// The earliest generation in `g`'s line (its `parent`, that one's, …)
 /// from which on each one `had` it. Not the numbering: generations for
 /// other images and ones a rollback left sit between the numbers. `read`
@@ -206,7 +228,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             ));
             out.blank();
             if what != package.name {
-                out.row("Asked", what);
+                out.row("Query", what);
             }
             out.row(
                 "Tier",
@@ -236,7 +258,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             ));
             out.blank();
             if what != package.attr {
-                out.row("Asked", what);
+                out.row("Query", what);
             }
             out.row(
                 "Tier",
@@ -264,7 +286,7 @@ fn render(out: &mut Stream, what: &str, owner: &Owner) {
             ));
             out.blank();
             if what != p.name {
-                out.row("Asked", what);
+                out.row("Query", what);
             }
             out.row(
                 "Tier",
@@ -322,7 +344,7 @@ mod tests {
             "\n\
              \x20 libffi-devel 3.5.1-2.fc45\n\
              \n\
-             \x20 Asked       /usr/include/ffi.h\n\
+             \x20 Query       /usr/include/ffi.h\n\
              \x20 Tier        host · Fedora RPM on the image's /usr\n\
              \x20 Repo        fedora\n\
              \x20 Why         needed by wayland-devel\n\
@@ -343,7 +365,7 @@ mod tests {
             out.contains("  ripgrep 14.1.1-3.fc45  ✓ in the image\n"),
             "{out}"
         );
-        assert!(out.contains("  Asked       rg\n"), "{out}");
+        assert!(out.contains("  Query       rg\n"), "{out}");
     }
 
     #[test]
@@ -376,7 +398,7 @@ mod tests {
                 "\n\
                  \x20 ripgrep 15.2.0\n\
                  \n\
-                 \x20 Asked       rg\n\
+                 \x20 Query       rg\n\
                  \x20 Tier        tool · nixpkgs, sealed beside the image\n\
                  \x20 Release     nixpkgs-26.11pre1122334.e21fec321d73\n\
                  \x20 Store       {rg}\n\

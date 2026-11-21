@@ -90,7 +90,7 @@ pub fn run(
         if !seen.contains(&key) {
             if let Err(e) = notifier.send(&note) {
                 // Not marked seen, so the next change tries again.
-                ui.warn(format_args!("couldn't notify ({e:#}): {}", note.summary));
+                ui.warn_error(format!("couldn't notify: {}", note.summary), &e);
                 continue;
             }
             ui.step(format_args!("notified: {}", note.summary));

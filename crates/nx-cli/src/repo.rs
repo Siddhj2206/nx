@@ -3,6 +3,7 @@
 //! generation, as any manifest change does.
 
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use nx_core::{Generation, Manifest, RepoEntry};
@@ -10,8 +11,8 @@ use nx_rpm::repo::{self, Repo, Vars, id_of};
 use nx_rpm::{Http, Refresh, Ureq};
 
 use crate::host::{self, Machine};
-use crate::session::{How, Session};
-use crate::ui::{self, Stream, Ui};
+use crate::session::{self, How, Session};
+use crate::ui::{self, Problem, Stream, Ui};
 
 /// A repo the user named: its manifest entry and its key.
 struct Fetched {
@@ -31,6 +32,7 @@ pub fn add(
     new_key: bool,
     dry_run: bool,
 ) -> Result<()> {
+    let started = Instant::now();
     let vars = machine.vars();
     let image_ids: Vec<String> = repo::load(&machine.root, &vars)?
         .into_iter()
@@ -46,28 +48,43 @@ pub fn add(
         for f in &fetched {
             let name = &f.entry.name;
             if let Some(r) = same_id(m, name) {
-                bail!(
-                    "repo {name} would share its id with {}; nx repo remove {} first",
-                    r.name,
+                return Err(Problem::new(format!(
+                    "repo {name} would share its id with {}",
                     r.name
-                );
+                ))
+                .fix(
+                    "Remove that one first",
+                    format!("nx repo remove {}", r.name),
+                )
+                .into());
             }
             if let Some(r) = m.repo(name)
                 && (r.baseurl != f.entry.baseurl || r.metalink != f.entry.metalink)
             {
-                bail!(
-                    "repo {name} is already added, from {}; nx repo remove {name} first",
-                    r.baseurl
-                        .as_deref()
-                        .or(r.metalink.as_deref())
-                        .unwrap_or(name)
-                );
+                return Err(Problem::new(format!("repo {name} is already added"))
+                    .reason(format!(
+                        "from {}",
+                        r.baseurl
+                            .as_deref()
+                            .or(r.metalink.as_deref())
+                            .unwrap_or(name)
+                    ))
+                    .fix("Remove it first", format!("nx repo remove {name}"))
+                    .into());
             }
             match (m.repo(name).is_some(), new_key) {
                 (true, false) => {
-                    bail!("repo {name} is already added (--new-key replaces its key)")
+                    return Err(Problem::new(format!("repo {name} is already added"))
+                        .fix("Replace its key", format!("nx repo add {source} --new-key"))
+                        .into());
                 }
-                (false, true) => bail!("repo {name} is not added yet; drop --new-key"),
+                (false, true) => {
+                    return Err(Problem::new(format!(
+                        "repo {name} is not added yet, so it has no key to replace"
+                    ))
+                    .fix("Add it", format!("nx repo add {source}"))
+                    .into());
+                }
                 (false, false) => m.repos.push(f.entry.clone()),
                 (true, true) => {}
             }
@@ -80,7 +97,9 @@ pub fn add(
     }
     for (f, id) in fetched.iter().zip(&ids) {
         if let Some(s) = session.universe().skipped.iter().find(|s| s.repo == *id) {
-            bail!("can't add {}: {}", f.entry.name, s.error);
+            return Err(Problem::new(format!("can't add {}", f.entry.name))
+                .reason(s.error.to_string())
+                .into());
         }
     }
     // Under the lock, so nx gc can't take a pin before its generation names
@@ -90,7 +109,6 @@ pub fn add(
         pin_all(&mut session, &fetched)?;
     }
     let outcome = session.plan(ui, &How::default())?;
-    let generation = install(ui, &mut session, &outcome, dry_run)?;
     let st = ui.out.style;
     for f in &fetched {
         ui.out.line(format_args!(
@@ -100,40 +118,14 @@ pub fn add(
             st.dim(&format!("· key {}", f.fingerprints.join(", ")))
         ));
     }
-    let what = if new_key {
-        format!("{} replaced", ui::plural(fetched.len(), "key"))
-    } else {
-        format!("{} added", ui::plural(fetched.len(), "repo"))
+    let n = fetched.len();
+    let head = match (new_key, dry_run) {
+        (true, false) => format!("{} replaced", ui::plural(n, "key")),
+        (true, true) => format!("{} to replace", ui::plural(n, "key")),
+        (false, false) => format!("{} added", ui::plural(n, "repo")),
+        (false, true) => format!("{} to add", ui::plural(n, "repo")),
     };
-    finished(ui, &what, generation);
-    Ok(())
-}
-
-/// Builds and makes live what `outcome` planned, unless a dry run; the
-/// generation made live.
-pub fn install(
-    ui: &mut Ui,
-    session: &mut Session,
-    outcome: &crate::session::Outcome,
-    dry_run: bool,
-) -> Result<Option<u32>> {
-    if dry_run {
-        return Ok(None);
-    }
-    Ok(Some(session.install(ui, &outcome.all)?.generation.number))
-}
-
-/// `✓ <what> · generation N`, or for a dry run `<what> · dry run, nothing
-/// changed`.
-pub fn finished(ui: &mut Ui, what: &str, generation: Option<u32>) {
-    match generation {
-        Some(n) => ui.done(format_args!("{what} · generation {n}")),
-        None => {
-            let st = ui.out.style;
-            ui.out
-                .line(st.dim(&format!("{what} · dry run, nothing changed")));
-        }
-    }
+    session::finish_as(ui, &mut session, &outcome, started, Some(&head))
 }
 
 /// `entry`'s key, from its https URL, shown before anything changes so the
@@ -285,7 +277,9 @@ fn entries(
         return Ok(found);
     }
     if key.is_none() {
-        bail!("a repo URL needs its key: nx repo add {source} --key <url>");
+        return Err(Problem::new("a repo URL needs its key")
+            .fix("Name it", format!("nx repo add {source} --key <url>"))
+            .into());
     }
     let name = url.repo_id();
     Ok(vec![RepoEntry {
@@ -295,9 +289,14 @@ fn entries(
 }
 
 pub fn remove(ui: &mut Ui, machine: &Machine, name: &str, dry_run: bool) -> Result<()> {
+    let started = Instant::now();
     let mut session = Session::open(ui, machine, Refresh::IfStale, dry_run, |m| {
         if m.repo(name).is_none() {
-            bail!("{name} was not added with nx repo add (nx repo list shows the repos)");
+            return Err(
+                Problem::new(format!("{name} was not added with nx repo add"))
+                    .fix("The repos you added", "nx repo list")
+                    .into(),
+            );
         }
         m.repos.retain(|r| r.name != name);
         Ok(())
@@ -307,12 +306,15 @@ pub fn remove(ui: &mut Ui, machine: &Machine, name: &str, dry_run: bool) -> Resu
         .with_context(|| format!("packages still need {name}"))?;
     // Its pinned key stays while an earlier generation names it (a
     // rollback needs it); nx gc removes it after.
-    let generation = install(ui, &mut session, &outcome, dry_run)?;
     let st = ui.out.style;
     ui.out
         .line(format_args!("{} {name}", st.red(ui::SYM_REMOVED)));
-    finished(ui, "repo removed", generation);
-    Ok(())
+    let head = if dry_run {
+        "1 repo to remove"
+    } else {
+        "1 repo removed"
+    };
+    session::finish_as(ui, &mut session, &outcome, started, Some(head))
 }
 
 /// One line of `nx repo list`.

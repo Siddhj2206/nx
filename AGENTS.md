@@ -48,8 +48,14 @@ nx keeps nx 0.x's look; `docs/product.md` *Output* is the reference.
   `nx help` is its doc comment; its group is in `help::PLACEMENT`.
 - Every line is indented two spaces and starts with its kind's symbol
   (`› ↑ + - ↓ ⚙ ✓ ! ✗`). Results on stdout, steps, warnings and errors on
-  stderr. Detail views follow `info`: bold head, dim version, then rows with
-  dim keys padded to 11 (`Stream::row`).
+  stderr. Steps go through `Ui::step`/`Stream::fetched`, which share one
+  status line on a terminal; `-v` keeps every step and lists whole.
+- An error is a `ui::Problem` (headline, reasons, fixes), returned through
+  `anyhow` and drawn once in `main`; `nx` never formats an error chain
+  with `{e:#}` (`Problem::one_line` where one line must hold it). Library
+  errors carry data and the CLI words them.
+- Detail views follow `info`: bold head, dim version, then rows with dim
+  keys padded to 11 (`Stream::row`).
 - Colour comes from anstream's decision (TTY, `NO_COLOR`, `TERM=dumb`,
   `CLICOLOR_FORCE`); escape codes come only from `Style`.
 - Exit codes: 0 success, 1 failure, 2 misuse, 130 interrupted.

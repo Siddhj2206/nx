@@ -311,14 +311,14 @@ zone.*
   provided:" and drops `<PACKAGE>...`. Say `nx add needs a package: nx add
   <package>...`.
 
-**8.2 Errors.** `ui::Problem` (headline, reasons, fixes) and one renderer;
+**~~8.2 Errors.~~** *Done (`ui::Problem`, `nx_core::Overlap`, `nx_scriptlet::describe`).* `ui::Problem` (headline, reasons, fixes) and one renderer;
 the overlap check reports by package; the scriptlet translator says what
 a refused idiom does (`update-alternatives`: "makes ld.mold the system
 linker") and the full text moves to `nx info <pkg>`.
 
-**8.3 Live status line and `-v`/`--verbose`.**
+**~~8.3 Live status line and `-v`/`--verbose`.~~** *Done (`Live` in `ui.rs`).*
 
-**8.4 Command by command.**
+**~~8.4 Command by command.~~** *Done; `migrate` was already gone (4.4). Every command's output is a whole-block plain test. Beyond the table, the same rules reached: `list` counts dependencies ("with N dependencies", `-v` lists them); an error that needs root gives `sudo nx …` as its fix, and an unknown command without a suggestion `nx help`; the help footer names `-v`; a failure that doesn't stop the work (restoring tool paths, collecting the Nix store, a notification) is a warning block (`Ui::warn_error`); the gc that ends `nx sync` says what it removed in `nx gc`'s words; Koji and metadata fetches are steps on the status line (`Stream::fetched`); `rollback` and `status` give generation numbers only with `-v`.*
 
 | Command | Change |
 | --- | --- |

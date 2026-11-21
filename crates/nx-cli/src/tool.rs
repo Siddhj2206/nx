@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use nx_core::{
     Bin, Fallback, Generation, Journal, LockedTool, Manifest, State, ToolOutput, ToolPackage,
 };
@@ -17,7 +17,7 @@ use nx_nix::narinfo::{self, Caches, Sum};
 use nx_nix::{Catalog, Http, Nix, Release};
 
 use crate::host;
-use crate::ui::{self, Ui};
+use crate::ui::{self, Problem, Ui};
 
 /// Whether the image has Nix: without `/nix/store` the tool tier is off.
 /// Nix's name for the platform: `x86_64-linux`.
@@ -74,8 +74,7 @@ impl Tier {
             let version = self.release.version().to_owned();
             let err = &mut ui.err;
             let catalog = Catalog::ensure(http, &self.cache, &self.release, &mut || {
-                let sym = err.style.cyan(ui::SYM_FETCH);
-                err.line(format_args!("{sym} nixpkgs {version} package list"));
+                err.fetched(&format!("nixpkgs {version} package list"), "");
             })
             .context("loading the nixpkgs package list")?;
             self.catalog = Some(catalog);
@@ -253,6 +252,7 @@ fn lock<'a>(
 ) -> Result<(Vec<ToolPackage>, Vec<String>)> {
     let mut packages = Vec::new();
     let mut problems = Vec::new();
+    let mut failed = Vec::new();
     let mut holding = Vec::new();
     for attr in &manifest.tool.packages {
         if let Some(p) = kept(attr) {
@@ -289,14 +289,22 @@ fn lock<'a>(
                 unfree,
                 broken,
                 insecure,
-            }) => problems.push(refused(attr, *unfree, *broken, *insecure)),
+            }) => {
+                failed.push(attr.as_str());
+                problems.push(refused(attr, *unfree, *broken, *insecure));
+            }
             Some(Evaluated::Missing) | None => {
+                failed.push(attr.as_str());
                 problems.push(format!("nixpkgs {version} has no package {attr}"));
             }
         }
     }
     if !problems.is_empty() {
-        bail!(problems.join("\n"));
+        return Err(
+            Problem::new(format!("can't use {} from nixpkgs", failed.join(", ")))
+                .reasons(problems)
+                .into(),
+        );
     }
     Ok((packages, holding))
 }
@@ -338,7 +346,7 @@ pub fn catalog_to_read(
     match loaded {
         Ok(c) => c,
         Err(e) => {
-            ui.warn(format_args!("leaving nixpkgs out: {e:#}"));
+            ui.warn_error("leaving nixpkgs out", &e);
             None
         }
     }
@@ -359,15 +367,8 @@ fn refused(attr: &str, unfree: bool, broken: bool, insecure: bool) -> String {
 
 fn draw(ui: &mut Ui, note: Note) {
     match note {
-        Note::Fetched { name, size } => {
-            let st = ui.err.style;
-            ui.err.line(format_args!(
-                "{} {name}  {}",
-                st.cyan(ui::SYM_FETCH),
-                st.dim(&ui::size(size))
-            ));
-        }
-        Note::Building { name } => ui.service(format_args!("building {name}")),
+        Note::Fetched { name, size } => ui.err.fetched(&name, &ui::size(size)),
+        Note::Building { name } => ui.building(format_args!("building {name}")),
         Note::Retry { what, why } => ui.warn(format_args!("{why}; retrying {what}")),
         Note::Warning(w) => ui.warn(w),
         // The failed run's error carries it.
@@ -520,13 +521,19 @@ pub fn check(
     previous: Option<&LockedTool>,
     without: &[String],
 ) -> Result<()> {
-    let mut problems = Vec::new();
+    let mut problem = Problem::default();
+    let mut failed: Vec<&str> = Vec::new();
     for (name, kept, refused) in &exposure.clashes {
         if fresh.contains(refused) {
-            problems.push(format!(
-                "{refused} has the command {name}, which {kept} exposes; \
-                 nx add {refused} --override {name} lets {refused} have it"
-            ));
+            failed.push(refused);
+            problem = problem
+                .reason(format!(
+                    "{refused} has the command {name}, which {kept} exposes"
+                ))
+                .fix(
+                    format!("Let {refused} have it"),
+                    format!("nx add {refused} --override {name}"),
+                );
         } else {
             ui.warn(format_args!(
                 "{refused} and {kept} both have {name}; {kept}'s is exposed"
@@ -555,7 +562,8 @@ pub fn check(
         // The tool tier exposes commands and nothing else.
         let lost = exposure.clashes.iter().any(|(_, _, r)| r == attr);
         if package.bins.is_empty() && !lost {
-            problems.push(match hidden.len() {
+            failed.push(attr);
+            problem = problem.reason(match hidden.len() {
                 0 => format!("{attr} has no commands, and the tool tier exposes only commands"),
                 1 => format!("{} already exists on this system", hidden[0]),
                 _ => format!("{} already exist on this system", hidden.join(", ")),
@@ -569,17 +577,20 @@ pub fn check(
             ui.warn(format_args!(
                 "{attr}: {} not exposed; the image or the host tier has {}, as you allowed",
                 hidden.join(", "),
-                if hidden.len() == 1 { "it" } else { "them" }
+                crate::ui::agree(hidden.len(), "it", "them")
             ));
         } else {
-            problems.push(format!(
-                "{attr} has {}, which the image or the host tier already has (it comes first on \
-                 PATH, so nx can't expose {}); nx add {attr} --without {} adds it without {}",
-                owned.join(", "),
-                if owned.len() == 1 { "it" } else { "them" },
-                owned.join(" --without "),
-                if owned.len() == 1 { "it" } else { "them" },
-            ));
+            failed.push(attr);
+            let them = crate::ui::agree(owned.len(), "it", "them");
+            problem = problem
+                .reason(format!(
+                    "{attr} has {}, which the image or the host tier has first on PATH",
+                    owned.join(", "),
+                ))
+                .fix(
+                    format!("Add {attr} without {them}"),
+                    format!("nx add {attr} --without {}", owned.join(" --without ")),
+                );
         }
     }
     // A command the image took over since the last generation.
@@ -595,11 +606,12 @@ pub fn check(
             }
         }
     }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        bail!(problems.join("\n"))
+    if problem.reasons.is_empty() {
+        return Ok(());
     }
+    failed.dedup();
+    problem.headline = format!("can't add {}", failed.join(", "));
+    Err(problem.into())
 }
 
 /// Whether two locks hold the same tool tier: the same release and
@@ -841,13 +853,12 @@ mod tests {
         let mut ui = Ui::plain(crate::ui::SharedBuf::default(), buf.clone());
         let mut tool = three();
         let e = expose(&mut tool, &image, &[], &listing);
-        let err = check(&mut ui, &tool, &e, &["tig".into()], None, &[])
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
+        let problem = |r: Result<()>| r.err().map(|e| Problem::from_error(&e)).unwrap_or_default();
         assert_eq!(
-            err,
-            "tig has the command scalar, which gitFull exposes; nx add tig --override scalar lets tig have it"
+            problem(check(&mut ui, &tool, &e, &["tig".into()], None, &[])),
+            Problem::new("can't add tig")
+                .reason("tig has the command scalar, which gitFull exposes")
+                .fix("Let tig have it", "nx add tig --override scalar")
         );
         // Added before: a warning only.
         check(&mut ui, &tool, &e, &[], None, &[]).ok();
@@ -856,14 +867,11 @@ mod tests {
             "  ! tig and gitFull both have scalar; gitFull's is exposed\n"
         );
         // One of its commands is the image's: refused, unless --without.
-        let err = check(&mut ui, &tool, &e, &["gitFull".into()], None, &[])
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
         assert_eq!(
-            err,
-            "gitFull has git, which the image or the host tier already has (it comes first on \
-             PATH, so nx can't expose it); nx add gitFull --without git adds it without it"
+            problem(check(&mut ui, &tool, &e, &["gitFull".into()], None, &[])),
+            Problem::new("can't add gitFull")
+                .reason("gitFull has git, which the image or the host tier has first on PATH")
+                .fix("Add gitFull without it", "nx add gitFull --without git")
         );
         assert!(
             check(
@@ -884,11 +892,8 @@ mod tests {
         let only_git = |out: &str| bins(&["git"], out);
         let e = expose(&mut tool, &image, &[], &only_git);
         for overrides in [vec![], vec!["git".to_owned()]] {
-            let err = check(&mut ui, &tool, &e, &["git".into()], None, &overrides)
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert_eq!(err, "git already exists on this system");
+            let p = problem(check(&mut ui, &tool, &e, &["git".into()], None, &overrides));
+            assert_eq!(p.reasons, ["git already exists on this system"]);
         }
         // Nothing to expose at all.
         let mut tool = LockedTool {
@@ -896,12 +901,9 @@ mod tests {
             ..LockedTool::default()
         };
         let e = expose(&mut tool, &image, &[], &|out: &str| bins(&[], out));
-        let err = check(&mut ui, &tool, &e, &["requests".into()], None, &[])
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
+        let p = problem(check(&mut ui, &tool, &e, &["requests".into()], None, &[]));
         assert_eq!(
-            err,
+            p.reasons.join(""),
             "requests has no commands, and the tool tier exposes only commands"
         );
         assert!(check(&mut ui, &tool, &e, &[], None, &[]).is_ok());
@@ -990,8 +992,9 @@ mod tests {
         // Without a build to keep (nx add), it is an error.
         let err = lock(&manifest, &evaluated, &none, None, "26.11").map(|_| ());
         assert_eq!(
-            err.map_err(|e| e.to_string()),
-            Err("nixpkgs 26.11 has no package tig".to_owned())
+            err.map_err(|e| Problem::from_error(&e)),
+            Err(Problem::new("can't use tig from nixpkgs")
+                .reason("nixpkgs 26.11 has no package tig"))
         );
     }
 }

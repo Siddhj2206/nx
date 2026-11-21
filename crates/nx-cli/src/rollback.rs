@@ -4,17 +4,15 @@
 use anyhow::{Context, Result, bail};
 use nx_core::{Generation, State};
 
+use crate::changes::{self, Change};
 use crate::host::{self, Machine};
-use crate::ui::Ui;
+use crate::ui::{self, Problem, Stream, Ui};
 
 pub fn run(ui: &mut Ui, machine: &Machine, target: Option<u32>, dry_run: bool) -> Result<()> {
     let state = host::state();
-    let _guard = state.lock().with_context(|| {
-        format!(
-            "changing packages needs an administrator (a member of wheel): no write access to {}",
-            state.root().display()
-        )
-    })?;
+    let _guard = state
+        .lock()
+        .map_err(|e| host::not_allowed(&state, "changing packages", e))?;
     let current = Generation::current(&state)
         .context("reading the current generation")?
         .context("nothing is installed yet, so there is nothing to roll back")?;
@@ -28,30 +26,68 @@ pub fn run(ui: &mut Ui, machine: &Machine, target: Option<u32>, dry_run: bool) -
         && generation.lock.image.as_ref() != Some(&booted)
     {
         crate::compat::check(machine, &generation).map_err(|why| {
-            anyhow::anyhow!(
-                "generation {number} was built for {} and doesn't fit the booted image: {why}",
+            Problem::new(format!(
+                "generation {number} was built for {} and doesn't fit the booted image",
                 generation
                     .lock
                     .image
                     .as_deref()
                     .map_or("no image", crate::ui::short_digest)
-            )
+            ))
+            .reason(why)
+            .fix("The ones that do", "nx generations")
         })?;
     }
-    if dry_run {
-        ui.out.line(ui.out.style.dim(&format!(
-            "would make generation {number} current (now {}) · dry run, nothing changed",
-            current.number
-        )));
-        return Ok(());
+    let changes = switch(&current, &generation);
+    if !dry_run {
+        crate::live::activate(ui, &state, number)?;
     }
-    crate::live::activate(ui, &state, number)?;
-    ui.done(format_args!(
-        "generation {number} is current · was {} · {}",
-        current.number,
-        crate::ui::plural(generation.lock.host.len(), "package")
-    ));
+    render(&mut ui.out, &changes, current.number, number, dry_run);
     Ok(())
+}
+
+/// What going from `current` to `to` changes, in both tiers.
+fn switch(current: &Generation, to: &Generation) -> Vec<Change> {
+    let mut changes = changes::host_locks(&current.lock.host, &to.lock.host);
+    changes.extend(changes::tools(
+        current.lock.tool.as_ref(),
+        to.lock.tool.as_ref(),
+    ));
+    changes
+}
+
+/// The table, then `✓ rolled back · 2 packages change` (or for a dry run,
+/// what it would do); `-v` names the generations (rule 4).
+fn render(out: &mut Stream, changes: &[Change], from: u32, to: u32, dry_run: bool) {
+    let style = out.style;
+    changes::table(out, changes);
+    let mut parts = vec![
+        if dry_run {
+            "would roll back"
+        } else {
+            "rolled back"
+        }
+        .to_owned(),
+    ];
+    if out.verbose {
+        let was = if dry_run { "now" } else { "was" };
+        parts.push(format!("generation {to} ({was} {from})"));
+    }
+    parts.push(if changes.is_empty() {
+        "the packages stay the same".to_owned()
+    } else {
+        ui::plural(changes.len(), "package") + " change"
+    });
+    if dry_run {
+        parts.push("dry run, nothing changed".to_owned());
+        out.line(style.dim(&parts.join(" · ")));
+    } else {
+        out.line(format_args!(
+            "{} {}",
+            style.green(ui::SYM_DONE),
+            parts.join(" · ")
+        ));
+    }
 }
 
 /// The generation to go to: `target`, or the one `current` was built
@@ -62,7 +98,9 @@ fn pick(state: &State, current: &Generation, target: Option<u32>) -> Result<u32>
     match target {
         Some(n) if n == number => bail!("generation {n} is already current"),
         Some(n) if all.contains(&n) => Ok(n),
-        Some(n) => bail!("there is no generation {n} (nx generations lists them)"),
+        Some(n) => Err(Problem::new(format!("there is no generation {n}"))
+            .fix("The generations", "nx generations")
+            .into()),
         None => current
             .lock
             .parent
@@ -86,6 +124,41 @@ mod tests {
             lock,
             activation: Default::default(),
         }
+    }
+
+    #[test]
+    fn shows_what_the_switch_changes() {
+        let package = |name: &str, evr: &str| nx_core::LockedPackage {
+            name: name.into(),
+            nevra: format!("{name}-{evr}.x86_64"),
+            repo: "fedora".into(),
+            sha256: String::new(),
+            requested: vec![name.into()],
+        };
+        let mut now = generation(5, Some(4));
+        now.lock.host = vec![package("wayland-devel", "1.26-1.fc45")];
+        let mut back = generation(4, None);
+        back.lock.host = vec![
+            package("wayland-devel", "1.25-1.fc45"),
+            package("jq", "1.8-1.fc45"),
+        ];
+        let out = crate::ui::SharedBuf::default();
+        let mut ui = Ui::plain(out.clone(), crate::ui::SharedBuf::default());
+        render(&mut ui.out, &switch(&now, &back), 5, 4, true);
+        assert_eq!(
+            out.text(),
+            "  + jq             1.8-1.fc45\n\
+             \x20 ↑ wayland-devel  1.26-1.fc45 → 1.25-1.fc45\n\
+             \x20 would roll back · 2 packages change · dry run, nothing changed\n"
+        );
+        let out = crate::ui::SharedBuf::default();
+        let mut ui = Ui::plain(out.clone(), crate::ui::SharedBuf::default());
+        ui.set_verbose(true);
+        render(&mut ui.out, &[], 5, 4, false);
+        assert_eq!(
+            out.text(),
+            "  ✓ rolled back · generation 4 (was 5) · the packages stay the same\n"
+        );
     }
 
     #[test]

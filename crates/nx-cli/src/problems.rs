@@ -8,6 +8,8 @@
 
 use nx_core::{Deployments, State, select};
 
+use crate::host::Role;
+
 /// One problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
@@ -91,22 +93,9 @@ pub fn problems(state: &State, deployments: Option<&Deployments>) -> Vec<Problem
 
 /// Which deployment `digest` is, in words.
 fn role(deployments: Option<&Deployments>, digest: &str) -> String {
-    let Some(d) = deployments else {
-        return "an image".to_owned();
-    };
-    let is = |dep: Option<&nx_core::Deployment>| {
-        dep.and_then(|d| d.image_digest.as_deref()) == Some(digest)
-    };
-    if is(d.booted()) {
-        "the booted image"
-    } else if is(d.staged()) {
-        "the staged update"
-    } else if is(d.rollback()) {
-        "the rollback image"
-    } else {
-        "an image"
-    }
-    .to_owned()
+    deployments
+        .and_then(|d| Role::of(d, digest))
+        .map_or_else(|| "an image".to_owned(), Role::image)
 }
 
 #[cfg(test)]

@@ -103,6 +103,39 @@ pub struct Refusal {
     pub leftovers: Vec<Leftover>,
 }
 
+/// Files that two owners both have, which an extension may not carry
+/// (design invariant 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlap {
+    /// The package whose files they are (its NEVRA); `None` for an
+    /// extension already on disk.
+    pub package: Option<String>,
+    /// The other package's NEVRA; `None` for the image.
+    pub with: Option<String>,
+    /// The paths, `/usr/bin/x`, sorted.
+    pub files: Vec<String>,
+}
+
+impl std::fmt::Display for Overlap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const SHOWN: usize = 3;
+        let mut list = self.files[..self.files.len().min(SHOWN)].join(", ");
+        if self.files.len() > SHOWN {
+            list.push_str(&format!(" and {} more", self.files.len() - SHOWN));
+        }
+        let package = self.package.as_deref().unwrap_or("the extension");
+        match &self.with {
+            None if self.package.is_none() => write!(f, "the image already has {list}"),
+            None => write!(f, "the image already has {list} ({package})"),
+            Some(other) => write!(
+                f,
+                "{list} {} in both {package} and {other}",
+                if self.files.len() == 1 { "is" } else { "are" },
+            ),
+        }
+    }
+}
+
 impl Generation {
     pub fn read(state: &State, number: u32) -> Result<Self> {
         let dir = state.generation_dir(number);
@@ -393,10 +426,9 @@ fn write_tool_tier(dir: &Path, spec: &Spec) -> Result<()> {
             )));
         }
         if !seen.insert(b.name.as_str()) {
-            return Err(Error::Conflict(format!(
-                "two tool-tier packages expose {}",
-                b.name
-            )));
+            return Err(Error::Conflict {
+                command: b.name.clone(),
+            });
         }
         let shim = spec.shim.ok_or_else(|| {
             Error::Invalid("the tool tier needs nx-shim, which wasn't found".into())
@@ -452,15 +484,13 @@ pub fn check_extension(extension: &Path, image_root: &Path) -> Result<()> {
     Err(image_clash(clashes))
 }
 
-/// "the image already has …", naming the first five.
-fn image_clash(mut clashes: Vec<String>) -> Error {
-    let more = clashes.len().saturating_sub(5);
-    clashes.truncate(5);
-    let mut msg = format!("the image already has {}", clashes.join(", "));
-    if more > 0 {
-        msg.push_str(&format!(" and {more} more"));
-    }
-    Error::Conflict(msg)
+/// The image's files an extension on disk would hide.
+fn image_clash(files: Vec<String>) -> Error {
+    Error::Overlap(vec![Overlap {
+        package: None,
+        with: None,
+        files,
+    }])
 }
 
 fn collect_clashes(
@@ -504,7 +534,10 @@ enum Node {
 /// The merged tree of every package, keyed by path under the extension
 /// root (`usr/bin/rg`), so parents sort before children.
 #[derive(Debug, Default)]
-struct Tree(BTreeMap<PathBuf, Node>);
+struct Tree(BTreeMap<PathBuf, Node>, Clashes);
+
+/// Paths two packages disagree about, by (first owner, second owner).
+type Clashes = BTreeMap<(String, String), Vec<String>>;
 
 impl Tree {
     /// Adds `root/from` and everything under it, as `to` in the extension,
@@ -563,15 +596,32 @@ impl Tree {
             (Node::File { source: a, .. }, Node::File { source: b, .. }) => same_content(a, b)?,
             _ => false,
         };
-        if same {
+        if !same {
+            // Every disagreement is collected, so the refusal can name
+            // them all by package ([`Tree::overlaps`]).
+            self.1
+                .entry((owner(have).to_owned(), owner(&node).to_owned()))
+                .or_default()
+                .push(format!("/{}", rel.display()));
+        }
+        Ok(())
+    }
+
+    /// Refuses the tree when two packages disagreed about a path.
+    fn overlaps(&mut self) -> Result<()> {
+        if self.1.is_empty() {
             return Ok(());
         }
-        Err(Error::Conflict(format!(
-            "/{} is in both {} and {}",
-            rel.display(),
-            owner(have),
-            owner(&node)
-        )))
+        Err(Error::Overlap(
+            std::mem::take(&mut self.1)
+                .into_iter()
+                .map(|((package, with), files)| Overlap {
+                    package: Some(package),
+                    with: Some(with),
+                    files,
+                })
+                .collect(),
+        ))
     }
 
     /// Moves paths under a directory the image has as a symlink to where
@@ -580,7 +630,7 @@ impl Tree {
     /// `/usr/bin/foo`. A real `usr/sbin` in the extension would hide the
     /// image's symlink.
     fn follow_image_links(self, image_root: &Path) -> Result<Tree> {
-        let mut out = Tree::default();
+        let mut out = Tree(BTreeMap::new(), self.1);
         // A package directory → the image directory it lands in.
         let mut moved: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
         // Parents sort before their children, so a directory's move is
@@ -595,13 +645,15 @@ impl Tree {
             }
             out.insert(&rel, node)?;
         }
+        out.overlaps()?;
         Ok(out)
     }
 
     /// Design invariant 1: no file of the extension may hide one of the
     /// image's. Directories merge; anything else is refused.
     fn check_image(&self, image_root: &Path) -> Result<()> {
-        let mut clashes = Vec::new();
+        // Package → its paths the image has, in path order.
+        let mut clashes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for (rel, node) in &self.0 {
             let Ok(meta) = std::fs::symlink_metadata(image_root.join(rel)) else {
                 continue;
@@ -611,13 +663,25 @@ impl Tree {
                 _ => true,
             };
             if clash {
-                clashes.push(format!("/{} ({})", rel.display(), owner(node)));
+                clashes
+                    .entry(owner(node))
+                    .or_default()
+                    .push(format!("/{}", rel.display()));
             }
         }
         if clashes.is_empty() {
             return Ok(());
         }
-        Err(image_clash(clashes))
+        Err(Error::Overlap(
+            clashes
+                .into_iter()
+                .map(|(package, files)| Overlap {
+                    package: Some(package.to_owned()),
+                    with: None,
+                    files,
+                })
+                .collect(),
+        ))
     }
 
     /// Checks that `dest` holds exactly what [`Tree::write`] was to put
@@ -906,7 +970,10 @@ mod tests {
         }
         let mut s = spec(&manifest, &twice, &image_root);
         s.shim = Some(&shim);
-        assert!(matches!(build(&state, &guard, &s), Err(Error::Conflict(_))));
+        assert!(matches!(
+            build(&state, &guard, &s),
+            Err(Error::Conflict { .. })
+        ));
         let mut odd = lock.clone();
         if let Some(t) = &mut odd.tool {
             t.packages[0].bins[0].name = "../rg".into();
@@ -1022,11 +1089,19 @@ mod tests {
         let manifest = Manifest::default();
         let guard = state.lock()?;
         let err = build(&state, &guard, &spec(&manifest, &lock, &root));
-        let Err(Error::Conflict(msg)) = err else {
-            panic!("expected a conflict, got {err:?}");
+        let Err(Error::Overlap(overlaps)) = err else {
+            panic!("expected an overlap, got {err:?}");
         };
         assert_eq!(
-            msg,
+            overlaps,
+            [Overlap {
+                package: Some("pkgconf-1-1.fc45.x86_64".into()),
+                with: None,
+                files: vec!["/usr/bin/pkgconf".into()],
+            }]
+        );
+        assert_eq!(
+            overlaps[0].to_string(),
             "the image already has /usr/bin/pkgconf (pkgconf-1-1.fc45.x86_64)"
         );
         assert_eq!(state.current_number()?, None);
@@ -1238,9 +1313,9 @@ mod tests {
         )?;
         let guard = state.lock()?;
         let err = build(&state, &guard, &spec(&manifest, &lock, &root));
-        assert!(
-            matches!(&err, Err(Error::Conflict(m)) if m == "/usr/bin/x is in both a-1-1.fc45.x86_64 and b-1-1.fc45.x86_64"),
-            "{err:?}"
+        assert_eq!(
+            err.err().map(|e| e.to_string()).as_deref(),
+            Some("/usr/bin/x is in both a-1-1.fc45.x86_64 and b-1-1.fc45.x86_64")
         );
         Ok(())
     }

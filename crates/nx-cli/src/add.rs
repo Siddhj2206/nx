@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use nx_core::{CliTools, ScriptletAllow};
-use nx_rpm::{Package, Refresh};
+use nx_rpm::Refresh;
 
 use crate::changes::{self, Change};
 use crate::host::Machine;
@@ -25,13 +25,8 @@ pub struct Options {
     pub without: Vec<String>,
 }
 
-/// A tool-tier package the command adds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolAdded {
-    attr: String,
-    version: String,
-}
-
+/// Adds `specs` to the manifest and builds the generation, or with
+/// `--dry-run` shows what that would change.
 pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> Result<()> {
     let started = Instant::now();
     let allow: Vec<ScriptletAllow> = opts
@@ -122,11 +117,14 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
                     fresh_tool.push(attr);
                 }
             }
-            Route::Refuse(why) => problems.push(why),
+            Route::Refuse(why) => problems.push((spec.as_str(), why)),
         }
     }
     if !problems.is_empty() {
-        bail!(problems.join("\n"));
+        let names: Vec<&str> = problems.iter().map(|(spec, _)| *spec).collect();
+        return Err(ui::Problem::new(format!("can't add {}", names.join(", ")))
+            .reasons(problems.into_iter().map(|(_, why)| why))
+            .into());
     }
     if fresh_host.is_empty()
         && fresh_tool.is_empty()
@@ -155,110 +153,36 @@ pub fn run(ui: &mut Ui, machine: &Machine, specs: &[String], opts: &Options) -> 
         .filter(|s| !outcome.all.iter().any(|p| p.requested.contains(s)))
         .map(String::as_str)
         .collect();
-    if opts.dry_run {
-        let tools: Vec<ToolAdded> = fresh_tool
-            .iter()
-            .filter_map(|a| session.tool()?.package(a))
-            .map(|p| ToolAdded {
-                attr: p.attr.clone(),
-                version: p.version.clone(),
-            })
-            .collect();
-        render_plan(
-            &mut ui.out,
-            &in_image,
-            &outcome.new_host,
-            &tools,
-            outcome.tool_download,
-        );
+    if opts.dry_run && outcome.changes.is_empty() {
+        render_nothing(&mut ui.out, &[], &in_image);
         return Ok(());
     }
-    let built = session.install(ui, &outcome.all)?;
-    render_added(
+    let generation = if opts.dry_run {
+        None
+    } else {
+        Some(session.install(ui, &outcome.all)?.generation.number)
+    };
+    render(
         &mut ui.out,
         &outcome.changes,
         &in_image,
         &changes::Done {
-            generation: Some(built.generation.number),
+            generation,
+            moved: None,
             download: outcome.download(),
             secs: started.elapsed().as_secs_f64(),
-            ..changes::Done::default()
+            others: session.others(),
+            head: None,
         },
     );
     Ok(())
 }
 
-/// The manifest the current generation has, to tell an allowance or an
-/// override from nothing at all.
 fn current_manifest(session: &Session) -> nx_core::Manifest {
     session
         .current()
         .map(|g| g.manifest.clone())
         .unwrap_or_default()
-}
-
-/// `--dry-run`: what adding would install, in columns.
-fn render_plan(
-    out: &mut Stream,
-    in_image: &[&str],
-    packages: &[Package],
-    tools: &[ToolAdded],
-    tool_download: u64,
-) {
-    let style = out.style;
-    if packages.is_empty() && tools.is_empty() {
-        render_nothing(out, &[], in_image);
-        return;
-    }
-    let rows: Vec<[String; 4]> = packages
-        .iter()
-        .map(|p| {
-            [
-                p.name.clone(),
-                p.evr.clone(),
-                p.repo.clone(),
-                ui::size(p.download_size),
-            ]
-        })
-        .chain(tools.iter().map(|t| {
-            [
-                t.attr.clone(),
-                t.version.clone(),
-                "nixpkgs".to_owned(),
-                String::new(),
-            ]
-        }))
-        .collect();
-    let column = |i: usize| rows.iter().map(|r| r[i].len()).max().unwrap_or(0) + 2;
-    let (name_w, evr_w, repo_w) = (column(0), column(1), column(2));
-    out.blank();
-    for r in &rows {
-        // A tool package's size is in the total: the closure is shared.
-        let tail = if r[3].is_empty() {
-            style.dim(&r[2])
-        } else {
-            style.dim(&ui::pad(&r[2], repo_w)) + &style.dim(&r[3])
-        };
-        out.line(format_args!(
-            "{} {}{}{tail}",
-            style.green(ui::SYM_ADDED),
-            ui::pad(&r[0], name_w),
-            style.dim(&ui::pad(&r[1], evr_w)),
-        ));
-    }
-    out.blank();
-    let download: u64 = packages.iter().map(|p| p.download_size).sum::<u64>() + tool_download;
-    let installed: u64 = packages.iter().map(|p| p.install_size).sum();
-    let mut summary = format!(
-        "{} · {} download",
-        ui::plural(rows.len(), "package"),
-        ui::size(download)
-    );
-    if !packages.is_empty() {
-        summary.push_str(&format!(", {} installed", ui::size(installed)));
-    }
-    summary.push_str(" · dry run, nothing changed");
-    out.line(style.dim(&summary));
 }
 
 /// Nothing to install: say why for each spec.
@@ -284,10 +208,10 @@ fn render_nothing(out: &mut Stream, specs: &[String], in_image: &[&str]) {
     }
 }
 
-/// After an install: one line per package that changed, a line for specs
+/// The change (or for a dry run, the plan): the table, a line for specs
 /// the image already provides, then the total.
-fn render_added(out: &mut Stream, changes: &[Change], in_image: &[&str], done: &changes::Done) {
-    changes::lines(out, changes);
+fn render(out: &mut Stream, changes: &[Change], in_image: &[&str], done: &changes::Done) {
+    changes::table(out, changes);
     if !in_image.is_empty() {
         let style = out.style;
         out.line(format_args!(
@@ -312,39 +236,8 @@ mod tests {
         buf.text()
     }
 
-    fn package(name: &str, evr: &str, repo: &str, kib: u64) -> Package {
-        Package {
-            name: name.into(),
-            evr: evr.into(),
-            repo: repo.into(),
-            download_size: kib * 1024,
-            install_size: 4 * kib * 1024,
-            ..Package::default()
-        }
-    }
-
-    #[test]
-    fn plans_in_columns_with_totals() {
-        let plan = [
-            package("libxkbcommon-devel", "1.11.0-1.fc45", "fedora", 60),
-            package("pkgconf", "2.4-1.fc45", "updates-archive", 40),
-        ];
-        assert_eq!(
-            text(|out| render_plan(out, &[], &plan, &[], 0)),
-            "\n\
-             \x20 + libxkbcommon-devel  1.11.0-1.fc45  fedora           60 KiB\n\
-             \x20 + pkgconf             2.4-1.fc45     updates-archive  40 KiB\n\
-             \n\
-             \x20 2 packages · 100 KiB download, 400 KiB installed · dry run, nothing changed\n"
-        );
-    }
-
     #[test]
     fn says_why_there_is_nothing_to_add() {
-        assert_eq!(
-            text(|out| render_plan(out, &["glibc"], &[], &[], 0)),
-            "  ✓ glibc already in the image\n"
-        );
         let specs = ["glibc".to_owned(), "wayland-devel".to_owned()];
         assert_eq!(
             text(|out| render_nothing(out, &specs, &["glibc"])),
@@ -353,19 +246,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_packages_join_the_plan() {
-        let rg = [ToolAdded {
-            attr: "ripgrep".into(),
-            version: "15.2.0".into(),
-        }];
-        let plan = [package("pkgconf", "2.4-1.fc45", "fedora", 40)];
+    fn a_dry_run_is_the_same_table() {
+        let changes = [
+            Change::added("pkgconf", "2.4-1.fc45").for_("libxkbcommon-devel"),
+            Change::added("libxkbcommon-devel", "1.11.0-1.fc45"),
+        ];
+        let done = changes::Done {
+            download: 100 << 10,
+            ..changes::Done::default()
+        };
         assert_eq!(
-            text(|out| render_plan(out, &[], &plan, &rg, 2 << 20)),
-            "\n\
-             \x20 + pkgconf  2.4-1.fc45  fedora   40 KiB\n\
-             \x20 + ripgrep  15.2.0      nixpkgs\n\
-             \n\
-             \x20 2 packages · 2.0 MiB download, 160 KiB installed · dry run, nothing changed\n"
+            text(|out| render(out, &changes, &[], &done)),
+            "  + libxkbcommon-devel  1.11.0-1.fc45  with 1 dependency\n\
+             \x20 2 packages to add · 100 KiB to download · dry run, nothing changed\n"
         );
     }
 
@@ -377,9 +270,9 @@ mod tests {
             ..changes::Done::default()
         };
         assert_eq!(
-            text(|out| render_added(out, &[], &["glibc"], &done)),
+            text(|out| render(out, &[], &["glibc"], &done)),
             "  ✓ glibc already in the image · kept in the manifest in case the image drops it\n\
-             \x20 ✓ manifest updated · generation 4 in 0.5s\n"
+             \x20 ✓ manifest updated · 0.5s\n"
         );
     }
 }

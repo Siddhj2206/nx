@@ -18,10 +18,10 @@ use nx_rpm::packages::Job;
 use nx_rpm::{Package, Plan, Planned, Refresh, Relative, Repo, Universe, Ureq};
 
 use crate::changes::{self, Change};
-use crate::host::{self, Machine};
+use crate::host::{self, Machine, Role};
 use crate::keys::Keys;
 use crate::tool::{self, Tier};
-use crate::ui::{self, Ui};
+use crate::ui::{self, Problem, Ui};
 
 /// Downloads at once; Fedora's mirrors are fine with a handful.
 const THREADS: usize = 4;
@@ -91,6 +91,9 @@ pub struct Session<'m> {
     /// (`nx upgrade`).
     unlocked: bool,
     dry_run: bool,
+    /// The other images [`Session::install`] built a generation for:
+    /// which image, and the number.
+    others: Vec<(Role, u32)>,
 }
 
 /// How [`Session::plan`] treats the two tiers.
@@ -128,15 +131,35 @@ impl Outcome {
 /// request, unlike a network or cache error. `nx sync` leaves such a
 /// package out; anything else fails it.
 #[derive(Debug)]
-pub struct Unresolvable(pub String);
+pub struct Unresolvable(pub Problem);
 
-impl std::fmt::Display for Unresolvable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+impl Unresolvable {
+    /// `specs` didn't resolve, for the solver's `problems`: the first few
+    /// are reasons, the rest for `-v`.
+    fn new(specs: &[&str], problems: Vec<String>) -> Self {
+        const SHOWN: usize = 4;
+        let headline = match specs {
+            [] => "the host tier doesn't resolve".to_owned(),
+            s if s.len() <= 3 => format!("can't resolve {}", s.join(" ")),
+            s => format!("can't resolve the manifest's {} host packages", s.len()),
+        };
+        let mut problems = problems;
+        let rest = problems.split_off(problems.len().min(SHOWN));
+        Self(Problem::new(headline).reasons(problems).more(rest))
     }
 }
 
-impl std::error::Error for Unresolvable {}
+impl std::fmt::Display for Unresolvable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Unresolvable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
 
 /// The packages a generation left out that stay out: still in the manifest
 /// and not what the command is about.
@@ -184,19 +207,19 @@ impl<'m> Session<'m> {
         let guard = if dry_run {
             None
         } else {
-            Some(state.lock().with_context(|| {
-                format!(
-                    "changing packages needs an administrator (a member of wheel): no write access to {}",
-                    state.root().display()
-                )
-            })?)
+            Some(
+                state
+                    .lock()
+                    .map_err(|e| host::not_allowed(state, "changing packages", e))?,
+            )
         };
         let current = match Generation::current(state) {
             Ok(g) => g,
             Err(e @ nx_core::Error::Newer { .. }) => {
-                return Err(anyhow::Error::new(e).context(
-                    "a newer nx wrote the current generation; this one can only read (nx list, nx why)",
-                ));
+                return Err(Problem::new("a newer nx wrote the current generation")
+                    .reason(e.to_string())
+                    .reason("this nx can only read it: nx list, nx why")
+                    .into());
             }
             Err(e) => return Err(anyhow::Error::new(e).context("reading the current generation")),
         };
@@ -210,7 +233,7 @@ impl<'m> Session<'m> {
             ui.warn(format_args!(
                 "manifest.toml's {} did nothing since nx 1.1 (no unfree tools, no extra Nix caches); delete {} from it",
                 obsolete.join(" and "),
-                if obsolete.len() == 1 { "it" } else { "them" }
+                crate::ui::agree(obsolete.len(), "it", "them")
             ));
         }
         let cache = host::cache_dir_for(state)?;
@@ -244,11 +267,17 @@ impl<'m> Session<'m> {
             routes,
             unlocked: false,
             dry_run,
+            others: Vec::new(),
         })
     }
 
     pub fn state(&self) -> &State {
         &self.env.state
+    }
+
+    /// The other deployed images the change was carried to.
+    pub fn others(&self) -> &[(Role, u32)] {
+        &self.others
     }
 
     /// Where fallbacks are recorded.
@@ -405,7 +434,7 @@ impl<'m> Session<'m> {
                 "nixpkgs {} has no usable {}: keeping the build you have (nx remove {} to drop it)",
                 tier.release.version(),
                 held.join(", "),
-                if held.len() == 1 { "it" } else { "them" }
+                crate::ui::agree(held.len(), "it", "them")
             ));
         }
         let download = realise(ui, &self.env, self.dry_run, &tier, &locked, &system)?;
@@ -507,28 +536,20 @@ impl<'m> Session<'m> {
                     Fallback::Koji,
                     &format!("{} from Koji: no repo has the image's build", rel.nevra()),
                 );
-                let sym = err.style.cyan(ui::SYM_FETCH);
-                err.line(format_args!(
-                    "{sym} {} {} {}",
-                    rel.name,
-                    err.style.dim(&format!("{}-{}", rel.version, rel.release)),
-                    err.style
-                        .dim("from Koji (the repos have moved past the image's build)")
-                ));
+                err.fetched(
+                    &rel.name,
+                    &format!(
+                        "{}-{} from Koji (the repos have moved past the image's build)",
+                        rel.version, rel.release
+                    ),
+                );
             }
             nx_rpm::koji(http, rel, repo_keys, &cache)
         };
         let plan = self.universe.plan(&specs, &locked, &mut koji)?;
         let all = match plan {
             Plan::Install(p) => p,
-            Plan::Problems(problems) => {
-                return Err(Unresolvable(format!(
-                    "can't resolve {}\n{}",
-                    specs.join(" "),
-                    problems.join("\n")
-                ))
-                .into());
-            }
+            Plan::Problems(problems) => return Err(Unresolvable::new(&specs, problems).into()),
         };
         let have: HashSet<&str> = self.locked().iter().map(|p| p.nevra.as_str()).collect();
         let new = all
@@ -644,9 +665,10 @@ impl<'m> Session<'m> {
         if crate::tool::incomplete(&|p| self.env.nix.has(p), &tool)
             && let Err(e) = crate::tool::restore(ui, &*self.env.nix, &tool)
         {
-            ui.warn(format_args!(
-                "tool-tier commands whose Nix paths are gone are left out until nx upgrade --tool: {e:#}"
-            ));
+            ui.warn_error(
+                "tool-tier commands whose Nix paths are gone are left out until nx upgrade --tool",
+                &e,
+            );
         }
         let store = self.env.state.store();
         let owner = |name: &str| -> Option<String> {
@@ -711,19 +733,22 @@ impl<'m> Session<'m> {
             rebuild,
         ) {
             Ok(d) => {
-                let failed: Vec<&str> = d
-                    .unbuilt
-                    .iter()
-                    .chain(&d.not_rebuilt)
-                    .map(String::as_str)
-                    .collect();
-                if !failed.is_empty() {
-                    ui.warn(format_args!("{}\nnx sync retries", failed.join("\n")));
+                // Another image's failure is a block like any other, but
+                // this change still happened.
+                for p in d.unbuilt.iter().chain(&d.not_rebuilt) {
+                    ui.warn_problem(p);
                 }
+                self.others = d.built;
             }
-            Err(e) => ui.warn(format_args!(
-                "the staged and rollback images were not updated: {e:#}\nnx sync retries"
-            )),
+            Err(e) => {
+                let why = Problem::from_error(&e);
+                ui.warn_problem(
+                    &Problem::new("the staged and rollback images were not updated")
+                        .reason(why.headline)
+                        .reasons(why.reasons)
+                        .fix("Try again", "nx sync"),
+                );
+            }
         }
         Ok(built)
     }
@@ -908,12 +933,24 @@ pub fn finish(
     outcome: &Outcome,
     started: std::time::Instant,
 ) -> Result<()> {
+    finish_as(ui, session, outcome, started, None)
+}
+
+/// [`finish`], with `head` saying what changed when it wasn't packages
+/// (`nx repo`): "1 repo added".
+pub fn finish_as(
+    ui: &mut Ui,
+    session: &mut Session,
+    outcome: &Outcome,
+    started: std::time::Instant,
+    head: Option<&str>,
+) -> Result<()> {
     let generation = if session.dry_run {
         None
     } else {
         Some(session.install(ui, &outcome.all)?.generation.number)
     };
-    changes::lines(&mut ui.out, &outcome.changes);
+    changes::table(&mut ui.out, &outcome.changes);
     changes::summary(
         &mut ui.out,
         &outcome.changes,
@@ -922,6 +959,8 @@ pub fn finish(
             moved: outcome.moved.as_deref(),
             download: outcome.download(),
             secs: started.elapsed().as_secs_f64(),
+            others: session.others(),
+            head,
         },
     );
     Ok(())
@@ -1015,16 +1054,14 @@ fn realise(
 /// The image hint (design, *Image-level packages*): why, and the line for
 /// the user's Containerfile. nx never changes the image itself.
 fn image_hint(packages: &[(String, &str)]) -> anyhow::Error {
-    let mut msg = String::new();
-    for (name, why) in packages {
-        msg.push_str(&format!("{name} {why}\n"));
-    }
     let names: Vec<&str> = packages.iter().map(|(n, _)| n.as_str()).collect();
-    msg.push_str(&format!(
-        "Put it in your image instead:\n  RUN dnf install -y {}",
-        names.join(" ")
-    ));
-    anyhow::anyhow!(msg)
+    Problem::new(format!("{} can only come with the image", names.join(", ")))
+        .reasons(packages.iter().map(|(name, why)| format!("{name} {why}")))
+        .fix(
+            "Put it in your image",
+            format!("RUN dnf install -y {}", names.join(" ")),
+        )
+        .into()
 }
 
 /// Turns a scriptlet refusal into the message the user needs: what was
@@ -1032,28 +1069,40 @@ fn image_hint(packages: &[(String, &str)]) -> anyhow::Error {
 /// manifest's packages pulled each refused one in: that is what the
 /// suggested `nx add` names.
 fn refusal_error(e: nx_core::Error, all: &[Planned]) -> anyhow::Error {
-    let nx_core::Error::Scriptlets(refusals) = e else {
-        return e.into();
+    let refusals = match e {
+        nx_core::Error::Scriptlets(refusals) => refusals,
+        nx_core::Error::Overlap(overlaps) => return overlap_problem(&overlaps).into(),
+        e => return e.into(),
     };
-    let mut msg = String::new();
+    let names: Vec<&str> = refusals.iter().map(|r| r.name.as_str()).collect();
+    let mut problem = Problem::new(format!(
+        "{} {} scriptlets nx can't translate, and nx never runs them",
+        names.join(", "),
+        crate::ui::agree(names.len(), "has", "have")
+    ));
     for r in &refusals {
-        msg.push_str(&format!("{} has scriptlets nx can't translate\n", r.nevra));
         for l in &r.leftovers {
-            msg.push_str(&format!("  {}\n", l.source));
-            for line in l.lines.iter().take(12) {
-                msg.push_str(&format!("    {line}\n"));
-            }
-            if l.lines.len() > 12 {
-                msg.push_str(&format!("    … {} more lines\n", l.lines.len() - 12));
-            }
+            let does = nx_scriptlet::describe(l);
+            let does = if does.is_empty() {
+                "does something nx can't read".to_owned()
+            } else {
+                does.join(", ")
+            };
+            let whose = if names.len() == 1 {
+                String::new()
+            } else {
+                format!("{}'s ", r.name)
+            };
+            problem = problem.reason(format!("{whose}{} {does}", l.source));
         }
     }
-    let names: Vec<&str> = refusals.iter().map(|r| r.name.as_str()).collect();
-    msg.push_str(&format!(
-        "nx never runs scriptlets. Put it in your image instead:\n  RUN dnf install -y {}\n",
-        names.join(" ")
-    ));
-    msg.push_str("or, if you read the text above and it is safe to skip, add it anyway:\n");
+    let read: Vec<String> = names.iter().map(|n| format!("nx info {n}")).collect();
+    problem = problem
+        .fix(
+            "Put it in your image",
+            format!("RUN dnf install -y {}", names.join(" ")),
+        )
+        .fix("Read the scripts", read.join("; "));
     let flags: Vec<String> = refusals
         .iter()
         .map(|r| {
@@ -1078,8 +1127,37 @@ fn refusal_error(e: nx_core::Error, all: &[Planned]) -> anyhow::Error {
         .collect();
     let mut seen = std::collections::HashSet::new();
     add.retain(|n| seen.insert(*n));
-    msg.push_str(&format!("  nx add {} {}", add.join(" "), flags.join(" ")));
-    anyhow::anyhow!(msg)
+    problem
+        .fix(
+            "Or skip them, if safe",
+            format!("nx add {} {}", add.join(" "), flags.join(" ")),
+        )
+        .into()
+}
+
+/// Files the new generation would carry that the image or another of its
+/// packages has, by package (rule 2): counted, the paths for `-v`.
+fn overlap_problem(overlaps: &[nx_core::Overlap]) -> Problem {
+    let mut problem = Problem::new("the new packages would hide files they don't own");
+    let mut paths = Vec::new();
+    for o in overlaps {
+        let files = ui::plural(o.files.len(), "file");
+        let package = o.package.as_deref().map(nevra_name);
+        problem = problem.reason(match (package, o.with.as_deref().map(nevra_name)) {
+            (Some(p), None) => format!("the image already has {files} of {p}"),
+            (None, _) => format!("nx's extension on disk would hide {files} of the image"),
+            (Some(p), Some(other)) => {
+                format!("{p} and {other} both ship {files}, with different contents")
+            }
+        });
+        paths.extend(o.files.iter().cloned());
+    }
+    problem.more(paths)
+}
+
+/// `pkgconf-2.3.0-1.fc45.x86_64` → `pkgconf`: a NEVRA's name, for people.
+fn nevra_name(nevra: &str) -> &str {
+    nevra.rsplitn(3, '-').nth(2).unwrap_or(nevra)
 }
 
 /// Where a package's file is, what it must hash to, and the repo whose
@@ -1142,14 +1220,10 @@ fn download(
             })
         });
         for p in rx {
-            let st = ui.err.style;
-            ui.err.line(format_args!(
-                "{} {} {}  {}",
-                st.cyan(ui::SYM_FETCH),
-                p.name,
-                st.dim(&p.evr),
-                st.dim(&ui::size(p.download_size))
-            ));
+            ui.err.fetched(
+                &p.name,
+                &format!("{}  {}", p.evr, ui::size(p.download_size)),
+            );
         }
         worker
             .join()
@@ -1164,6 +1238,38 @@ mod session_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlaps_name_packages_and_count_files() {
+        let overlaps = [
+            nx_core::Overlap {
+                package: Some("pkgconf-2.3.0-1.fc45.x86_64".into()),
+                with: None,
+                files: vec!["/usr/bin/pkgconf".into()],
+            },
+            nx_core::Overlap {
+                package: Some("foo-1:1.0-1.fc45.x86_64".into()),
+                with: Some("bar-2.0-3.fc45.noarch".into()),
+                files: vec!["/usr/share/a".into(), "/usr/share/b".into()],
+            },
+            nx_core::Overlap {
+                package: None,
+                with: None,
+                files: vec!["/usr/bin/x".into()],
+            },
+        ];
+        let err = ui::SharedBuf::default();
+        let mut ui = Ui::plain(ui::SharedBuf::default(), err.clone());
+        ui.problem(&overlap_problem(&overlaps));
+        assert_eq!(
+            err.text(),
+            "  ✗ the new packages would hide files they don't own\n\
+             \x20   the image already has 1 file of pkgconf\n\
+             \x20   foo and bar both ship 2 files, with different contents\n\
+             \x20   nx's extension on disk would hide 1 file of the image\n\
+             \x20   … 4 more (-v shows them)\n"
+        );
+    }
 
     fn planned(name: &str, requested: &[&str]) -> Planned {
         Planned {
@@ -1224,7 +1330,10 @@ mod tests {
             name: name.into(),
             nevra: format!("{name}-1.0-1.fc45.noarch"),
             digest: "0123456789abcdef".repeat(4),
-            leftovers: Vec::new(),
+            leftovers: vec![nx_scriptlet::Leftover {
+                source: "%pre".into(),
+                lines: vec!["fixfiles -R memcached restore".into()],
+            }],
         };
         let all = [
             planned("memcached", &["memcached"]),
@@ -1234,18 +1343,28 @@ mod tests {
             nx_core::Error::Scriptlets(vec![refusal("memcached-selinux")]),
             &all,
         );
-        let text = e.to_string();
-        let last = text.lines().last().unwrap_or_default();
         assert_eq!(
-            last,
-            "  nx add memcached --allow-scriptlets memcached-selinux=0123456789abcdef"
+            Problem::from_error(&e),
+            Problem::new(
+                "memcached-selinux has scriptlets nx can't translate, and nx never runs them"
+            )
+            .reason("%pre relabels files for SELinux")
+            .fix(
+                "Put it in your image",
+                "RUN dnf install -y memcached-selinux"
+            )
+            .fix("Read the scripts", "nx info memcached-selinux")
+            .fix(
+                "Or skip them, if safe",
+                "nx add memcached --allow-scriptlets memcached-selinux=0123456789abcdef"
+            )
         );
 
         // Not in the plan (or asked for nothing): its own name.
         let e = refusal_error(nx_core::Error::Scriptlets(vec![refusal("other")]), &[]);
-        assert!(
-            e.to_string()
-                .ends_with("  nx add other --allow-scriptlets other=0123456789abcdef")
+        assert_eq!(
+            Problem::from_error(&e).fixes.last().map(|f| f.run.as_str()),
+            Some("nx add other --allow-scriptlets other=0123456789abcdef")
         );
     }
 
@@ -1332,9 +1451,10 @@ mod tests {
         let found = image_only(&host, &|n| n != "dep", &|sha| dir.join(sha));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
-            image_hint(&found).to_string(),
-            "kmod ships kernel modules, which only the image's kernel can load\n\
-             Put it in your image instead:\n  RUN dnf install -y kmod"
+            Problem::from_error(&image_hint(&found)),
+            Problem::new("kmod can only come with the image")
+                .reason("kmod ships kernel modules, which only the image's kernel can load")
+                .fix("Put it in your image", "RUN dnf install -y kmod")
         );
         Ok(())
     }

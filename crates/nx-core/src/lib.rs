@@ -18,7 +18,9 @@ pub mod state;
 pub use deployment::{
     BootedOstree, Deployment, DeploymentSource, Deployments, Ostree, OstreeCli, RpmOstree,
 };
-pub use generation::{Activation, ActivationPackage, Built, Generation, Readable, Refusal};
+pub use generation::{
+    Activation, ActivationPackage, Built, Generation, Overlap, Readable, Refusal,
+};
 pub use journal::{Fallback, Journal};
 pub use lockfile::{Bin, Lock, LockedPackage, LockedRepo, LockedTool, ToolOutput, ToolPackage};
 pub use manifest::{CliTools, Https, Manifest, RepoEntry, ScriptletAllow};
@@ -72,8 +74,13 @@ pub enum Error {
         path: std::path::PathBuf,
         version: u32,
     },
-    #[error("{0}")]
-    Conflict(String),
+    /// Two tool-tier packages expose one command.
+    #[error("two tool-tier packages expose {command}")]
+    Conflict { command: String },
+    /// Files the extension would carry that something else has: the image,
+    /// or another package of the same generation. One entry per pair.
+    #[error("{}", overlap_summary(.0))]
+    Overlap(Vec<generation::Overlap>),
     /// Packages whose scriptlets nx can't translate.
     #[error("{}", refusal_summary(.0))]
     Scriptlets(Vec<generation::Refusal>),
@@ -89,6 +96,13 @@ fn refusal_summary(r: &[generation::Refusal]) -> String {
         "scriptlets nx doesn't run or translate: {}",
         names.join(", ")
     )
+}
+
+fn overlap_summary(o: &[generation::Overlap]) -> String {
+    o.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

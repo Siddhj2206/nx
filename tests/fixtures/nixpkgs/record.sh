@@ -9,6 +9,9 @@
 #                                   hello, as `nix eval` answers it
 #   narinfo/<hash>.narinfo          cache.nixos.org's narinfo for every
 #                                   path in hello's closure
+#   path-info.json                  ripgrep's closure as nix path-info
+#                                   --json --json-format 1 --recursive
+#                                   answers it (nx info's size)
 # Runs in the nixos/nix image, so the host's Nix store is untouched.
 #   tests/fixtures/nixpkgs/record.sh
 set -euo pipefail
@@ -43,6 +46,10 @@ in {
     outputs = map (o: { name = o; path = p.${o}.outPath; }) (p.meta.outputsToInstall or [ "out" ]);
   };
 }' >eval.json
+
+# Fetched from the cache, so its closure is in the container's store.
+rg=$(nix-build --no-out-link "$nixexprs" -A ripgrep 2>/dev/null)
+nix --extra-experimental-features nix-command path-info --json --json-format 1 --recursive "$rg" >path-info.json
 
 mkdir -p narinfo
 mapfile -t queue < <(jq -r '.hello.outputs[].path' eval.json)

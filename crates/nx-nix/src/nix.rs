@@ -124,6 +124,42 @@ pub fn add_roots(nix: &dyn Nix, paths: &[String], link: &std::path::Path) -> Res
     nix.run(&args, &mut |_| {}).map(|_| ())
 }
 
+/// How big `paths` are in the store: their own NAR size, and their closure's
+/// (every path they reference, recursively): path count and NAR size. Reads
+/// the local store only (`nix path-info`), so it needs the paths realised.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Size {
+    pub own: u64,
+    pub closure_paths: usize,
+    pub closure: u64,
+}
+
+pub fn size(nix: &dyn Nix, paths: &[String]) -> Result<Size> {
+    let mut args: Vec<String> = ["path-info", "--json", "--json-format", "1", "--recursive"]
+        .map(String::from)
+        .to_vec();
+    args.extend(paths.iter().cloned());
+    let out = nix.run(&args, &mut |_| {})?;
+    size_from(&out, paths)
+}
+
+/// [`size`] from `nix path-info --json --json-format 1 --recursive`: an
+/// object keyed by store path (format 1).
+fn size_from(json: &str, paths: &[String]) -> Result<Size> {
+    let all: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json)
+        .map_err(|e| Error::Invalid(format!("reading nix path-info: {e}")))?;
+    let nar = |v: &serde_json::Value| {
+        v.get("narSize")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    Ok(Size {
+        own: paths.iter().filter_map(|p| all.get(p)).map(nar).sum(),
+        closure_paths: all.len(),
+        closure: all.values().map(nar).sum(),
+    })
+}
+
 /// `nix store gc`: deletes every store path no root holds. Returns Nix's
 /// summary line ("1234 store paths deleted, 1.2 GiB freed"), which Nix
 /// 2.35 prints on stdout.
@@ -138,6 +174,26 @@ pub fn collect_garbage(nix: &dyn Nix) -> Result<String> {
         last = crate::strip_ansi(line.trim());
     }
     Ok(last)
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn sums_a_recorded_closure() -> Result<()> {
+        let json = include_str!("../../../tests/fixtures/nixpkgs/path-info.json");
+        let rg = "/nix/store/whbrk657qmih065xal60m4khwf6cb9pj-ripgrep-15.2.0".to_owned();
+        assert_eq!(
+            size_from(json, &[rg])?,
+            Size {
+                own: 7_040_576,
+                closure_paths: 8,
+                closure: 58_410_560,
+            }
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

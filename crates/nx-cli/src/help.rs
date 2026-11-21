@@ -5,7 +5,7 @@
 use clap::CommandFactory;
 
 use crate::Cli;
-use crate::ui::{Stream, pad};
+use crate::ui::{Problem, Stream, pad};
 
 const TAGLINE: &str = "· Fedora RPMs on the image's /usr, sealed nixpkgs tools beside it";
 const GROUPS: [&str; 3] = ["Packages", "Maintenance", "System"];
@@ -76,7 +76,7 @@ pub fn main(s: &mut Stream) {
     }
     s.raw(format_args!(
         "\n  {}\n\n",
-        st.dim("nx <command> --help for one command; nx --version for the version.")
+        st.dim("nx <command> --help for one command; -v shows every step; nx --version for the version.")
     ));
 }
 
@@ -170,10 +170,10 @@ pub fn subcommand_from_args(args: impl Iterator<Item = String>) -> Option<String
     args.into_iter().find(|a| cli.find_subcommand(a).is_some())
 }
 
-/// Splits clap's rendered error into nx's message and its tips: drops the
-/// `error: ` prefix, the usage block and clap's own "for more information"
-/// line, keeps `tip:` lines such as "a similar subcommand exists".
-pub fn reword(rendered: &str) -> (String, Vec<String>) {
+/// clap's rendered error as nx's problem: drops the `error: ` prefix, the
+/// usage block and clap's own "for more information" line, and turns
+/// "a similar subcommand exists: 'add'" into "did you mean nx add?".
+pub fn reword(rendered: &str) -> Problem {
     let mut lines = rendered.lines().map(str::trim).filter(|l| !l.is_empty());
     let message = lines
         .next()
@@ -181,12 +181,27 @@ pub fn reword(rendered: &str) -> (String, Vec<String>) {
         .unwrap_or("invalid arguments")
         .replace('\'', "")
         .replace("unrecognized subcommand", "unknown command:");
-    let tips = lines
+    let mut problem = Problem::new(message);
+    let mut suggested = false;
+    for tip in lines
         .filter_map(|l| l.strip_prefix("tip: "))
         .filter(|l| !l.starts_with("to pass"))
         .map(|l| l.replace('\'', ""))
-        .collect();
-    (message, tips)
+    {
+        if let Some(name) = tip.strip_prefix("a similar subcommand exists: ") {
+            problem = problem.reason(format!("did you mean nx {name}?"));
+            suggested = true;
+        } else if let Some(arg) = tip.strip_prefix("a similar argument exists: ") {
+            problem = problem.reason(format!("did you mean {arg}?"));
+            suggested = true;
+        } else {
+            problem = problem.reason(tip);
+        }
+    }
+    if !suggested {
+        problem = problem.fix("Every command", "nx help");
+    }
+    problem
 }
 
 /// clap's "the following required arguments were not provided" as nx
@@ -302,9 +317,19 @@ mod tests {
             .err()
             .map(|e| e.render().to_string())
             .unwrap_or_default();
-        let (message, tips) = reword(&err);
-        assert_eq!(message, "unknown command: statsu");
-        assert_eq!(tips, vec!["a similar subcommand exists: status"]);
+        assert_eq!(
+            reword(&err),
+            Problem::new("unknown command: statsu").reason("did you mean nx status?")
+        );
+        let err = Cli::command()
+            .try_get_matches_from(["nx", "frobnicate"])
+            .err()
+            .map(|e| e.render().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            reword(&err),
+            Problem::new("unknown command: frobnicate").fix("Every command", "nx help")
+        );
     }
 
     #[test]

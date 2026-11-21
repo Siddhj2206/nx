@@ -73,11 +73,19 @@ impl Group {
     }
 }
 
-pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, state: &State) -> Result<()> {
+pub fn run(ui: &mut Ui, source: &dyn DeploymentSource, state: &State, all: bool) -> Result<()> {
     // Off a bootc system there is nothing to group by.
     let deployments = source.deployments().ok();
     let groups = groups(ui, state, deployments.as_ref())?;
-    render(&mut ui.out, &groups);
+    // Relative times (rule 6); `-v` gives the exact ones.
+    let verbose = ui.verbose();
+    render(&mut ui.out, &groups, all, &|secs| {
+        if verbose {
+            ui::date(secs)
+        } else {
+            ui::ago(secs)
+        }
+    });
     Ok(())
 }
 
@@ -203,7 +211,7 @@ fn image_detail(version: Option<&str>, digest: Option<&str>) -> String {
 }
 
 /// Each image under its heading, newest generation first, like a log.
-fn render(out: &mut Stream, groups: &[Group]) {
+fn render(out: &mut Stream, groups: &[Group], all: bool, when: &dyn Fn(u64) -> String) {
     let style = out.style;
     if groups.is_empty() {
         out.line(style.dim("No generations yet · nx add <name> makes the first"));
@@ -216,30 +224,47 @@ fn render(out: &mut Stream, groups: &[Group]) {
         }
         s
     };
-    let width = groups
-        .iter()
-        .flat_map(|g| &g.rows)
-        .map(|r| size(r).chars().count())
-        .max()
-        .unwrap_or(0)
-        + 2;
+    // The booted image's generations (or, off bootc, the only group) are
+    // shown; the others' only with --all.
+    let shown = |g: &Group| all || matches!(g.image, None | Some(Image::Booted));
+    let rows = || groups.iter().filter(|g| shown(g)).flat_map(|g| &g.rows);
+    let width = rows().map(|r| size(r).chars().count()).max().unwrap_or(0) + 2;
+    let dates: Vec<String> = rows()
+        .map(|r| r.made.map_or_else(|| "unknown".to_owned(), when))
+        .collect();
+    let date_w = dates.iter().map(|d| d.chars().count()).max().unwrap_or(0) + 2;
+    let mut dates = dates.into_iter();
+    let mut collapsed = false;
     for (i, group) in groups.iter().enumerate() {
         let indent = match group.image {
             Some(image) => {
                 if i > 0 {
                     out.blank();
                 }
+                let mut detail = group.detail.clone();
+                if !shown(group) {
+                    collapsed = true;
+                    let count = ui::plural(group.rows.len(), "generation");
+                    detail = if detail.is_empty() {
+                        count
+                    } else {
+                        format!("{detail} · {count}")
+                    };
+                }
                 out.line(format_args!(
                     "{} {}",
                     style.bold(image.title()),
-                    style.dim(&group.detail)
+                    style.dim(&detail)
                 ));
                 "  "
             }
             None => "",
         };
+        if !shown(group) {
+            continue;
+        }
         for r in group.rows.iter().rev() {
-            let date = r.made.map_or_else(|| "unknown".to_owned(), ui::date);
+            let date = dates.next().unwrap_or_default();
             let mut change: Vec<String> = r
                 .added
                 .iter()
@@ -262,14 +287,17 @@ fn render(out: &mut Stream, groups: &[Group]) {
             out.line(format_args!(
                 "{indent}{}{}{}{change}{mark}",
                 ui::pad(&style.bold(&r.number.to_string()), 6),
-                ui::pad(&style.dim(&date), 18),
+                ui::pad(&style.dim(&date), date_w),
                 ui::pad(&style.dim(&size(r)), width),
             ));
         }
     }
+    if collapsed {
+        out.blank();
+        out.line(style.dim("nx generations --all lists the other images' generations"));
+    }
 }
 
-/// The first few changes, then how many more.
 fn summarize(change: &[String]) -> String {
     const SHOWN: usize = 4;
     let mut text = change[..change.len().min(SHOWN)].join(" ");
@@ -359,10 +387,10 @@ mod tests {
         }
     }
 
-    fn text(groups: &[Group]) -> String {
+    fn text(groups: &[Group], all: bool) -> String {
         let buf = SharedBuf::default();
         let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
-        render(&mut ui.out, groups);
+        render(&mut ui.out, groups, all, &|_| "2 h ago".to_owned());
         buf.text()
     }
 
@@ -398,19 +426,27 @@ mod tests {
         let mut ui = Ui::plain(SharedBuf::default(), SharedBuf::default());
         let mut groups = groups(&mut ui, &state, Some(&deployments))?;
         pin_dates(&mut groups);
-        let date = ui::date(MADE);
         assert_eq!(
-            text(&groups),
-            format!(
-                "  Booted image 45.20261118 · sha256:aaaaaaaaaaaa\n\
-                 \x20   4     {date}  1 host · 1 tool  ↑ripgrep  current\n\
-                 \x20   3     {date}  1 host · 1 tool  from generation 2\n\
-                 \n\
-                 \x20 Rollback image 45.20261117 · sha256:bbbbbbbbbbbb\n\
-                 \x20   5     {date}  1 host · 1 tool  ↑ripgrep\n\
-                 \x20   2     {date}  1 host · 1 tool  +ripgrep\n\
-                 \x20   1     {date}  1 host           +wayland\n"
-            )
+            text(&groups, true),
+            "  Booted image 45.20261118 · sha256:aaaaaaaaaaaa\n\
+             \x20   4     2 h ago  1 host · 1 tool  ↑ripgrep  current\n\
+             \x20   3     2 h ago  1 host · 1 tool  from generation 2\n\
+             \n\
+             \x20 Rollback image 45.20261117 · sha256:bbbbbbbbbbbb\n\
+             \x20   5     2 h ago  1 host · 1 tool  ↑ripgrep\n\
+             \x20   2     2 h ago  1 host · 1 tool  +ripgrep\n\
+             \x20   1     2 h ago  1 host           +wayland\n"
+        );
+        // Without --all, the other images are one line each.
+        assert_eq!(
+            text(&groups, false),
+            "  Booted image 45.20261118 · sha256:aaaaaaaaaaaa\n\
+             \x20   4     2 h ago  1 host · 1 tool  ↑ripgrep  current\n\
+             \x20   3     2 h ago  1 host · 1 tool  from generation 2\n\
+             \n\
+             \x20 Rollback image 45.20261117 · sha256:bbbbbbbbbbbb · 3 generations\n\
+             \n\
+             \x20 nx generations --all lists the other images' generations\n"
         );
         Ok(())
     }
@@ -426,17 +462,14 @@ mod tests {
         let mut ui = Ui::plain(SharedBuf::default(), SharedBuf::default());
         let mut groups = groups(&mut ui, &state, None)?;
         pin_dates(&mut groups);
-        let date = ui::date(MADE);
         assert_eq!(
-            text(&groups),
-            format!(
-                "  3     {date}  1 host  -libxkbcommon  current\n\
-                 \x20 2     {date}  2 host  +libxkbcommon\n\
-                 \x20 1     {date}  1 host  +wayland\n"
-            )
+            text(&groups, false),
+            "  3     2 h ago  1 host  -libxkbcommon  current\n\
+             \x20 2     2 h ago  2 host  +libxkbcommon\n\
+             \x20 1     2 h ago  1 host  +wayland\n"
         );
         assert_eq!(
-            text(&[]),
+            text(&[], false),
             "  No generations yet · nx add <name> makes the first\n"
         );
         Ok(())

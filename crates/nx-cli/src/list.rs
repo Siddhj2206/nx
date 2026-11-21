@@ -17,7 +17,7 @@ pub fn run(ui: &mut Ui) -> Result<()> {
 /// manifest asks for that the image provides, then the tool tier with the
 /// commands each package exposes.
 fn render(out: &mut Stream, current: Option<&Generation>) {
-    let style = out.style;
+    let (style, verbose) = (out.style, out.verbose);
     let Some(g) = current.filter(|g| !g.manifest.is_empty()) else {
         out.line(style.dim("Nothing added yet · nx add <name> adds a package"));
         return;
@@ -30,80 +30,102 @@ fn render(out: &mut Stream, current: Option<&Generation>) {
         .filter(|s| !g.lock.host.iter().any(|p| p.requested.contains(s)))
         .collect();
     let tools: &[nx_core::ToolPackage] = g.lock.tool.as_ref().map_or(&[], |t| &t.packages);
-    let width = g
-        .lock
-        .host
-        .iter()
-        .map(|p| p.name.len())
-        .chain(in_image.iter().map(|s| s.len()))
-        .chain(tools.iter().map(|p| p.attr.len()))
-        .max()
-        .unwrap_or(0)
-        + 2;
-    // The version column is as wide as its longest, so notes line up.
-    let versions = g
-        .lock
-        .host
-        .iter()
-        .map(|p| p.evr().len())
-        .chain(tools.iter().map(|p| p.version.len()))
-        .max()
-        .unwrap_or(0)
-        + 2;
-    // A row without a note gets no trailing padding.
-    let version = |v: &str, note: &str| {
-        if note.is_empty() {
-            style.dim(v)
-        } else {
-            ui::pad(&style.dim(v), versions)
-        }
+
+    // Rows of three columns: name, version, note. A dependency is counted
+    // on its entry's row; -v lists it under the entry.
+    let mut host: Vec<[String; 3]> = Vec::new();
+    let for_entry = |entry: &str| -> Vec<&LockedPackage> {
+        deps.iter()
+            .copied()
+            .filter(|p| p.requested.first().map(String::as_str) == Some(entry))
+            .collect()
     };
-    let mut row = |p: &LockedPackage, note: String| {
-        out.line(format_args!(
-            "{}{}{note}",
-            ui::pad(&style.bold(&p.name), width),
-            version(p.evr(), &note)
-        ));
-    };
+    let mut shown: Vec<&str> = Vec::new();
     for p in &direct {
-        row(p, String::new());
+        let mine = for_entry(&p.name);
+        let note = match (mine.len(), verbose) {
+            (0, _) | (_, true) => String::new(),
+            (1, false) => "with 1 dependency".to_owned(),
+            (n, false) => format!("with {n} dependencies"),
+        };
+        host.push([p.name.clone(), p.evr().to_owned(), note]);
+        if verbose {
+            for d in &mine {
+                host.push([format!("  {}", d.name), d.evr().to_owned(), String::new()]);
+            }
+        }
+        shown.extend(mine.iter().map(|d| d.name.as_str()));
     }
-    for p in &deps {
-        row(p, style.dim(&format!("· for {}", p.requested.join(", "))));
+    // What an entry that names a provide or file pulled in.
+    for p in deps.iter().filter(|p| !shown.contains(&p.name.as_str())) {
+        host.push([
+            p.name.clone(),
+            p.evr().to_owned(),
+            format!("for {}", p.requested.join(", ")),
+        ]);
     }
     for spec in &in_image {
-        out.line(format_args!(
-            "{}{}",
-            ui::pad(&style.bold(spec), width),
-            ui::in_image(style)
-        ));
+        host.push([(*spec).clone(), String::new(), "in the image".to_owned()]);
     }
-    for p in tools {
-        let names: Vec<&str> = p.bins.iter().map(|b| b.name.as_str()).collect();
-        let runs = match names.as_slice() {
-            [] => "· nixpkgs, no commands exposed".to_owned(),
-            [one] if *one == p.attr => "· nixpkgs".to_owned(),
-            _ => format!("· nixpkgs · {}", names.join(" ")),
-        };
-        out.line(format_args!(
-            "{}{}{}",
-            ui::pad(&style.bold(&p.attr), width),
-            version(&p.version, &runs),
-            style.dim(&runs)
-        ));
+    let tool_rows: Vec<[String; 3]> = tools
+        .iter()
+        .map(|p| {
+            let names: Vec<&str> = p.bins.iter().map(|b| b.name.as_str()).collect();
+            let runs = match names.as_slice() {
+                [] => "no commands exposed".to_owned(),
+                [one] if *one == p.attr => String::new(),
+                _ => names.join(" "),
+            };
+            [p.attr.clone(), p.version.clone(), runs]
+        })
+        .collect();
+
+    // One set of columns for both sections.
+    let all = || host.iter().chain(&tool_rows);
+    let name_w = all().map(|r| r[0].chars().count()).max().unwrap_or(0);
+    let version_w = all().map(|r| r[1].chars().count()).max().unwrap_or(0);
+    let section = |out: &mut Stream, title: &str, detail: &str, rows: &[[String; 3]]| {
+        if rows.is_empty() {
+            return;
+        }
+        out.line(format_args!("{} {}", style.bold(title), style.dim(detail)));
+        for [name, version, note] in rows {
+            let mut line = format!("  {}", ui::pad(name, name_w));
+            if !version.is_empty() || !note.is_empty() {
+                line.push_str("  ");
+            }
+            if note.is_empty() {
+                line.push_str(&style.dim(version));
+            } else if note == "in the image" {
+                line.push_str(&ui::pad("", version_w));
+                line.push_str("  ");
+                line.push_str(&ui::in_image(style));
+            } else {
+                line.push_str(&style.dim(&ui::pad(version, version_w)));
+                line.push_str("  ");
+                line.push_str(&style.dim(note));
+            }
+            out.line(line.trim_end());
+        }
+        out.blank();
+    };
+    section(out, "Host", "· Fedora RPMs on the image's /usr", &host);
+    let release = g
+        .lock
+        .tool
+        .as_ref()
+        .map(|t| format!("· nixpkgs {}", crate::tool::pinned(t).version()))
+        .unwrap_or_default();
+    section(out, "Tools", &release, &tool_rows);
+
+    let mut foot = vec![ui::plural(g.lock.host.len(), "host package")];
+    if !tools.is_empty() {
+        foot.push(ui::plural(tools.len(), "tool"));
     }
-    out.blank();
-    let mut foot = format!("{} · ", ui::plural(g.lock.host.len(), "host package"));
-    if let Some(t) = g.lock.tool.as_ref().filter(|t| !t.packages.is_empty()) {
-        let release = crate::tool::pinned(t);
-        foot.push_str(&format!(
-            "{} at nixpkgs {} · ",
-            ui::plural(t.packages.len(), "tool"),
-            release.version()
-        ));
+    if verbose {
+        foot.push(format!("generation {}", g.number));
     }
-    foot.push_str(&format!("generation {}", g.number));
-    out.line(style.dim(&foot));
+    out.line(style.dim(&foot.join(" · ")));
 }
 
 #[cfg(test)]
@@ -122,9 +144,10 @@ mod tests {
         }
     }
 
-    fn text(g: Option<&Generation>) -> String {
+    fn text(g: Option<&Generation>, verbose: bool) -> String {
         let buf = SharedBuf::default();
         let mut ui = Ui::plain(buf.clone(), SharedBuf::default());
+        ui.set_verbose(verbose);
         render(&mut ui.out, g);
         buf.text()
     }
@@ -147,11 +170,20 @@ mod tests {
             activation: Default::default(),
         };
         assert_eq!(
-            text(Some(&g)),
-            "  wayland-devel  1.24.0-1.fc45\n\
-             \x20 libffi-devel   3.5.1-2.fc45   · for wayland-devel\n\
-             \x20 libxml2        2.14.6-1.fc45  · for wayland-devel\n\
-             \x20 glibc          ✓ in the image\n\
+            text(Some(&g), false),
+            "  Host · Fedora RPMs on the image's /usr\n\
+             \x20   wayland-devel  1.24.0-1.fc45  with 2 dependencies\n\
+             \x20   glibc                         ✓ in the image\n\
+             \n\
+             \x20 3 host packages\n"
+        );
+        assert_eq!(
+            text(Some(&g), true),
+            "  Host · Fedora RPMs on the image's /usr\n\
+             \x20   wayland-devel   1.24.0-1.fc45\n\
+             \x20     libffi-devel  3.5.1-2.fc45\n\
+             \x20     libxml2       2.14.6-1.fc45\n\
+             \x20   glibc                          ✓ in the image\n\
              \n\
              \x20 3 host packages · generation 2\n"
         );
@@ -194,18 +226,19 @@ mod tests {
             activation: Default::default(),
         };
         assert_eq!(
-            text(Some(&g)),
-            "  ripgrep  1.0    · nixpkgs · rg\n\
-             \x20 jq       1.7.1  · nixpkgs\n\
+            text(Some(&g), false),
+            "  Tools · nixpkgs 26.11pre1122334\n\
+             \x20   ripgrep  1.0    rg\n\
+             \x20   jq       1.7.1\n\
              \n\
-             \x20 0 host packages · 2 tools at nixpkgs 26.11pre1122334 · generation 3\n"
+             \x20 0 host packages · 2 tools\n"
         );
     }
 
     #[test]
     fn says_when_empty() {
         assert_eq!(
-            text(None),
+            text(None, false),
             "  Nothing added yet · nx add <name> adds a package\n"
         );
     }
